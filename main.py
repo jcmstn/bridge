@@ -13,53 +13,24 @@ from pymeasure.display.windows import ManagedWindow
 from pymeasure.experiment import Procedure, Results
 from pymeasure.experiment import IntegerParameter, FloatParameter, Parameter
 from IVmeasurements import IV2450Procedure
-from IVgmeasurements import IVgProcedure
-
-class RandomProcedure(Procedure):
-
-    iterations = IntegerParameter('Loop Iterations', default=100)
-    delay = FloatParameter('Delay Time', units='s', default=0.2)
-    seed = Parameter('Random Seed', default='12345')
-
-    time = datetime.now()
-
-    DATA_COLUMNS = ['Iteration', 'Random Number']
-
-    def startup(self):
-        log.info("Setting the seed of the random number generator")
-        random.seed(self.seed)
-
-    def execute(self):
-        log.info("Starting the loop of %d iterations" % self.iterations)
-        for i in range(self.iterations):
-            data = {
-                'Iteration': i,
-                'Random Number': random.random()
-            }
-            self.emit('results', data)
-            log.debug("Emitting results: %s" % data)
-            self.emit('progress', 100 * i / self.iterations)
-            sleep(self.delay)
-            if self.should_stop():
-                log.warning("Caught the stop flag in the procedure")
-                break
+from IVgmeasurements import SVMC18_SV16_Procedure, SVMV18_SC16_Procedure
 
 
 class MainWindow(ManagedWindow):
 
     def __init__(self):
         super().__init__(
-            procedure_class=IVgProcedure,
-            inputs=['data_points', 'averages', 'max_vg', 'min_vg'],
-            displays=['data_points', 'averages', 'max_vg', 'min_vg'],
+            procedure_class=SVMC18_SV16_Procedure,
+            inputs=['data_points', 'averages', 'max_vg', 'min_vg', 'voltage_bias'],
+            displays=['data_points', 'averages', 'max_vg', 'min_vg', 'voltage_bias'],
             x_axis='Gate Voltage (V)',
-            y_axis='Voltage (V)',
+            y_axis='Current (A)',
             sequencer=True,
             # sequence_file='path/to/file'
         )
         self.setWindowTitle('GUI Example')
 
-        self.filename = r'V_vs_Vg_{Current bias:e}A_{Date}'
+        self.filename = r'I_vs_Vg'
         self.store_measurement = True
         self.file_input.extensions = ['txt', 'csv']  # First is default
         self.file_input.filename_fixed = False
