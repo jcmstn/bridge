@@ -1,0 +1,9 @@
+#Procedure: <IVgmeasurements.IVgProcedure>
+#Parameters:
+#	Averages: 10
+#	Current bias: 1e-06 A
+#	Data points: 20
+#	Maximum Vg: 10 V
+#	Minimum Vg: -10 V
+#Data:
+Gate Voltage (V),Voltage (V),Voltage Std (V)
