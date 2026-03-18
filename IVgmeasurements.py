@@ -10,7 +10,7 @@ import numpy as np
 from datetime import datetime
 
 
-class SVMV18_SC16_Procedure(Procedure):
+class SVMC18_SC16_Procedure(Procedure):
     '''
     Procedure with two Keithley 2450. One is used to supply gate voltage and measure voltage across the channel. The second one is used to apply bias current.
     '''
@@ -25,7 +25,7 @@ class SVMV18_SC16_Procedure(Procedure):
     # Current bias
     current_bias = FloatParameter('Current bias', units='A', default=1e-6)
 
-    DATA_COLUMNS = ['Gate Voltage (V)', 'Voltage (V)', 'Voltage Std (V)']
+    DATA_COLUMNS = ['Gate Voltage (V)', 'Current (A)', 'Current Std (A)']
 
     def startup(self):
         log.info("Connecting and configuring the instruments")
@@ -35,7 +35,7 @@ class SVMV18_SC16_Procedure(Procedure):
         self.gate_measure.reset()
         self.gate_measure.use_front_terminals()
         self.gate_measure.apply_voltage(voltage_range=10, compliance_current=100e-6)
-        self.gate_measure.measure_voltage(nplc=1, voltage=21, auto_range=True)
+        self.gate_measure.measure_current(nplc=1, current=1e-3, auto_range=True)
         sleep(0.1)
         self.gate_measure.stop_buffer()
         self.gate_measure.disable_buffer()
@@ -65,7 +65,7 @@ class SVMV18_SC16_Procedure(Procedure):
 
         log.info("Starting gate sweep with bias current measurement")
         for voltage in voltages:
-            self.gate_measure.config_buffer(SVMV18_SC16_Procedure.averages.value)
+            self.gate_measure.config_buffer(SVMC18_SC16_Procedure.averages.value)
 
             log.info(f"Setting gate voltage to {voltage} V with bias current {self.current_bias} A")
             self.gate_measure.source_voltage = voltage
@@ -76,8 +76,8 @@ class SVMV18_SC16_Procedure(Procedure):
 
             data = {
                 'Gate Voltage (V)': voltage,
-                'Voltage (V)': self.gate_measure.mean_voltage,
-                'Voltage Std (V)': self.gate_measure.std_voltage
+                'Current (A)': self.gate_measure.mean_current,
+                'Current Std (A)': self.gate_measure.std_current
             }
 
             self.emit('results', data)
@@ -94,7 +94,7 @@ class SVMV18_SC16_Procedure(Procedure):
 
 class SVMC18_SV16_Procedure(Procedure):
     '''
-
+    Two 2450 in 2400 mode. GPIB::18 is used as voltage bias source and measuring current. GPIB::16 is used as a gate voltage source.
     '''
 
     data_points = IntegerParameter('Data points', default=20)
@@ -150,7 +150,7 @@ class SVMC18_SV16_Procedure(Procedure):
         for voltage in voltages:
             self.bias_measure.config_buffer(SVMV18_SC16_Procedure.averages.value)
 
-            log.info(f"Setting gate voltage to {voltage} V with voltage bias {self.voltage_bias} A")
+            log.info(f"Setting gate voltage to {voltage} V with voltage bias {self.voltage_bias} V")
             self.bias_measure.source_voltage = voltage
             self.gate_source.source_voltage = self.voltage_bias
 

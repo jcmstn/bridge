@@ -8,21 +8,24 @@ from pymeasure.display.windows import ManagedWindow
 from pymeasure.experiment import Procedure, Results
 from pymeasure.experiment import IntegerParameter, FloatParameter, Parameter
 from IVmeasurements import IV2450Procedure
-from IVgmeasurements import SVMC18_SV16_Procedure, SVMV18_SC16_Procedure
+from IVgmeasurements import SVMC18_SV16_Procedure, SVMC18_SC16_Procedure
 import platform
 
+print(platform.system())
 if platform.system() == "Darwin":
+    path_to_lib = '/Library/Frameworks/NI4882.framework/NI4882'
+    log.info(f"MacOS environment detected. Looking for NI4882 library in {path_to_lib}")
     import gpib_ctypes
-    gpib_ctypes.gpib.gpib._load_lib('/Library/Frameworks/NI4882.framework/NI4882')  # On MacOS, to find the NI library
+    gpib_ctypes.gpib.gpib._load_lib(path_to_lib)  # On MacOS, to find the NI library
 
 
 class MainWindow(ManagedWindow):
 
     def __init__(self):
         super().__init__(
-            procedure_class=SVMC18_SV16_Procedure,
-            inputs=['data_points', 'averages', 'max_vg', 'min_vg', 'voltage_bias'],
-            displays=['data_points', 'averages', 'max_vg', 'min_vg', 'voltage_bias'],
+            procedure_class=SVMC18_SC16_Procedure,
+            inputs=['data_points', 'averages', 'max_vg', 'min_vg', 'current_bias'],
+            displays=['data_points', 'averages', 'max_vg', 'min_vg', 'current_bias'],
             x_axis='Gate Voltage (V)',
             y_axis='Current (A)',
             sequencer=True,

@@ -1,0 +1,9 @@
+#Procedure: <IVgmeasurements.SVMC18_SV16_Procedure>
+#Parameters:
+#	Averages: 10
+#	Data points: 20
+#	Maximum Vg: 10 V
+#	Minimum Vg: -60 V
+#	Voltage bias: -0.3 V
+#Data:
+Gate Voltage (V),Current (A),Voltage Std (V)
