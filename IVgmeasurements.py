@@ -65,7 +65,7 @@ class SVMV18_SC16_Procedure(Procedure):
 
         log.info("Starting gate sweep with bias current measurement")
         for voltage in voltages:
-            self.gate_measure.config_buffer(self.averages.value)
+            self.gate_measure.config_buffer(SVMV18_SC16_Procedure.averages.value)
 
             log.info(f"Setting gate voltage to {voltage} V with bias current {self.current_bias} A")
             self.gate_measure.source_voltage = voltage

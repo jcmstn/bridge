@@ -3,17 +3,17 @@ log = logging.getLogger(__name__)
 log.addHandler(logging.NullHandler())
 
 import sys
-import tempfile
-import random
-from time import sleep
-from datetime import datetime
-from pymeasure.log import console_log
 from pymeasure.display.Qt import QtWidgets
 from pymeasure.display.windows import ManagedWindow
 from pymeasure.experiment import Procedure, Results
 from pymeasure.experiment import IntegerParameter, FloatParameter, Parameter
 from IVmeasurements import IV2450Procedure
 from IVgmeasurements import SVMC18_SV16_Procedure, SVMV18_SC16_Procedure
+import platform
+
+if platform.system() == "Darwin":
+    import gpib_ctypes
+    gpib_ctypes.gpib.gpib._load_lib('/Library/Frameworks/NI4882.framework/NI4882')  # On MacOS, to find the NI library
 
 
 class MainWindow(ManagedWindow):
