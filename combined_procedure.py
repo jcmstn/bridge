@@ -1,4 +1,3 @@
-from decimal import DefaultContext
 import logging
 log = logging.getLogger(__name__)
 log.addHandler(logging.NullHandler())
@@ -85,4 +84,9 @@ class CombinedProcedure(Procedure):
 
 
     def execute(self):
-        pass
+
+        if self.is_IV:
+            # IV measurement. Check instrument availability
+            if self.use_2400:
+                self.sourcemeter = self.instruments["keithley2400"][0]
+                self.sourcemeter.enable_source()
