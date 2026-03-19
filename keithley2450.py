@@ -245,6 +245,30 @@ class Keithley2450(Keithley2450Buffer, SCPIMixin, Instrument):
         map_values=True
     )
 
+    sense_wire_mode = Instrument.control(
+        "",
+        ":SENS:RES:RSENSE %d;:SENS:VOLT:MODE %d",
+        """ Control (string) the wire configuration for measurements.
+        Can be set to '2' (2‑wire, local sense) or '4' (4‑wire, remote sense).
+        Sets both resistance mode and voltage sense mode accordingly.
+
+        When set to '2':
+            :SENS:RES:RSENSE 0   (2‑wire resistance)
+            :SENS:VOLT:MODE 0    (local sense for voltage)
+
+        When set to '4':
+            :SENS:RES:RSENSE 1   (4‑wire resistance)
+            :SENS:VOLT:MODE 1    (remote sense for voltage)
+        """,
+        validator=strict_discrete_set,
+        values={
+            "2": (0, 0),
+            "4": (1, 1),
+        },
+        map_values=True,
+        get_process=lambda vs: "2" if vs[0] == 0 else "4",
+    )
+
     ###########
     # Filters #
     ###########
