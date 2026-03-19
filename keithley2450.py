@@ -603,7 +603,9 @@ class Keithley2450(Keithley2450Buffer, SCPIMixin, Instrument):  # Updated inheri
         :param points: Buffer points.
         :param sense_func: 'VOLT', 'CURR', or 'RES'.
         """
-        self.measure_{sense_func.lower()}(**measure_kwargs)
+        measure_method = getattr(self, f"measure_{sense_func.lower()}")
+        measure_method(**measure_kwargs)
+
         self.config_buffer(points)
         self.enable_statistics()
         self.start_buffer()
