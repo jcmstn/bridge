@@ -74,6 +74,7 @@ class GateSweep(Procedure):
         else: self.channel.apply_current(compliance_voltage=1)
 
         self.channel.measure_current(current=1e-3, auto_range=True, nplc=1)
+        self.channel.sense_wire_mode = "2"
         sleep(0.1)
         self.channel.stop_buffer()
         self.channel.disable_buffer()
