@@ -41,7 +41,7 @@ class MainWindow(ManagedWindow):
             x_axis='Gate Voltage (V)',
             y_axis='Current (A)',
             sequencer=True,
-            # sequence_file='path/to/file'
+            sequence_file='./sequences/gate_sweep_sequence.txt'
         )
         self.setWindowTitle('Gate Sweep Program')
 
