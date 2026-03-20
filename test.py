@@ -1,119 +1,40 @@
-#!/usr/bin/env python3
-"""
-GPIB Self-Test Script for macOS with NI-488.2 and pyvisa-py.
-Tries all NI library candidates until gpib_ctypes works, then lists resources.
-"""
+import logging
+import pyvisa
+from pymeasure.instruments.keithley import Keithley2400
+from keithley2450 import Keithley2450
 
-import sys
-import platform
-from pathlib import Path
+log = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
-try:
-    from gpib_ctypes.gpib import gpib
-    import pyvisa
-except ImportError as e:
-    print(f"Missing dependency: {e}")
-    print("Install: pip install gpib-ctypes pyvisa-py")
-    sys.exit(1)
+# GPIB addresses (update to match your NI‑MAX / Keysight‑IO)
+GP2450_1 = "GPIB0::16::INSTR"  # 2450 for channel
+GP2450_2 = "GPIB0::18::INSTR"  # 2450 for gate (if not using 2400)
+GP2400   = "GPIB0::26::INSTR"  # 2400 for gate
 
-def is_macos():
-    return platform.system() == "Darwin"
+rm = pyvisa.ResourceManager()
 
-def gpib_library_candidates():
-    """All possible NI-488.2 library locations."""
-    base_paths = [
-        Path("/Library/Frameworks/NI4882.framework"),
-        Path("/Library/Frameworks/NI4882.framework/Versions/Current"),
-        Path("/Library/Frameworks/NI4882.framework/Versions/Current/Libraries"),
-        Path("/Library/Frameworks/NIGPIB.framework"),
-        Path("/Library/Frameworks/NI4882.framework/Libraries"),
-    ]
-
-    candidates = []
-    for base in base_paths:
-        if base.exists():
-            # Bare ni4882, dylibs, common names
-            for name in ["ni4882", "NIGPIB", "libni4882.dylib", "ni4882.dylib"]:
-                lib = base / name
-                if lib.exists():
-                    candidates.append(lib)
-
-    # Also search recursively in NI4882
-    ni4882 = Path("/Library/Frameworks/NI4882.framework")
-    if ni4882.exists():
-        for lib in ni4882.rglob("*ni4882*"):
-            if lib.is_file() and (lib.suffix in {".dylib", ""} or "ni4882" in lib.name):
-                candidates.append(lib)
-
-    return list(set(candidates))  # Dedupe
-
-def test_gpib_lib(lib_path):
-    """Try loading lib and basic gpib_ctypes test."""
+def test_instrument(name, address, instrument_class):
     try:
-        gpib._load_lib(str(lib_path))
-        ud = gpib.find(0)  # Test board 0
-        if ud >= 0:
-            status = gpib.status(ud)
-            return True, f"✓ Works! handle={ud}, status=0x{status:02x}"
-        return False, "Board find failed"
-    except Exception:
-        return False, "Load/test failed"
-
-def main():
-    print("=== GPIB Self-Test (pyvisa-py + NI-488.2) ===")
-
-    if not is_macos():
-        print("Not macOS—skipping.")
-        sys.exit(1)
-
-    candidates = gpib_library_candidates()
-    if not candidates:
-        print("✗ No NI GPIB libraries found. Install NI-488.2.")
-        sys.exit(1)
-
-    print(f"Found {len(candidates)} candidate libraries:")
-    for i, lib in enumerate(candidates, 1):
-        print(f"  {i}. {lib}")
-
-    # Step 1: Try each until one works
-    working_lib = None
-    for lib in candidates:
-        print(f"\nTrying {lib}...")
-        ok, msg = test_gpib_lib(lib)
-        print(f"  {msg}")
-        if ok:
-            working_lib = lib
-            break
-
-    if not working_lib:
-        print("\n✗ No working NI library found.")
-        sys.exit(1)
-
-    print(f"\n🎯 Using: {working_lib}")
-
-    # Step 2: Full gpib_ctypes test with working lib
-    ud = gpib.find(0)
-    listeners = [pad for pad in range(30) if gpib.listener(ud, pad)]
-    print(f"Board 0 status: 0x{gpib.status(ud):02x}")
-    print(f"GPIB listeners: {listeners}")
-
-    # Step 3: pyvisa GPIB resources
-    try:
-        rm = pyvisa.ResourceManager('@py')
-        all_resources = rm.list_resources()
-        gpib_resources = [r for r in all_resources if 'GPIB' in r.upper()]
-
-        print("\nAll resources:", all_resources)
-        print("GPIB resources:", gpib_resources)
-
-        status = "✓ GPIB ready!" if gpib_resources else "ℹ No devices (normal)"
-        print(status)
-
+        instr = instrument_class(address)
+        idn = instr.adapter.connection.query("*IDN?")
+        log.info(f"🟢 {name} @ {address}: OK, IDN = {idn.strip()}")
+        return instr
     except Exception as e:
-        print(f"✗ pyvisa failed: {e}")
-        sys.exit(1)
+        log.error(f"🔴 {name} @ {address}: FAILED, error = {e!r}")
+        return None
 
-    print("\n🎉 Full stack verified!")
+print("📡 Keithley connection self‑test\n" + "-" * 50)
 
-if __name__ == "__main__":
-    main()
+# Try 2450‑1 (channel)
+keithley_2450_1 = test_instrument("Keithley 2450 (1)", GP2450_1, Keithley2450)
+
+# Try 2450‑2 (if present)
+keithley_2450_2 = test_instrument("Keithley 2450 (2)", GP2450_2, Keithley2450)
+
+# Try 2400 (gate source)
+keithley_2400   = test_instrument("Keithley 2400", GP2400, Keithley2400)
+
+print("\n🔧 If any instrument failed, check:")
+print("   - correct GPIB address in NI‑MAX / Keysight‑IO")
+print("   - no other program holding the resource open")
+print("   - VISA backend (32/64‑bit) matching your Python install")
