@@ -67,7 +67,7 @@ class GateSweep(Procedure):
         self.gate.disable_buffer()
         log.info("Gate sweep configured")
 
-        self.channel.reset()
+        #self.channel.reset()
         self.channel.use_front_terminals()
 
         if self.voltage_bias: self.channel.apply_voltage(compliance_current=1e-3)
