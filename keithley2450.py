@@ -31,13 +31,12 @@ import numpy as np
 from pymeasure.instruments import Instrument, SCPIMixin
 from pymeasure.instruments.validators import truncated_range, strict_discrete_set
 from keithley2450Buffer import Keithley2450Buffer
-from pymeasure.instruments.keithley.buffer import KeithleyBuffer
 
 log = logging.getLogger(__name__)
 log.addHandler(logging.NullHandler())
 
 
-class Keithley2450(KeithleyBuffer, SCPIMixin, Instrument):
+class Keithley2450(Keithley2450Buffer, SCPIMixin, Instrument):
     """ Represents the Keithley 2450 SourceMeter with native 2450 SCPI support
     (no 2400 emulation required). Includes enhanced buffer statistics via defbuffer1.
 

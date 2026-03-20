@@ -92,7 +92,7 @@ class GateSweep(Procedure):
         )
 
         for voltage in gate_voltages:
-            #self.channel.config_buffer(self.buffer_averages)
+            self.channel.config_buffer(self.buffer_averages)
 
             log.info(f"Gate voltage set to {voltage} V")
             self.gate.source_voltage = voltage
@@ -101,6 +101,7 @@ class GateSweep(Procedure):
             # else: self.channel.source_current = self.bias
             self.channel.source_voltage = self.bias
 
+            # after this problem starts
             self.channel.start_buffer()
             self.channel.wait_for_buffer()
             self.channel.disable_buffer()
