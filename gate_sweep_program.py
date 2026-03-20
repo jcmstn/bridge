@@ -1,6 +1,35 @@
+import os
 import logging
+
+# === LOGGING SETUP (overwrites gate_sweep.log each run) ===
+LOGFILE = "gate_sweep.log"
+
+# Clear the log file completely at startup
+if os.path.exists(LOGFILE):
+    os.remove(LOGFILE)
+
+# Root logger (captures EVERYTHING)
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.DEBUG)
+
+# Formatter for nice timestamps
+formatter = logging.Formatter(
+    "%(asctime)s [%(levelname)-8s] %(name)-20s: %(message)s",
+    datefmt="%H:%M:%S"
+)
+
+# File handler (overwrites each run)
+file_handler = logging.FileHandler(LOGFILE, mode='w')
+file_handler.setFormatter(formatter)
+root_logger.addHandler(file_handler)
+
+# Console handler (optional, keeps GUI output)
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(formatter)
+root_logger.addHandler(console_handler)
+
 log = logging.getLogger(__name__)
-log.addHandler(logging.NullHandler())
+log.info("=== LOGGING INITIALIZED ===")
 
 import sys
 from pymeasure.display.Qt import QtWidgets

@@ -19,9 +19,9 @@ class GateSweep(Procedure):
     First or only 2450 sends a bias voltage (or current) and measures the current in the same channel.
     '''
 
-    gpib_2450_1 = "GPIB0::16::INSTR"
-    gpib_2450_2 = "GPIB0::18::INSTR"
-    gpib_2400 = "GPIB0::25::INSTR"
+    GPIB_2450_1 = "GPIB0::16::INSTR"
+    GPIB_2450_2 = "GPIB0::18::INSTR"
+    GPIB_2400   = "GPIB0::25::INSTR"
 
     buffer_averages = 64
 
@@ -42,19 +42,19 @@ class GateSweep(Procedure):
 
             log.info("Connecting to 2450 and 2400")
             try:
-                self.gate = Keithley2400(self.gpib_2400)
+                self.gate = Keithley2400(self.GPIB_2400)
                 try:
-                    self.channel = Keithley2450(self.gpib_2450_1)
+                    self.channel = Keithley2450(self.GPIB_2450_1)
                 except Exception:
-                    self.channel = Keithley2450(self.gpib_2450_2)
+                    self.channel = Keithley2450(self.GPIB_2450_2)
             except Exception as e:
                log.warning(f"Failed connection to instrument: {e}")
 
         else:
             log.info("Connecting to two 2450")
             try:
-                self.gate = Keithley2450(self.gpib_2450_1)
-                self.channel = Keithley2450(self.gpib_2450_2)
+                self.gate = Keithley2450(self.GPIB_2450_1)
+                self.channel = Keithley2450(self.GPIB_2450_2)
             except Exception as e:
                 log.warning(f"Failed connection to instrument: {e}")
 
