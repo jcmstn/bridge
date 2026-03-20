@@ -19,9 +19,9 @@ class GateSweep(Procedure):
     First or only 2450 sends a bias voltage (or current) and measures the current in the same channel.
     '''
 
-    gpib_2450_1 = "GPIB::16"
-    gpib_2450_2 = "GPIB::18"
-    gpib_2400 = "GPIB::25"
+    gpib_2450_1 = "GPIB::16::INSTR"
+    gpib_2450_2 = "GPIB::18::INSTR"
+    gpib_2400 = "GPIB::25::INSTR"
 
     buffer_averages = 64
 
