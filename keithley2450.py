@@ -249,7 +249,7 @@ class Keithley2450(Keithley2450Buffer, SCPIMixin, Instrument):
     def sense_wire_mode(self):
         """ Get 2-wire ('2') or 4-wire ('4') sense mode. """
         val = self.ask(":SENS:CURR:RSENSE?").strip()
-        return "4" if val == "ON" else "2"
+        return "4" if val == "1" else "2"
 
     @sense_wire_mode.setter
     def sense_wire_mode(self, value):
