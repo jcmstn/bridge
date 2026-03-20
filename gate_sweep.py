@@ -21,7 +21,7 @@ class GateSweep(Procedure):
 
     gpib_2450_1 = "GPIB::16"
     gpib_2450_2 = "GPIB::18"
-    gpib_2400 = "GPIB::26"
+    gpib_2400 = "GPIB::25"
 
     buffer_averages = 64
 
