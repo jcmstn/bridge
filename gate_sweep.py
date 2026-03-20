@@ -114,7 +114,7 @@ class GateSweep(Procedure):
                 'Current (A)': self.channel.mean_current,
                 'Resistance': self.channel.bias / self.channel.mean_current,
                 'Current Std (A)': self.channel.std_current,
-                'Resistance Std': np.abs(self.channel.bias/(self.channel.mean_current**2)) * self.channel.std_current
+                'Resistance Std': np.abs(self.bias/(self.channel.mean_current**2)) * self.channel.std_current
             }
 
             self.emit("results", data)
