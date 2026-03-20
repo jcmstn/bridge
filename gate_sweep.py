@@ -2,8 +2,8 @@ import logging
 log = logging.getLogger(__name__)
 log.addHandler(logging.NullHandler())
 
-from pymeasure.instruments.keithley import Keithley2400, Keithley2450, Keithley2182, Keithley6221
-#from keithley2450 import Keithley2450
+from pymeasure.instruments.keithley import Keithley2400, Keithley2182, Keithley6221
+from keithley2450 import Keithley2450
 from pymeasure.instruments.kepco import KepcoBOP3612
 from pymeasure.experiment import Procedure, Results, Worker
 from pymeasure.experiment import FloatParameter, IntegerParameter, Metadata, BooleanParameter
@@ -38,25 +38,27 @@ class GateSweep(Procedure):
     DATA_COLUMNS = ["Current (A)", "Resistance", "Gate voltage (V)", "Current Std (A)", "Resistance Std"]
 
     def startup(self):
-        if self.use_2400:
+        # if self.use_2400:
 
-            log.info("Connecting to 2450 and 2400")
-            try:
-                self.gate = Keithley2400(self.GPIB_2400)
-                try:
-                    self.channel = Keithley2450(self.GPIB_2450_1)
-                except Exception:
-                    self.channel = Keithley2450(self.GPIB_2450_2)
-            except Exception as e:
-               log.warning(f"Failed connection to instrument: {e}")
+        #     log.info("Connecting to 2450 and 2400")
+        #     try:
+        #         self.gate = Keithley2400(self.GPIB_2400)
+        #         try:
+        #             self.channel = Keithley2450(self.GPIB_2450_1)
+        #         except Exception:
+        #             self.channel = Keithley2450(self.GPIB_2450_2)
+        #     except Exception as e:
+        #        log.warning(f"Failed connection to instrument: {e}")
 
-        else:
-            log.info("Connecting to two 2450")
-            try:
-                self.gate = Keithley2450(self.GPIB_2450_1)
-                self.channel = Keithley2450(self.GPIB_2450_2)
-            except Exception as e:
-                log.warning(f"Failed connection to instrument: {e}")
+        # else:
+        #     log.info("Connecting to two 2450")
+        #     try:
+        #         self.gate = Keithley2450(self.GPIB_2450_1)
+        #         self.channel = Keithley2450(self.GPIB_2450_2)
+        #     except Exception as e:
+        #         log.warning(f"Failed connection to instrument: {e}")
+        self.gate = Keithley2400(self.GPIB_2400)
+        self.channel = Keithley2450(self.GPIB_2450_2)
 
         # Configure instruments
         self.gate.reset()
