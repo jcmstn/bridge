@@ -91,6 +91,10 @@ class GateSweep(Procedure):
             num=self.data_points
         )
 
+        self.gate.enable_source()
+        self.channel.enable_source()
+        sleep(0.1)
+
         for voltage in gate_voltages:
             self.channel.config_buffer(self.buffer_averages)
 
