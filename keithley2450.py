@@ -256,7 +256,7 @@ class Keithley2450(Keithley2450Buffer, SCPIMixin, Instrument):
         """ Set 2-wire ('2') or 4-wire ('4') sense mode. """
         if value not in ("2", "4"):
             raise ValueError("sense_wire_mode must be '2' or '4'")
-        scpi_val = "ON" if value == "4" else "OFF"
+        scpi_val = "1" if value == "4" else "0"
         self.write(f":SENS:CURR:RSENSE {scpi_val}")
         self.write(f":SENS:VOLT:RSENSE {scpi_val}")
 
