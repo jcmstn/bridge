@@ -38,7 +38,7 @@ class MainWindow(ManagedWindow):
                 'bias',
                 'data_points'
             ],
-            x_axis='Gate Voltage (V)',
+            x_axis='Gate voltage (V)',
             y_axis='Current (A)',
             sequencer=True,
             sequence_file='./sequences/gate_sweep_sequence.txt'
