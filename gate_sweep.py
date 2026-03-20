@@ -67,17 +67,17 @@ class GateSweep(Procedure):
         self.gate.disable_buffer()
         log.info("Gate sweep configured")
 
-        # self.channel.reset()
-        # self.channel.use_front_terminals()
+        self.channel.reset()
+        self.channel.use_front_terminals()
 
-        # if self.voltage_bias: self.channel.apply_voltage(compliance_current=1e-3)
-        # else: self.channel.apply_current(compliance_voltage=1)
+        if self.voltage_bias: self.channel.apply_voltage(compliance_current=1e-3)
+        else: self.channel.apply_current(compliance_voltage=1)
 
-        # self.channel.measure_current(current=1e-3, auto_range=True, nplc=1)
-        # self.channel.sense_wire_mode = "2"
-        # sleep(0.1)
-        # self.channel.stop_buffer()
-        # self.channel.disable_buffer()
+        self.channel.measure_current(current=1e-3, auto_range=True, nplc=1)
+        sleep(0.1)
+        self.channel.sense_wire_mode = "2"
+        self.channel.stop_buffer()
+        self.channel.disable_buffer()
 
         log.info("Channel bias and measure configured")
 
@@ -90,7 +90,7 @@ class GateSweep(Procedure):
         )
 
         for voltage in gate_voltages:
-            #self.channel.config_buffer(self.buffer_averages)
+            self.channel.config_buffer(self.buffer_averages)
 
             log.info(f"Gate voltage set to {voltage} V")
             self.gate.source_voltage = voltage
