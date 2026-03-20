@@ -23,7 +23,7 @@ class GateSweep(Procedure):
     GPIB_2450_2 = "GPIB0::18::INSTR"
     GPIB_2400   = "GPIB0::25::INSTR"
 
-    buffer_averages = 64
+    buffer_averages = 10
 
     use_2400 = BooleanParameter("Use 2400 for gate?", default=True)
 
@@ -77,7 +77,7 @@ class GateSweep(Procedure):
 
         self.channel.measure_current(current=1e-3, auto_range=True, nplc=1)
         sleep(0.1)
-        #self.channel.sense_wire_mode = "2"
+        self.channel.sense_wire_mode = "2"
         self.channel.stop_buffer()
         self.channel.disable_buffer()
 
@@ -92,7 +92,7 @@ class GateSweep(Procedure):
         )
 
         for voltage in gate_voltages:
-            #self.channel.config_buffer(self.buffer_averages)
+            self.channel.config_buffer(self.buffer_averages)
 
             log.info(f"Gate voltage set to {voltage} V")
             self.gate.source_voltage = voltage
