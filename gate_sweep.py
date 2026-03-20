@@ -2,8 +2,8 @@ import logging
 log = logging.getLogger(__name__)
 log.addHandler(logging.NullHandler())
 
-from pymeasure.instruments.keithley import Keithley2400, Keithley2182, Keithley6221
-from keithley2450 import Keithley2450
+from pymeasure.instruments.keithley import Keithley2400, Keithley2450, Keithley2182, Keithley6221
+#from keithley2450 import Keithley2450
 from pymeasure.instruments.kepco import KepcoBOP3612
 from pymeasure.experiment import Procedure, Results, Worker
 from pymeasure.experiment import FloatParameter, IntegerParameter, Metadata, BooleanParameter
@@ -75,7 +75,7 @@ class GateSweep(Procedure):
 
         self.channel.measure_current(current=1e-3, auto_range=True, nplc=1)
         sleep(0.1)
-        self.channel.sense_wire_mode = "2"
+        #self.channel.sense_wire_mode = "2"
         self.channel.stop_buffer()
         self.channel.disable_buffer()
 
@@ -90,7 +90,7 @@ class GateSweep(Procedure):
         )
 
         for voltage in gate_voltages:
-            self.channel.config_buffer(self.buffer_averages)
+            #self.channel.config_buffer(self.buffer_averages)
 
             log.info(f"Gate voltage set to {voltage} V")
             self.gate.source_voltage = voltage
