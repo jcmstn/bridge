@@ -245,16 +245,20 @@ class Keithley2450(Keithley2450Buffer, SCPIMixin, Instrument):
         map_values=True
     )
 
-    sense_wire_mode = Instrument.control(
-        ":SENS:CURR:RSENSE?",                    # GET command
-        ":SENS:CURR:RSENSE %s;:SENS:VOLT:RSENSE %s",  # SET command
-        """ Control (string) 2-wire ('2') or 4-wire ('4') sense mode.
-        Sets remote sense for both current and voltage functions.
-        Returns current setting. """,
-        validator=strict_discrete_set,
-        values={"2": "OFF", "4": "ON"},
-        map_values=True,
-    )
+    @property
+    def sense_wire_mode(self):
+        """ Get 2-wire ('2') or 4-wire ('4') sense mode. """
+        val = self.ask(":SENS:CURR:RSENSE?").strip()
+        return "4" if val == "ON" else "2"
+
+    @sense_wire_mode.setter
+    def sense_wire_mode(self, value):
+        """ Set 2-wire ('2') or 4-wire ('4') sense mode. """
+        if value not in ("2", "4"):
+            raise ValueError("sense_wire_mode must be '2' or '4'")
+        scpi_val = "ON" if value == "4" else "OFF"
+        self.write(f":SENS:CURR:RSENSE {scpi_val}")
+        self.write(f":SENS:VOLT:RSENSE {scpi_val}")
 
     ###########
     # Filters #
