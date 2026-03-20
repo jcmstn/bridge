@@ -100,6 +100,7 @@ class GateSweep(Procedure):
             # if self.voltage_bias: self.channel.source_voltage = self.bias
             # else: self.channel.source_current = self.bias
             self.channel.source_voltage = self.bias
+
             self.channel.start_buffer()
             self.channel.wait_for_buffer()
             self.channel.disable_buffer()
