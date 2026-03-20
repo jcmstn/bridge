@@ -104,7 +104,6 @@ class GateSweep(Procedure):
             # after this problem starts
             self.channel.start_buffer()
             self.channel.wait_for_buffer()
-            self.channel.disable_buffer()
 
             data = {
                 'Gate voltage (V)': voltage,

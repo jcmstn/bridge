@@ -31,8 +31,8 @@ class Keithley2450Buffer:
 
     def is_buffer_full(self):
         """ Return True if buffer has reached the requested number of points. """
-        # Native 2450: Safest way to check buffer status is reading actual points stored
-        actual = int(self.ask(":TRACe:ACTual? \"defbuffer1\""))
+        # Native 2450: TRACe:ACTual? does NOT take buffer name parameter
+        actual = int(self.ask(":TRACe:ACTual?"))
         return actual >= self.buffer_points
 
     def wait_for_buffer(self, should_stop=lambda: False, timeout=60, interval=0.1):
@@ -43,6 +43,9 @@ class Keithley2450Buffer:
             if should_stop():
                 return
             if (time() - t) > timeout:
+                # Print buffer status for debugging
+                actual = int(self.ask(":TRACe:ACTual?"))
+                log.error(f"Buffer timeout: {actual}/{self.buffer_points} points")
                 raise Exception("Timed out waiting for Keithley 2450 buffer to fill.")
 
     @property
@@ -50,8 +53,8 @@ class Keithley2450Buffer:
         """ Get numpy array of raw buffer values. """
         self.write(":FORMat:DATA ASCii")
         points = self.buffer_points
-        # Native 2450: requires start index, end index, buffer, and data element
-        data = self.values(f":TRACe:DATA? 1, {points}, \"defbuffer1\", READ")
+        # Native 2450: TRACe:DATA? requires start, end, buffername, dataelement
+        data = self.values(f':TRACe:DATA? 1, {points}, "defbuffer1", READ')
         return np.array(data, dtype=np.float64)
 
     # Native 2450: Statistics are queried without trailing commas
