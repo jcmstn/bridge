@@ -9,7 +9,7 @@ logging.basicConfig(level=logging.INFO)
 # GPIB addresses (update to match your NI‑MAX / Keysight‑IO)
 GP2450_1 = "GPIB0::16::INSTR"  # 2450 for channel
 GP2450_2 = "GPIB0::18::INSTR"  # 2450 for gate (if not using 2400)
-GP2400   = "GPIB0::26::INSTR"  # 2400 for gate
+GP2400   = "GPIB0::25::INSTR"  # 2400 for gate
 
 rm = pyvisa.ResourceManager()
 
