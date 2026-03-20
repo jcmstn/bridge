@@ -92,7 +92,7 @@ class GateSweep(Procedure):
         )
 
         for voltage in gate_voltages:
-            self.channel.config_buffer(self.buffer_averages)
+            #self.channel.config_buffer(self.buffer_averages)
 
             log.info(f"Gate voltage set to {voltage} V")
             self.gate.source_voltage = voltage
