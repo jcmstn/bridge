@@ -173,6 +173,8 @@ def setup_mds(daq: zi.ziDAQServer, leader: str, follower: str) -> None:
 
     mds.set("start", 0)
     mds.set("group", 0)
+    mds.execute()   # starts the module's worker thread — without this, "start"
+                     # is never actually processed and status sits at 0 forever
     mds.set("devices", f"{leader},{follower}")
     mds.set("start", 1)
 
