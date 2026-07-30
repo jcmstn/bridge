@@ -512,8 +512,8 @@ def run_measurement(
 
 def main() -> None:
     # ── Device IDs ──────────────────────────────────────────────────────────
-    LEADER   = "dev1234"    # Current source + 1f measurement
-    FOLLOWER = "dev5678"    # 2f measurement
+    LEADER   = "dev7885"    # Current source + 1f measurement
+    FOLLOWER = "dev7886"    # 2f measurement
 
     # ── Connect ─────────────────────────────────────────────────────────────
     daq = connect("localhost", 8004)
@@ -528,7 +528,7 @@ def main() -> None:
         device        = LEADER,
         frequency_Hz  = 17.777,      # Hz  — well away from 50 Hz harmonics
         amplitude_V   = 0.1,         # V
-        series_R_ohm  = 1e6,         # Ω  → I_exc ≈ 100 nA
+        series_R_ohm  = 10000,         # Ω  → I_exc ≈ 100 nA
     )
     configure_output(daq, out_cfg)
 
@@ -573,7 +573,7 @@ def main() -> None:
     magnet_cfg = MagnetConfig(
         visa_resource        = "GPIB0::6::INSTR",
         field_per_amp_mT     = 10.0,   # ← calibrate for your magnet/probe
-        current_limit_A      = 5.0,    # ← safe continuous limit for your magnet
+        current_limit_A      = 10.0,    # ← safe continuous limit for your magnet
         voltage_compliance_V = 15.0,
         ramp_step_A          = 0.1,
         ramp_delay_s         = 0.05,
@@ -588,7 +588,7 @@ def main() -> None:
     # ② Sweep the magnet current both directions between two setpoints
     #    (e.g. for a Hall-effect measurement — 1f ≈ longitudinal/MR signal,
     #    2f ≈ transverse/Hall signal, both vs. field, forward and reverse):
-    currents_A = bidirectional_current_sweep(i_min=-2.0, i_max=2.0, n_points=21)
+    currents_A = bidirectional_current_sweep(i_min=-5.0, i_max=5.0, n_points=21)
 
     points = [
         MeasurementPoint(

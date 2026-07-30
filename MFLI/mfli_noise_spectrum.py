@@ -499,8 +499,8 @@ def plot_results(results: Dict[Tuple[str, str], dict], demod_cfgs: List[NoiseDem
 
 def main() -> None:
     # ── Device IDs ──────────────────────────────────────────────────────────
-    LEADER   = "dev1234"    # Current source + 1f measurement
-    FOLLOWER = "dev5678"    # 2f measurement
+    LEADER   = "dev7885"    # Current source + 1f measurement
+    FOLLOWER = "dev7886"    # 2f measurement
     USE_MDS  = True         # Keep True to reproduce the real experiment's clocking condition
 
     # ── Connect ─────────────────────────────────────────────────────────────
@@ -515,7 +515,7 @@ def main() -> None:
         device        = LEADER,
         frequency_Hz  = 17.777,
         amplitude_V   = 0.1,
-        series_R_ohm  = 1e6,
+        series_R_ohm  = 10000,
     )
     configure_output(daq, out_cfg)
 
