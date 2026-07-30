@@ -364,9 +364,12 @@ def _poll_demod(daq: zi.ziDAQServer, path: str,
         raise RuntimeError(f"No data returned for {path}. "
                            "Check demodulator is enabled and sample rate > 0.")
 
+    # With flat=True, data[path] is a single dict of field -> numpy array
+    # (all samples from the poll window concatenated), not a list of
+    # per-sample dicts.
     samples = data[path]
-    x = np.array([s["x"][0] for s in samples])
-    y = np.array([s["y"][0] for s in samples])
+    x = np.atleast_1d(samples["x"])
+    y = np.atleast_1d(samples["y"])
     r = np.hypot(x, y)
     theta = np.degrees(np.arctan2(y, x))
     return {"x": x, "y": y, "r": r, "theta_deg": theta}
