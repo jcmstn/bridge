@@ -159,10 +159,15 @@ def setup_mds(daq: zi.ziDAQServer, leader: str, follower: str) -> None:
     Per the LabOne MultiDeviceSync module reference, there is no separate
     "leader" node — the role is inferred from *order* in the comma-separated
     `devices` list (first entry = leader) and must match the physical
-    cabling: a BNC cable from the leader's Ref Out to the follower's Ref In
-    (or ZSync, if available on your firmware). Module node paths are
-    relative to the module itself (e.g. "devices", not
-    "multiDeviceSyncModule/devices").
+    cabling. The MFLI requires BOTH of the following (ZSync is not an MFLI
+    feature — that's UHFQA/SHF-family hardware):
+      - Ref clock: BNC cable from the leader's Ref Out to the follower's
+        Ref In.
+      - Trigger: the leader's Trigger Out 1 fanned out (e.g. via a 1-to-N
+        power divider, equal cable lengths) to Trigger In 1 on *both* the
+        follower and the leader itself.
+    Module node paths are relative to the module itself (e.g. "devices",
+    not "multiDeviceSyncModule/devices").
     """
     mds = daq.multiDeviceSyncModule()
 
@@ -181,11 +186,15 @@ def setup_mds(daq: zi.ziDAQServer, leader: str, follower: str) -> None:
         if status == 2:
             break
         if status == -1:
-            raise RuntimeError("MDS synchronization failed (status=-1). "
-                               "Check physical clock connection and device order.")
+            raise RuntimeError(
+                f"MDS synchronization failed (status=-1): {mds.getString('message')}. "
+                "Check Ref clock cable, trigger fan-out cabling, and device order."
+            )
         if time.monotonic() - t0 > timeout:
-            raise RuntimeError(f"MDS sync timed out (status={status}). "
-                               "Check physical clock connection.")
+            raise RuntimeError(
+                f"MDS sync timed out (status={status}): {mds.getString('message')}. "
+                "Check Ref clock cable and trigger fan-out cabling."
+            )
         time.sleep(0.2)
     log.info("MDS synchronized: leader=%s, follower=%s", leader, follower)
 
