@@ -179,7 +179,7 @@ def setup_mds(daq: zi.ziDAQServer, leader: str, follower: str) -> None:
     # Poll until synchronization is confirmed (status == 2 → synced,
     # -1 → failed, 0/1 → idle/in progress)
     log.info("Waiting for MDS synchronization ...")
-    timeout = 30.0
+    timeout = 60.0
     t0 = time.monotonic()
     while True:
         status = mds.getInt("status")
