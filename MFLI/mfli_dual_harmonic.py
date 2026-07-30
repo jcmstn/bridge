@@ -68,7 +68,6 @@ class OutputConfig:
     """Voltage source → current source configuration."""
     device: str         = "dev1234"   # MFLI acting as leader + current source
     out_ch: int         = 0           # Signal Output index (0-based)
-    demod_out: int      = 0           # Demodulator that drives the output
     osc_index: int      = 0           # Oscillator index
     frequency_Hz: float = 17.777      # Excitation frequency  [Hz]
                                       #   (avoid 50/60 Hz harmonics)
@@ -204,17 +203,28 @@ def setup_mds(daq: zi.ziDAQServer, leader: str, follower: str) -> None:
 def configure_output(daq: zi.ziDAQServer, cfg: OutputConfig) -> None:
     """Set up the voltage output that drives the current through the sample."""
     d = cfg.device
+
+    # The sigouts/N/{amplitudes,enables} node index is a hardware "mixer
+    # channel", NOT the demodulator index — it depends on device type and
+    # installed options (e.g. a base MFLI without the MD/MF option exposes
+    # mixer channel 1 for output 0, not 0). Ask zhinst.utils to resolve it
+    # rather than hardcoding it, or you'll get a NotFoundError like
+    # "Could not find any node that matches path .../amplitudes/0".
+    discovery = zi.ziDiscovery()
+    props = discovery.get(discovery.find(d))
+    mixer_c = ziutils.default_output_mixer_channel(props, cfg.out_ch)
+
     daq.setDouble(f"/{d}/oscs/{cfg.osc_index}/freq",               cfg.frequency_Hz)
-    daq.setDouble(f"/{d}/sigouts/{cfg.out_ch}/amplitudes/{cfg.demod_out}", cfg.amplitude_V)
+    daq.setDouble(f"/{d}/sigouts/{cfg.out_ch}/amplitudes/{mixer_c}", cfg.amplitude_V)
     daq.setDouble(f"/{d}/sigouts/{cfg.out_ch}/range",              max(0.01, cfg.amplitude_V * 2))
     daq.setInt(   f"/{d}/sigouts/{cfg.out_ch}/on",                 1)
-    daq.setInt(   f"/{d}/sigouts/{cfg.out_ch}/enables/{cfg.demod_out}", 1)
+    daq.setInt(   f"/{d}/sigouts/{cfg.out_ch}/enables/{mixer_c}",  1)
     daq.setInt(   f"/{d}/sigouts/{cfg.out_ch}/imp50",              0)   # High-Z output
     daq.sync()
     I_nA = cfg.amplitude_V / cfg.series_R_ohm * 1e9
     log.info(
-        "Output: %s  f=%.4f Hz  Vpp=%.4f V  R=%.2e Ω  → I≈%.3f nA",
-        d, cfg.frequency_Hz, cfg.amplitude_V, cfg.series_R_ohm, I_nA,
+        "Output: %s  f=%.4f Hz  Vpp=%.4f V  R=%.2e Ω  → I≈%.3f nA  (mixer_c=%d)",
+        d, cfg.frequency_Hz, cfg.amplitude_V, cfg.series_R_ohm, I_nA, mixer_c,
     )
 
 
