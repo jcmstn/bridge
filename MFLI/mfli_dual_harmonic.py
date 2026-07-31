@@ -38,6 +38,7 @@ Requirements:
 import sys
 import time
 import logging
+import threading
 import numpy as np
 import pandas as pd
 from dataclasses import dataclass, field
@@ -495,12 +496,23 @@ def run_measurement(
     demod2_cfg: DemodConfig,          # 2f channel
     acq_cfg:    AcquisitionConfig,
     points:     List[MeasurementPoint],
+    stop_event: Optional[threading.Event] = None,
+    on_point:   Optional[Callable[[dict], None]] = None,
 ) -> pd.DataFrame:
     """
     Iterate over `points`, acquire 1f and 2f at each, log to CSV.
 
     Returns a DataFrame of all recorded data.
     The CSV is written after every point so a crash never loses data.
+
+    `stop_event`, if given, is checked before each point — set it to break
+    out of the sweep early (e.g. from a UI abort button) while still
+    returning the data collected so far, so callers can run their normal
+    shutdown/cleanup path instead of killing the process outright.
+
+    `on_point`, if given, is called with each point's `record` dict right
+    after it's appended — lets a caller (e.g. a live TUI) show progress
+    without polling the output CSV.
 
     ── Adding more measurements per point ─────────────────────────────────
     Just extend the `record` dict below with any quantity you want to log:
@@ -509,6 +521,10 @@ def run_measurement(
     records: List[dict] = []
 
     for idx, pt in enumerate(points):
+        if stop_event is not None and stop_event.is_set():
+            log.info("Measurement aborted after %d / %d points.", idx, len(points))
+            break
+
         if pt.magnet_current_A is not None:
             log.info("── Point %d / %d   I_magnet=%.4f A ──────────────────",
                       idx + 1, len(points), pt.magnet_current_A)
@@ -559,6 +575,9 @@ def run_measurement(
             # ── Add further quantities here, e.g. from other instruments ───
         }
         records.append(record)
+
+        if on_point is not None:
+            on_point(record)
 
         # ── 6. Write incrementally (never lose data on a crash) ────────────
         Path(acq_cfg.output_file).parent.mkdir(parents=True, exist_ok=True)

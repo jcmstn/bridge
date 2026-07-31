@@ -13,6 +13,7 @@ dependencies = [
     "pymeasure>=0.15.0",
     "pyside6>=6.10.2",
     "pyvisa-py>=0.8.1",
+    "textual>=8.2.8",
     "zeroconf>=0.148.0",
     "zhinst-toolkit>=1.3.0",
 ]
