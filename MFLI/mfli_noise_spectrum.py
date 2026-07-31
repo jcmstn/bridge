@@ -39,6 +39,15 @@ For each condition/channel it reports:
 Results are saved as CSV (one file per condition/channel) plus a summary
 plot, and everything of interest is also printed to the console.
 
+IMPORTANT — oscillator frequency is NOT shared automatically by MDS:
+MDS synchronizes the sample clock and start trigger across devices, not
+the per-device oscillator frequency *value*. Each device's local
+oscillator still free-runs at whatever frequency you set it to. If the
+follower's demodulator frequency doesn't exactly match the leader's
+excitation frequency, its 2f channel will show a slow beat instead of a
+stable signal, corrupting the noise spectrum. sync_follower_oscillator()
+below sets this explicitly — don't skip it when USE_MDS is True.
+
 Requirements:
     pip install zhinst-core zhinst-utils numpy pandas scipy matplotlib
 """
@@ -211,6 +220,22 @@ def configure_output(daq: zi.ziDAQServer, cfg: OutputConfig) -> None:
         "Output configured: %s  f=%.4f Hz  Vpp=%.4f V  R=%.2e Ω  → I≈%.3f nA",
         d, cfg.frequency_Hz, cfg.amplitude_V, cfg.series_R_ohm, I_nA,
     )
+
+
+def sync_follower_oscillator(daq: zi.ziDAQServer, out_cfg: OutputConfig,
+                              follower: str, follower_osc_index: int = 0) -> None:
+    """
+    Explicitly copy the leader's excitation frequency onto the follower's
+    own local oscillator. Required because MDS (see setup_mds docstring)
+    does not do this for you — each device's oscillator is independently
+    set. Skipping this step is the single most common reason a two-MFLI
+    lock-in measurement silently returns garbage (a slowly beating phasor
+    instead of a stable one).
+    """
+    daq.setDouble(f"/{follower}/oscs/{follower_osc_index}/freq", out_cfg.frequency_Hz)
+    daq.sync()
+    log.info("Follower %s oscillator %d frequency set to %.4f Hz (matches leader)",
+             follower, follower_osc_index, out_cfg.frequency_Hz)
 
 
 def set_output_enabled(daq: zi.ziDAQServer, cfg: OutputConfig, enabled: bool) -> None:
@@ -518,6 +543,8 @@ def main() -> None:
         series_R_ohm  = 10000,
     )
     configure_output(daq, out_cfg)
+    if USE_MDS:
+        sync_follower_oscillator(daq, out_cfg, FOLLOWER)   # do NOT skip — see module docstring
 
     # ── Demodulator channels to characterize ──────────────────────────────────
     demod_cfgs = [
