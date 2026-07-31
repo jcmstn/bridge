@@ -32,6 +32,7 @@ import logging
 import numpy as np
 import pandas as pd
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, Callable, List
 
@@ -47,6 +48,10 @@ _KEPCO_DIR = Path(__file__).resolve().parent.parent / "KEPCO magnet"
 if str(_KEPCO_DIR) not in sys.path:
     sys.path.insert(0, str(_KEPCO_DIR))
 from kepco_magnet import KepkoBOPGL  # noqa: E402
+
+# Data lives outside "bridge" (a sibling of it) so measurement output never
+# ends up inside the git-tracked source tree.
+_DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Logging
@@ -524,6 +529,7 @@ def run_measurement(
         records.append(record)
 
         # ── 6. Write incrementally (never lose data on a crash) ────────────
+        Path(acq_cfg.output_file).parent.mkdir(parents=True, exist_ok=True)
         pd.DataFrame(records).to_csv(acq_cfg.output_file, index=False)
 
     log.info("Measurement complete. %d points saved to '%s'.", len(records), acq_cfg.output_file)
@@ -590,7 +596,7 @@ def main() -> None:
     acq_cfg = AcquisitionConfig(
         settling_time_s = 15,       # ≥ 5 × TC = 5 × 0.3 = 1.5 s (wait for magnet to settle too)
         n_averages      = 50,
-        output_file     = "lockin_data.csv",
+        output_file     = str(_DATA_DIR / f"harmonic_hall_{datetime.now():%Y%m%d_%H%M%S}.csv"),
     )
 
     # ── Magnet (Kepco BOP-GL current source) ─────────────────────────────────
