@@ -233,6 +233,13 @@ def configure_output(daq: zi.ziDAQServer, cfg: OutputConfig) -> None:
     )
 
 
+def shutdown_output(daq: zi.ziDAQServer, cfg: OutputConfig) -> None:
+    """Turn off the MFLI signal output that configure_output() enabled."""
+    daq.setInt(f"/{cfg.device}/sigouts/{cfg.out_ch}/on", 0)
+    daq.sync()
+    log.info("Output %s/sigouts/%d disabled", cfg.device, cfg.out_ch)
+
+
 def configure_demodulator(daq: zi.ziDAQServer, cfg: DemodConfig) -> None:
     """Configure a single demodulator for a specific harmonic."""
     d   = cfg.device
@@ -648,11 +655,14 @@ def main() -> None:
     # ── Run ──────────────────────────────────────────────────────────────────
     # The magnet drives an inductive load, so always ramp it back to zero and
     # disable the output — even if the measurement raises partway through.
+    # Likewise, always disable the MFLI signal output so it doesn't keep
+    # driving current through the sample after the script exits.
     try:
         df = run_measurement(daq, demod1_cfg, demod2_cfg, acq_cfg, points)
         print("\n", df.to_string(index=False))
     finally:
         shutdown_magnet(magnet, magnet_cfg)
+        shutdown_output(daq, out_cfg)
 
 
 if __name__ == "__main__":
