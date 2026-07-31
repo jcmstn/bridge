@@ -18,7 +18,7 @@ Run with:
     python mfli_dual_harmonic_tui.py
 
 Requirements:
-    pip install textual  (in addition to mfli_dual_harmonic.py's own deps)
+    pip install textual matplotlib  (in addition to mfli_dual_harmonic.py's own deps)
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import multiprocessing as mp
 import threading
 from dataclasses import dataclass
 from datetime import datetime
@@ -318,6 +319,97 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Live plot  ── runs in its own OS process, well away from the TUI
+# ─────────────────────────────────────────────────────────────────────────────
+# A GUI matplotlib backend and Textual's terminal control both want the main
+# thread (this matters especially on macOS, where Cocoa-backed GUI toolkits
+# refuse to run off-main-thread). Rather than fight that, the live preview
+# gets its own process with its own main thread; new points are streamed to
+# it over a multiprocessing.Queue. The final PNG is saved independently by
+# the TUI process itself (see _save_measurement_png), so it doesn't depend
+# on this window still being open when the run finishes.
+
+def _live_plot_worker(queue: "mp.Queue", has_field_sweep: bool) -> None:
+    import matplotlib.pyplot as plt
+    from matplotlib.animation import FuncAnimation
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True, figsize=(7, 7))
+    try:
+        fig.canvas.manager.set_window_title("MFLI live measurement")
+    except Exception:
+        pass
+    line1, = ax1.plot([], [], "o-", color="tab:blue")
+    line2, = ax2.plot([], [], "o-", color="tab:orange")
+    ax1.set_ylabel("1f  R (V)")
+    ax2.set_ylabel("2f  R (V)")
+    ax2.set_xlabel("Magnetic field (mT)" if has_field_sweep else "Point #")
+    ax1.set_title("Live measurement")
+    for ax in (ax1, ax2):
+        ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+
+    xs: list[float] = []
+    r1s: list[float] = []
+    r2s: list[float] = []
+
+    def _drain(_frame=None):
+        updated = False
+        while True:
+            try:
+                record = queue.get_nowait()
+            except Exception:
+                break
+            x = record.get("magnet_field_mT") if has_field_sweep else None
+            xs.append(x if x is not None else record["point_index"])
+            r1s.append(record["1f_R_V"])
+            r2s.append(record["2f_R_V"])
+            updated = True
+        if updated:
+            line1.set_data(xs, r1s)
+            line2.set_data(xs, r2s)
+            for ax, ys in ((ax1, r1s), (ax2, r2s)):
+                ax.relim()
+                ax.autoscale_view()
+        return line1, line2
+
+    # Keep a reference so it isn't garbage-collected mid-run.
+    _ani = FuncAnimation(fig, _drain, interval=300, cache_frame_data=False)
+    plt.show()
+
+
+def _save_measurement_png(records: list[dict], csv_path: str) -> None:
+    """Save a static 1f/2f R-vs-field PNG alongside the CSV, from whatever
+    points were actually collected (including an aborted/partial run)."""
+    if not records:
+        return
+
+    import matplotlib
+    matplotlib.use("Agg")  # headless — must not touch the TUI's terminal
+    import matplotlib.pyplot as plt
+
+    has_field = any(r.get("magnet_field_mT") is not None for r in records)
+    xs = [r["magnet_field_mT"] if has_field else r["point_index"] for r in records]
+    r1 = [r["1f_R_V"] for r in records]
+    r2 = [r["2f_R_V"] for r in records]
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True, figsize=(7, 7))
+    ax1.plot(xs, r1, "o-", color="tab:blue")
+    ax2.plot(xs, r2, "o-", color="tab:orange")
+    ax1.set_ylabel("1f  R (V)")
+    ax2.set_ylabel("2f  R (V)")
+    ax2.set_xlabel("Magnetic field (mT)" if has_field else "Point #")
+    ax1.set_title("Measurement result")
+    for ax in (ax1, ax2):
+        ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+
+    png_path = Path(csv_path).with_suffix(".png")
+    fig.savefig(png_path, dpi=150)
+    plt.close(fig)
+    log.info("Saved plot to '%s'", png_path)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Logging -> RichLog relay (keeps raw log lines from corrupting the alt screen)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -363,6 +455,9 @@ class RunScreen(Screen):
         # MessagePump base class and shadowing it silently breaks mounting.
         self._measurement_running = True
         self._log_handler: Optional[_LogRelay] = None
+        self._records: list[dict] = []
+        self._plot_queue: Optional["mp.Queue"] = None
+        self._plot_process: Optional[mp.Process] = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -382,11 +477,29 @@ class RunScreen(Screen):
         self._log_handler = _LogRelay(self)
         root = logging.getLogger()
         root.addHandler(self._log_handler)
+        self._start_live_plot()
         self.do_run()
 
     def on_unmount(self) -> None:
         if self._log_handler is not None:
             logging.getLogger().removeHandler(self._log_handler)
+        if self._plot_process is not None and self._plot_process.is_alive():
+            self._plot_process.terminate()
+
+    def _start_live_plot(self) -> None:
+        try:
+            ctx = mp.get_context("spawn")
+            self._plot_queue = ctx.Queue()
+            self._plot_process = ctx.Process(
+                target=_live_plot_worker,
+                args=(self._plot_queue, self.plan.magnet_cfg is not None),
+                daemon=True,
+            )
+            self._plot_process.start()
+        except Exception:
+            log.exception("Could not start live plot window (is matplotlib installed?)")
+            self._plot_queue = None
+            self._plot_process = None
 
     def write_log(self, msg: str, style: str) -> None:
         self.query_one("#log", RichLog).write(Text(msg, style=style))
@@ -395,6 +508,12 @@ class RunScreen(Screen):
         self.query_one("#status_line", Static).update(text)
 
     def _on_point(self, record: dict) -> None:
+        self._records.append(record)
+        if self._plot_queue is not None:
+            try:
+                self._plot_queue.put_nowait(record)
+            except Exception:
+                pass
         table = self.query_one("#results_table", DataTable)
         I = record.get("magnet_current_A")
         B = record.get("magnet_field_mT")
@@ -416,6 +535,10 @@ class RunScreen(Screen):
         self._set_status(final_status)
         self.query_one("#back_btn", Button).disabled = False
         self.query_one("#abort_btn", Button).disabled = True
+        try:
+            _save_measurement_png(self._records, self.plan.acq_cfg.output_file)
+        except Exception:
+            log.exception("Could not save measurement plot PNG")
 
     def action_abort(self) -> None:
         if self._measurement_running and not self._stop_event.is_set():
