@@ -588,7 +588,7 @@ def main() -> None:
 
     # ── Acquisition settings ─────────────────────────────────────────────────
     acq_cfg = AcquisitionConfig(
-        settling_time_s = 15,       # ≥ 5 × TC = 5 × 0.3 = 1.5 s
+        settling_time_s = 15,       # ≥ 5 × TC = 5 × 0.3 = 1.5 s (wait for magnet to settle too)
         n_averages      = 50,
         output_file     = "lockin_data.csv",
     )
@@ -597,8 +597,8 @@ def main() -> None:
     magnet_cfg = MagnetConfig(
         visa_resource        = "GPIB0::6::INSTR",
         field_per_amp_mT     = 10.0,   # ← calibrate for your magnet/probe
-        current_limit_A      = 40,    # ← safe continuous limit for your magnet
-        voltage_compliance_V = 18.0,
+        current_limit_A      = 35,    # ← safe continuous limit for your magnet
+        voltage_compliance_V = 15.0,
         ramp_step_A          = 0.1,
         ramp_delay_s         = 0.05,
     )
@@ -612,7 +612,7 @@ def main() -> None:
     # ② Sweep the magnet current both directions between two setpoints
     #    (e.g. for a Hall-effect measurement — 1f ≈ longitudinal/MR signal,
     #    2f ≈ transverse/Hall signal, both vs. field, forward and reverse):
-    currents_A = bidirectional_current_sweep(i_min=-30.0, i_max=30.0, n_points=21)
+    currents_A = bidirectional_current_sweep(i_min=-20.0, i_max=20.0, n_points=21)
 
     points = [
         MeasurementPoint(
