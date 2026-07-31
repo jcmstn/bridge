@@ -85,7 +85,7 @@ class HallMeasurement(Procedure):
         self.magnet.mode = "current"
         self.magnet.voltage_limit = self.MAGNET_VOLTAGE_LIMIT
         self.magnet.current = 0.0
-        self.magnet.output_enabled = True
+        self.magnet.enable_output()
 
         self.source.enable_source()
         sleep(0.2)

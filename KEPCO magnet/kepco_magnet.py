@@ -16,7 +16,7 @@ Usage example:
     psu.mode = "current"
     psu.current = 5.0          # A
     psu.voltage_limit = 20.0   # V (protect limit)
-    psu.output_enabled = True
+    psu.enable_output()        # clears any latched OVP/OCP trip and verifies
 
     print(psu.measure_current)
     print(psu.measure_voltage)
@@ -136,6 +136,48 @@ class KepkoBOPGL:
     @output_enabled.setter
     def output_enabled(self, enable: bool) -> None:
         self.write(f"OUTP {'ON' if enable else 'OFF'}")
+
+    def clear_protection(self) -> None:
+        """
+        Clear a latched over-voltage/over-current protection trip (OUTP:PROT:CLE).
+
+        On the BOP-GL series an OVP/OCP trip disables the output and *latches*
+        it off — sending ``OUTP ON`` again is not enough to bring it back; the
+        protection circuit must be explicitly cleared first. This is easy to
+        hit after lowering ``voltage_limit``/``current_limit`` below what the
+        load actually needs at the programmed setpoint. Call this before
+        (re-)enabling the output whenever the compliance limits may have been
+        exceeded.
+        """
+        self.write("OUTP:PROT:CLE")
+
+    def enable_output(self, clear_protection: bool = True, verify: bool = True) -> None:
+        """
+        Enable the output and confirm it actually turned on.
+
+        Unlike the ``output_enabled`` setter (a bare ``OUTP ON`` write with no
+        feedback), this clears any latched protection trip first, then reads
+        back ``OUTP?`` and drains the error queue to catch a fault that would
+        otherwise leave the output silently off — e.g. an OVP trip because
+        ``voltage_limit`` is too low for the programmed current through the
+        load's resistance.
+
+        Args:
+            clear_protection: Send OUTP:PROT:CLE before enabling (default True).
+            verify: Read back the output state and error queue afterward and
+                raise RuntimeError if the output did not actually turn on.
+        """
+        if clear_protection:
+            self.clear_protection()
+        self.output_enabled = True
+        if verify:
+            time.sleep(0.1)
+            if not self.output_enabled:
+                errors = self.check_errors()
+                detail = f": {errors}" if errors else (
+                    " (no error queued — check front-panel OVP/OCP fault indicator)"
+                )
+                raise RuntimeError(f"Kepco output failed to enable{detail}")
 
     # ------------------------------------------------------------------ #
     #  Operating mode (voltage / current)                                  #
@@ -407,7 +449,7 @@ if __name__ == "__main__":
         psu.mode = "current"
         psu.voltage_limit = 18.0   # compliance voltage
         psu.current = 0.0
-        psu.output_enabled = True
+        psu.enable_output()
 
         psu.ramp_current(10.0, step=0.2, delay=0.1)   # ramp up to 10 A
         print(f"V={psu.measure_voltage:.4f} V  I={psu.measure_current:.4f} A")

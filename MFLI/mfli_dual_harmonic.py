@@ -301,7 +301,7 @@ def connect_magnet(cfg: MagnetConfig) -> KepkoBOPGL:
     psu.voltage_limit = cfg.voltage_compliance_V
     psu.current_limit = cfg.current_limit_A
     psu.current = 0.0
-    psu.output_enabled = True
+    psu.enable_output()
 
     log.info(
         "Magnet connected: %s  mode=CC  compliance=%.2f V  I_limit=±%.2f A",
