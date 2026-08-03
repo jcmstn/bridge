@@ -148,6 +148,11 @@ class MagnetConfig:
     this script — separate from the supply's own hardware range (±50 A /
     ±20 V for a BOP 20-50GL) — and should reflect what your magnet can
     safely handle continuously.
+
+    connect_magnet() also clears the instrument's own CURR:LIM/VOLT:LIM
+    setpoint ceilings back to the supply's full rating before applying
+    these, so a narrower limit left over from a previous session can't
+    silently cap the sweep below current_limit_A.
     """
     visa_resource:        str   = "GPIB0::6::INSTR"
     current_limit_A:      float = 5.0     # Software current limit  [A]
@@ -352,12 +357,22 @@ def connect_magnet(cfg: MagnetConfig) -> KepkoBOPGL:
     enables the output. Ramping to nonzero setpoints is done separately via
     set_magnet_current() so every field change goes through the same
     step/delay ramp — important for an inductive (magnet) load.
+
+    Before doing any of that, this also clears the instrument's CURR:LIM /
+    VOLT:LIM setpoint ceilings back to the supply's full rating. Those are
+    a *different* register from voltage_limit/current_limit (VOLT:PROT/
+    CURR:PROT, the compliance clamps set below) — an independent ceiling
+    on the setpoint itself that, once narrowed and saved with MEM:UPD LIM
+    in some earlier session (e.g. a lower-current test), survives *RST and
+    silently caps every future sweep well below cfg.current_limit_A with
+    no error. See kepco_magnet.KepkoBOPGL.raise_range_limits_to_max.
     """
     rm = pyvisa.ResourceManager()
     psu = KepkoBOPGL(rm.open_resource(cfg.visa_resource))
 
     psu.reset()
     psu.clear_status()
+    psu.raise_range_limits_to_max()
     psu.mode = "current"
     psu.voltage_limit = cfg.voltage_compliance_V
     psu.current_limit = cfg.current_limit_A

@@ -13,6 +13,9 @@ Usage example:
     psu = KepkoBOPGL(rm.open_resource("GPIB0::6::INSTR"))
 
     psu.reset()
+    psu.raise_range_limits_to_max()  # undo any stale CURR:LIM/VOLT:LIM from
+                                     # a previous session -- *RST alone
+                                     # will NOT do this (see PAR. 3.3.5)
     psu.mode = "current"
     psu.current = 5.0          # A
     psu.voltage_limit = 20.0   # V (protect limit)
@@ -80,6 +83,23 @@ class KepkoBOPGL:
         """Send a command and return the response parsed as float."""
         return float(self.query(command))
 
+    def write_checked(self, command: str) -> None:
+        """
+        Send a command and immediately drain the error queue.
+
+        Per the BOP-GL manual (PAR. 3.3.5), a value rejected by a software
+        limit (VOLT:LIM / CURR:LIM) is *silently disregarded* by the
+        instrument -- no exception, no output change, just a queued SCPI
+        error (-120 or -222) that a plain ``write()`` would never surface.
+        Used for any command that programs an output setpoint or limit, so
+        a stale/narrowed limit shows up as a Python exception instead of a
+        mysteriously "stuck" output.
+        """
+        self._inst.write(command)
+        errors = self.check_errors()
+        if errors:
+            raise RuntimeError(f"Kepco rejected {command!r}: {'; '.join(errors)}")
+
     def close(self) -> None:
         """Close the VISA resource."""
         self._inst.close()
@@ -89,7 +109,18 @@ class KepkoBOPGL:
     # ------------------------------------------------------------------ #
 
     def reset(self) -> None:
-        """Reset the instrument to factory defaults (*RST)."""
+        """
+        Reset the instrument's output state (*RST).
+
+        Note: *RST does NOT restore the CURR:LIM / VOLT:LIM setpoint
+        ceilings to their factory (full-range) values if they were ever
+        narrowed and saved with ``MEM:UPD LIM`` -- that requires a
+        hardware Reset Power-up or the password-protected SYST:SEC:IMM
+        command (manual PAR. 3.3.2.1 / 3.3.5). If the current or voltage
+        setpoint refuses to climb past some fixed value regardless of
+        ``current_limit``/``voltage_limit``, call
+        :meth:`raise_range_limits_to_max` right after this.
+        """
         self.write("*RST")
         time.sleep(0.5)  # Allow unit to reinitialise
 
@@ -225,7 +256,7 @@ class KepkoBOPGL:
     @voltage.setter
     def voltage(self, value: float) -> None:
         self._check_range(value, -self.MAX_VOLTAGE, self.MAX_VOLTAGE, "Voltage")
-        self.write(f"VOLT {value:.6g}")
+        self.write_checked(f"VOLT {value:.6g}")
 
     @property
     def voltage_limit(self) -> float:
@@ -235,12 +266,35 @@ class KepkoBOPGL:
         When operating in current mode this is the compliance voltage limit.
         Valid range: 0 to MAX_VOLTAGE.
         """
-        return self.query_float("VOLT:PROT?")
+        return self.query_float("VOLT:PROT:POS?")
 
     @voltage_limit.setter
     def voltage_limit(self, value: float) -> None:
         self._check_range(value, 0, self.MAX_VOLTAGE, "Voltage limit")
-        self.write(f"VOLT:PROT {value:.6g}")
+        self.write_checked(f"VOLT:PROT {value:.6g}")
+
+    @property
+    def voltage_setpoint_max(self) -> float:
+        """
+        Software ceiling on the ``voltage`` setpoint itself (VOLT:LIM), in volts.
+
+        This is a *different* register from ``voltage_limit`` (VOLT:PROT).
+        ``voltage_limit`` clamps the compliance voltage while the unit
+        regulates current; this one gates what values the ``voltage``
+        setter is even allowed to accept. Per the manual (PAR. 3.3.5) it
+        defaults to MAX_VOLTAGE, but if it was ever narrowed and saved
+        with ``MEM:UPD LIM`` in a previous session, ``*RST`` (and hence
+        :meth:`reset`) will NOT restore it -- it silently keeps rejecting
+        any higher ``voltage`` setpoint. Call
+        :meth:`raise_range_limits_to_max` at the start of a session if you
+        suspect this.
+        """
+        return self.query_float("VOLT:LIM:POS?")
+
+    @voltage_setpoint_max.setter
+    def voltage_setpoint_max(self, value: float) -> None:
+        self._check_range(value, 0, self.MAX_VOLTAGE, "Voltage setpoint limit")
+        self.write_checked(f"VOLT:LIM {value:.6g}")
 
     # ------------------------------------------------------------------ #
     #  Current programming and protection                                  #
@@ -258,7 +312,7 @@ class KepkoBOPGL:
     @current.setter
     def current(self, value: float) -> None:
         self._check_range(value, -self.MAX_CURRENT, self.MAX_CURRENT, "Current")
-        self.write(f"CURR {value:.6g}")
+        self.write_checked(f"CURR {value:.6g}")
 
     @property
     def current_limit(self) -> float:
@@ -268,12 +322,62 @@ class KepkoBOPGL:
         When operating in voltage mode this is the compliance current limit.
         Valid range: 0 to MAX_CURRENT.
         """
-        return self.query_float("CURR:PROT?")
+        return self.query_float("CURR:PROT:POS?")
 
     @current_limit.setter
     def current_limit(self, value: float) -> None:
         self._check_range(value, 0, self.MAX_CURRENT, "Current limit")
-        self.write(f"CURR:PROT {value:.6g}")
+        self.write_checked(f"CURR:PROT {value:.6g}")
+
+    @property
+    def current_setpoint_max(self) -> float:
+        """
+        Software ceiling on the ``current`` setpoint itself (CURR:LIM), in amperes.
+
+        This is a *different* register from ``current_limit`` (CURR:PROT).
+        ``current_limit`` clamps the compliance current while the unit
+        regulates voltage; this one gates what values the ``current``
+        setter is even allowed to accept -- and it is the most common
+        reason the output appears stuck at some value well below
+        MAX_CURRENT no matter how high ``current_limit`` is raised.
+        Per the manual (PAR. 3.3.5) it defaults to MAX_CURRENT, but if it
+        was ever narrowed and saved with ``MEM:UPD LIM`` in a previous
+        session, ``*RST`` (and hence :meth:`reset`) will NOT restore it --
+        the instrument just disregards (SCPI error -120) any higher
+        ``current`` setpoint. Call :meth:`raise_range_limits_to_max` at
+        the start of a session if you suspect this is why the magnet
+        current won't climb past a fixed ceiling.
+        """
+        return self.query_float("CURR:LIM:POS?")
+
+    @current_setpoint_max.setter
+    def current_setpoint_max(self, value: float) -> None:
+        self._check_range(value, 0, self.MAX_CURRENT, "Current setpoint limit")
+        self.write_checked(f"CURR:LIM {value:.6g}")
+
+    def raise_range_limits_to_max(self, persist: bool = False) -> None:
+        """
+        Reset the CURR:LIM / VOLT:LIM setpoint ceilings back to the model's
+        full rating (MAX_CURRENT / MAX_VOLTAGE).
+
+        These software limits are independent of ``current_limit`` /
+        ``voltage_limit`` (the OCP/OVP compliance clamps) and independent
+        of ``*RST`` -- once narrowed and saved with ``MEM:UPD LIM``, they
+        persist across power cycles and reset commands, silently capping
+        every future setpoint (this is the classic "current won't go above
+        20 A no matter what I set current_limit to" symptom). Call this
+        once at the start of a session whenever you're not certain of the
+        unit's history (e.g. it was previously used/calibrated for a
+        lower-current test).
+
+        Args:
+            persist: If True, also send ``MEM:UPD LIM`` so the restored
+                (full-range) limits become the new power-up default.
+        """
+        self.current_setpoint_max = self.MAX_CURRENT
+        self.voltage_setpoint_max = self.MAX_VOLTAGE
+        if persist:
+            self.write("MEM:UPD LIM")
 
     # ------------------------------------------------------------------ #
     #  Measurements                                                        #
@@ -446,6 +550,7 @@ if __name__ == "__main__":
     with KepkoBOPGL(rm.open_resource("GPIB0::6::INSTR")) as psu:
         print(psu.identification)
         psu.reset()
+        psu.raise_range_limits_to_max()  # clear any stale CURR:LIM/VOLT:LIM
         psu.mode = "current"
         psu.voltage_limit = 18.0   # compliance voltage
         psu.current = 0.0
