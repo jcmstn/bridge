@@ -61,6 +61,7 @@ from mfli_dual_harmonic import (
     AcquisitionConfig,
     DemodConfig,
     FilterConfig,
+    GaussmeterConfig,
     MagnetConfig,
     MeasurementPoint,
     OutputConfig,
@@ -69,10 +70,12 @@ from mfli_dual_harmonic import (
     configure_output,
     connect,
     connect_device,
+    connect_gaussmeter,
     connect_magnet,
     run_measurement,
     set_magnet_current,
     setup_mds,
+    shutdown_gaussmeter,
     shutdown_magnet,
     shutdown_output,
     sync_follower_oscillator,
@@ -110,7 +113,6 @@ DEFAULTS: dict = {
     "output_name": "harmonic_hall",
     "enable_sweep": True,
     "visa_resource": "GPIB0::6::INSTR",
-    "field_per_amp_mT": "10.0",
     "current_limit_A": "35",
     "voltage_compliance_V": "15.0",
     "ramp_step_A": "0.1",
@@ -118,6 +120,9 @@ DEFAULTS: dict = {
     "i_min_A": "-20",
     "i_max_A": "20",
     "n_points": "21",
+    "gaussmeter_visa_resource": "GPIB0::12::INSTR",
+    "gaussmeter_n_averages": "10",
+    "gaussmeter_read_delay_s": "0.05",
 }
 
 # id -> caster, for every free-text numeric field (Select/Switch handled separately)
@@ -132,7 +137,6 @@ NUMERIC_FIELDS: dict = {
     "sample_rate_Hz": float,
     "settling_time_s": float,
     "n_averages": int,
-    "field_per_amp_mT": float,
     "current_limit_A": float,
     "voltage_compliance_V": float,
     "ramp_step_A": float,
@@ -140,11 +144,15 @@ NUMERIC_FIELDS: dict = {
     "i_min_A": float,
     "i_max_A": float,
     "n_points": int,
+    "gaussmeter_n_averages": int,
+    "gaussmeter_read_delay_s": float,
 }
-TEXT_FIELDS = ["leader_device", "follower_device", "daq_host", "output_name", "visa_resource"]
+TEXT_FIELDS = ["leader_device", "follower_device", "daq_host", "output_name", "visa_resource",
+               "gaussmeter_visa_resource"]
 MAGNET_FIELD_IDS = [
-    "visa_resource", "field_per_amp_mT", "current_limit_A", "voltage_compliance_V",
+    "visa_resource", "current_limit_A", "voltage_compliance_V",
     "ramp_step_A", "ramp_delay_s", "i_min_A", "i_max_A", "n_points",
+    "gaussmeter_visa_resource", "gaussmeter_n_averages", "gaussmeter_read_delay_s",
 ]
 
 
@@ -195,6 +203,7 @@ class MeasurementPlan:
     demod2_cfg: DemodConfig
     acq_cfg: AcquisitionConfig
     magnet_cfg: Optional[MagnetConfig]
+    gauss_cfg: Optional[GaussmeterConfig]
     currents_A: Optional[np.ndarray]
 
     @property
@@ -306,10 +315,8 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
             f"Sweep: {state['i_min_A']:g} A → {state['i_max_A']:g} A → "
             f"{state['i_min_A']:g} A, {total_points} points"
         )
-        info.append(
-            f"Field range: {state['i_min_A'] * state['field_per_amp_mT']:.2f} → "
-            f"{state['i_max_A'] * state['field_per_amp_mT']:.2f} mT"
-        )
+        info.append("Field measured live at each point via Lake Shore 475 Gaussmeter "
+                     f"({state['gaussmeter_visa_resource']})")
         info.append(f"Estimated total run time ≈ {format_duration(total_points * per_point_s)}")
     else:
         info.append("Single point — no field sweep, magnet untouched.")
@@ -562,6 +569,7 @@ class RunScreen(Screen):
         plan = self.plan
         daq = None
         magnet = None
+        gaussmeter = None
         try:
             self._set_status_threadsafe("Connecting to LabOne data server …")
             daq = connect(plan.daq_host, plan.daq_port)
@@ -580,10 +588,11 @@ class RunScreen(Screen):
             if plan.magnet_cfg is not None and plan.currents_A is not None:
                 self._set_status_threadsafe("Connecting magnet power supply …")
                 magnet = connect_magnet(plan.magnet_cfg)
+                self._set_status_threadsafe("Connecting gaussmeter …")
+                gaussmeter = connect_gaussmeter(plan.gauss_cfg)
                 points = [
                     MeasurementPoint(
                         magnet_current_A=I,
-                        magnet_field_mT=I * plan.magnet_cfg.field_per_amp_mT,
                         set_action=lambda daq, I=I: set_magnet_current(magnet, plan.magnet_cfg, I),
                     )
                     for I in plan.currents_A
@@ -596,6 +605,7 @@ class RunScreen(Screen):
                 daq, plan.demod1_cfg, plan.demod2_cfg, plan.acq_cfg, points,
                 stop_event=self._stop_event,
                 on_point=lambda record: self.app.call_from_thread(self._on_point, record),
+                gaussmeter=gaussmeter, gauss_cfg=plan.gauss_cfg,
             )
             final = "Measurement aborted." if self._stop_event.is_set() else "Measurement complete."
         except Exception as exc:
@@ -607,6 +617,11 @@ class RunScreen(Screen):
                     shutdown_magnet(magnet, plan.magnet_cfg)
                 except Exception:
                     log.exception("Error while shutting down magnet")
+            if gaussmeter is not None:
+                try:
+                    shutdown_gaussmeter(gaussmeter)
+                except Exception:
+                    log.exception("Error while shutting down gaussmeter")
             if daq is not None:
                 try:
                     shutdown_output(daq, plan.out_cfg)
@@ -709,9 +724,6 @@ class MFLIDualHarmonicApp(App):
                                        DEFAULTS["enable_sweep"])
                     yield field("visa_resource", "Magnet VISA resource",
                                 DEFAULTS["visa_resource"], kind="text")
-                    yield field("field_per_amp_mT", "Field calibration (mT / A)",
-                                DEFAULTS["field_per_amp_mT"],
-                                hint="Calibrate for your magnet/probe.")
                     yield field("current_limit_A", "Software current limit (A)",
                                 DEFAULTS["current_limit_A"],
                                 hint="Hard safety ceiling — independent of the supply's own range.")
@@ -725,6 +737,15 @@ class MFLIDualHarmonicApp(App):
                     yield field("n_points", "Points per sweep direction",
                                 DEFAULTS["n_points"], kind="integer",
                                 validators=[Number(minimum=2, failure_description="must be ≥ 2")])
+                    yield field("gaussmeter_visa_resource", "Gaussmeter VISA resource",
+                                DEFAULTS["gaussmeter_visa_resource"], kind="text",
+                                hint="Lake Shore 475 — measures the actual field at each point.")
+                    with Collapsible(title="Gaussmeter averaging (advanced)", collapsed=True):
+                        yield field("gaussmeter_n_averages", "Field readings averaged per point",
+                                    DEFAULTS["gaussmeter_n_averages"], kind="integer",
+                                    validators=[Number(minimum=1, failure_description="must be ≥ 1")])
+                        yield field("gaussmeter_read_delay_s", "Delay between readings (s)",
+                                    DEFAULTS["gaussmeter_read_delay_s"])
 
             with Vertical(id="sidebar"):
                 yield Static("Summary", classes="sidebar-title")
@@ -888,15 +909,20 @@ class MFLIDualHarmonicApp(App):
         )
 
         magnet_cfg = None
+        gauss_cfg = None
         currents_A = None
         if state["enable_sweep"]:
             magnet_cfg = MagnetConfig(
                 visa_resource=state["visa_resource"],
-                field_per_amp_mT=state["field_per_amp_mT"],
                 current_limit_A=state["current_limit_A"],
                 voltage_compliance_V=state["voltage_compliance_V"],
                 ramp_step_A=state["ramp_step_A"],
                 ramp_delay_s=state["ramp_delay_s"],
+            )
+            gauss_cfg = GaussmeterConfig(
+                visa_resource=state["gaussmeter_visa_resource"],
+                n_averages=state["gaussmeter_n_averages"],
+                read_delay_s=state["gaussmeter_read_delay_s"],
             )
             currents_A = bidirectional_current_sweep(
                 i_min=state["i_min_A"], i_max=state["i_max_A"], n_points=state["n_points"],
@@ -906,7 +932,7 @@ class MFLIDualHarmonicApp(App):
             daq_host=state["daq_host"], daq_port=state["daq_port"],
             leader=state["leader_device"], follower=state["follower_device"],
             out_cfg=out_cfg, demod1_cfg=demod1_cfg, demod2_cfg=demod2_cfg,
-            acq_cfg=acq_cfg, magnet_cfg=magnet_cfg, currents_A=currents_A,
+            acq_cfg=acq_cfg, magnet_cfg=magnet_cfg, gauss_cfg=gauss_cfg, currents_A=currents_A,
         )
 
 

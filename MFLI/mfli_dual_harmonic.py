@@ -26,6 +26,9 @@ Magnetic field sweep:
   current through an electromagnet to provide the field axis for e.g. a
   Hall-effect measurement. bidirectional_current_sweep() builds an
   up-then-down current list so hysteresis is visible in the 1f/2f data.
+  The actual field at the sample is measured directly with a Lake Shore
+  475 DSP Gaussmeter (see lakeshore475.LakeShore475) at each point, rather
+  than inferred from the magnet current via a calibration constant.
 
 Extensibility:
   Add new sweep variables to MeasurementPoint and a corresponding
@@ -58,6 +61,13 @@ _KEPCO_DIR = Path(__file__).resolve().parent.parent / "KEPCO magnet"
 if str(_KEPCO_DIR) not in sys.path:
     sys.path.insert(0, str(_KEPCO_DIR))
 from kepco_magnet import KepkoBOPGL  # noqa: E402
+
+# Same story for the Lake Shore 475 Gaussmeter driver — its own sibling
+# folder, shared by every program in bridge/ that needs a field reading.
+_LAKESHORE_DIR = Path(__file__).resolve().parent.parent / "LakeShore 475"
+if str(_LAKESHORE_DIR) not in sys.path:
+    sys.path.insert(0, str(_LAKESHORE_DIR))
+from lakeshore475 import LakeShore475  # noqa: E402
 
 # Data lives outside "bridge" (a sibling of it) so measurement output never
 # ends up inside the git-tracked source tree.
@@ -130,8 +140,9 @@ class MagnetConfig:
     Kepco BOP-GL bipolar power supply, used as a current source for an
     electromagnet (see kepco_magnet.KepkoBOPGL).
 
-    Field is assumed proportional to current: B [mT] = field_per_amp_mT * I [A].
-    Calibrate field_per_amp_mT for your specific magnet/probe before use.
+    This only drives the magnet current — the resulting field is measured
+    directly with a Lake Shore 475 Gaussmeter (see GaussmeterConfig) rather
+    than inferred from a current->field calibration constant.
 
     current_limit_A / voltage_compliance_V are *software* limits enforced by
     this script — separate from the supply's own hardware range (±50 A /
@@ -139,11 +150,23 @@ class MagnetConfig:
     safely handle continuously.
     """
     visa_resource:        str   = "GPIB0::6::INSTR"
-    field_per_amp_mT:     float = 10.0    # Magnet calibration  [mT / A]
     current_limit_A:      float = 5.0     # Software current limit  [A]
     voltage_compliance_V: float = 15.0    # CC-mode compliance / OVP limit  [V]
     ramp_step_A:          float = 0.1     # Ramp step size  [A]
     ramp_delay_s:         float = 0.05    # Delay between ramp steps  [s]
+
+
+@dataclass
+class GaussmeterConfig:
+    """
+    Lake Shore 475 DSP Gaussmeter (see lakeshore475.LakeShore475), used to
+    measure the field actually produced at the sample by the magnet —
+    shared across programs the same way the Kepco supply is.
+    """
+    visa_resource: str   = "GPIB0::12::INSTR"
+    unit:          str   = "T"     # 'T' or 'G' — read_field_mT() only knows these two
+    n_averages:    int   = 10      # Field readings averaged per measurement point
+    read_delay_s:  float = 0.05    # Delay between successive readings  [s]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -368,6 +391,39 @@ def shutdown_magnet(psu: KepkoBOPGL, cfg: MagnetConfig) -> None:
     psu.close()
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Gaussmeter (Lake Shore 475, via pymeasure/VISA)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_FIELD_TO_MT = {"T": 1e3, "G": 1e-1}   # → mT, for GaussmeterConfig.unit
+
+
+def connect_gaussmeter(cfg: GaussmeterConfig) -> LakeShore475:
+    """Open a VISA session to the Lake Shore 475 and set its display unit."""
+    if cfg.unit not in _FIELD_TO_MT:
+        raise ValueError(f"Unsupported gaussmeter unit {cfg.unit!r}; use 'T' or 'G'.")
+    gm = LakeShore475(cfg.visa_resource)
+    gm.unit = cfg.unit
+    log.info("Gaussmeter connected: %s  unit=%s  id=%s",
+              cfg.visa_resource, cfg.unit, gm.identification)
+    return gm
+
+
+def read_field_mT(gm: LakeShore475, cfg: GaussmeterConfig) -> float:
+    """
+    Average `cfg.n_averages` field readings from the gaussmeter and return
+    the result in mT, regardless of the instrument's configured display unit.
+    """
+    mean, _std = gm.measure(cfg.n_averages, delay=cfg.read_delay_s)
+    return mean * _FIELD_TO_MT[cfg.unit]
+
+
+def shutdown_gaussmeter(gm: LakeShore475) -> None:
+    """Close the VISA session to the gaussmeter."""
+    gm.close()
+    log.info("Gaussmeter connection closed")
+
+
 def bidirectional_current_sweep(i_min: float, i_max: float, n_points: int) -> np.ndarray:
     """
     Build a current sweep that goes i_min → i_max → i_min.
@@ -452,9 +508,8 @@ class MeasurementPoint:
     """
     One point in the measurement sequence.
 
-    The magnetic field sweep (magnet_current_A / magnet_field_mT below) is
-    a worked example of the general pattern for sweeping any external
-    parameter:
+    The magnetic field sweep (magnet_current_A below) is a worked example
+    of the general pattern for sweeping any external parameter:
 
         1.  Add a plain field here:
                 gate_V: float = 0.0
@@ -467,10 +522,13 @@ class MeasurementPoint:
 
     The set_action is called first at each point, then the script settles
     and acquires — no other changes are needed.
+
+    Note there is no `magnet_field_mT` input field: the field isn't known
+    ahead of the sweep, it's measured live by the Lake Shore 475 Gaussmeter
+    inside run_measurement() and only appears in the output `record`.
     """
     # ── Magnetic field sweep (Kepco magnet) ────────────────────────────────
     magnet_current_A: Optional[float] = None   # Setpoint applied to the magnet
-    magnet_field_mT:  Optional[float] = None   # Computed from field_per_amp_mT
 
     # ── Add further sweep variables below ──────────────────────────────────
     # gate_V:     float = 0.0        # Example: gate voltage
@@ -498,6 +556,8 @@ def run_measurement(
     points:     List[MeasurementPoint],
     stop_event: Optional[threading.Event] = None,
     on_point:   Optional[Callable[[dict], None]] = None,
+    gaussmeter: Optional[LakeShore475] = None,
+    gauss_cfg:  Optional[GaussmeterConfig] = None,
 ) -> pd.DataFrame:
     """
     Iterate over `points`, acquire 1f and 2f at each, log to CSV.
@@ -513,6 +573,10 @@ def run_measurement(
     `on_point`, if given, is called with each point's `record` dict right
     after it's appended — lets a caller (e.g. a live TUI) show progress
     without polling the output CSV.
+
+    `gaussmeter`/`gauss_cfg`, if given, are used to measure the actual
+    field at each point (after settling, alongside the 1f/2f acquisition)
+    instead of leaving `magnet_field_mT` unset.
 
     ── Adding more measurements per point ─────────────────────────────────
     Just extend the `record` dict below with any quantity you want to log:
@@ -551,13 +615,19 @@ def run_measurement(
         log.info("   2f  R=%.4e V  θ=%.2f°  σ_R=%.2e V  (n=%d)",
                  d2["r_mean"], d2["theta_mean"], d2["r_std"], d2["n_samples"])
 
+        # ── 4b. Measure field (Lake Shore 475 Gaussmeter) ───────────────────
+        field_mT = None
+        if gaussmeter is not None and gauss_cfg is not None:
+            field_mT = read_field_mT(gaussmeter, gauss_cfg)
+            log.info("   B=%.4f mT (measured)", field_mT)
+
         # ── 5. Build record ────────────────────────────────────────────────
         record: dict = {
             "point_index": idx,
             "timestamp":   time.strftime("%Y-%m-%dT%H:%M:%S"),
             # ── Magnet sweep ─────────────────────────────────────────────────
             "magnet_current_A": pt.magnet_current_A,
-            "magnet_field_mT":  pt.magnet_field_mT,
+            "magnet_field_mT":  field_mT,
             # ── Add further external sweep-parameter columns here, e.g.:
             # "gate_V":      pt.gate_V,
             # ── 1f ─────────────────────────────────────────────────────────
@@ -654,13 +724,21 @@ def main() -> None:
     # ── Magnet (Kepco BOP-GL current source) ─────────────────────────────────
     magnet_cfg = MagnetConfig(
         visa_resource        = "GPIB0::6::INSTR",
-        field_per_amp_mT     = 10.0,   # ← calibrate for your magnet/probe
         current_limit_A      = 35,    # ← safe continuous limit for your magnet
         voltage_compliance_V = 15.0,
         ramp_step_A          = 0.1,
         ramp_delay_s         = 0.05,
     )
     magnet = connect_magnet(magnet_cfg)
+
+    # ── Gaussmeter (Lake Shore 475, measures the actual field) ────────────────
+    gauss_cfg = GaussmeterConfig(
+        visa_resource = "GPIB0::12::INSTR",   # ← set to your 475's GPIB address
+        unit          = "T",
+        n_averages    = 10,
+        read_delay_s  = 0.05,
+    )
+    gaussmeter = connect_gaussmeter(gauss_cfg)
 
     # ── Measurement points ───────────────────────────────────────────────────
     #
@@ -669,13 +747,14 @@ def main() -> None:
     #
     # ② Sweep the magnet current both directions between two setpoints
     #    (e.g. for a Hall-effect measurement — 1f ≈ longitudinal/MR signal,
-    #    2f ≈ transverse/Hall signal, both vs. field, forward and reverse):
+    #    2f ≈ transverse/Hall signal, both vs. field, forward and reverse).
+    #    The field itself (magnet_field_mT in the output) is measured live
+    #    by the gaussmeter at each point, not computed from the current:
     currents_A = bidirectional_current_sweep(i_min=-20.0, i_max=20.0, n_points=21)
 
     points = [
         MeasurementPoint(
             magnet_current_A = I,
-            magnet_field_mT  = I * magnet_cfg.field_per_amp_mT,
             set_action = lambda daq, I=I: set_magnet_current(magnet, magnet_cfg, I),
         )
         for I in currents_A
@@ -686,7 +765,6 @@ def main() -> None:
     #   points = [
     #       MeasurementPoint(
     #           magnet_current_A = I,
-    #           magnet_field_mT  = I * magnet_cfg.field_per_amp_mT,
     #           set_action = lambda daq, I=I: (
     #               set_magnet_current(magnet, magnet_cfg, I),
     #               update_filter(daq, demod1_cfg, FilterConfig(time_constant_s=0.1)),
@@ -703,10 +781,12 @@ def main() -> None:
     # Likewise, always disable the MFLI signal output so it doesn't keep
     # driving current through the sample after the script exits.
     try:
-        df = run_measurement(daq, demod1_cfg, demod2_cfg, acq_cfg, points)
+        df = run_measurement(daq, demod1_cfg, demod2_cfg, acq_cfg, points,
+                              gaussmeter=gaussmeter, gauss_cfg=gauss_cfg)
         print("\n", df.to_string(index=False))
     finally:
         shutdown_magnet(magnet, magnet_cfg)
+        shutdown_gaussmeter(gaussmeter)
         shutdown_output(daq, out_cfg)
 
 
