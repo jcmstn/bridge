@@ -16,4 +16,5 @@ dependencies = [
     "textual>=8.2.8",
     "zeroconf>=0.148.0",
     "zhinst-toolkit>=1.3.0",
+    "zhinst-core>=26.7,<26.8",
 ]
