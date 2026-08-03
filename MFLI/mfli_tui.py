@@ -68,9 +68,9 @@ DIFF_RESISTANCE_DESC = (
 
 DIFF_RESISTANCE_SCHEMATIC = """\
   LEADER MFLI  (AC excitation + DC bias, I-sense)
-    Signal Output 1 ──[ R_series ]──┬── DUT ── common ground
-                                     │
-    Signal Input 1 (differential) ──┘   (measures V_Rseries → I)
+    Signal Output 1 ──[ R_series ]── DUT ── Current Input 1
+    (transimpedance amp reads I directly, in amps — R_series is just a
+    current-limiting/protection resistor, not used in the I calculation)
     (DC bias is summed onto this SAME output — no separate bias wire)
 
   FOLLOWER MFLI  (V-sense)

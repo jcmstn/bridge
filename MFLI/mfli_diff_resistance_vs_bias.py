@@ -17,9 +17,15 @@ directly as R_diff(V) curvature here.
 Wiring
 ------
     LEADER
-      Signal Output 1  ──[ R_series ]──┬── DUT ── common ground
-                                        │
-      Signal Input 1  (differential) ──┘   (measures V_Rseries → gives I)
+      Signal Output 1 ──[ R_series ]── DUT ── Current Input 1 (leader)
+                                                 (transimpedance amp reads I
+                                                  directly, in amps. R_series
+                                                  here is just a current-
+                                                  limiting/protection
+                                                  resistor — it is NOT used
+                                                  in the I calculation, unlike
+                                                  the old voltage-across-
+                                                  R_series scheme.)
 
     FOLLOWER
       Signal Input 1  (differential) ──── across the DUT itself
@@ -51,7 +57,7 @@ Method
 For each DC bias point:
   1. Set the DC offset on the leader's Signal Output (bias applied to DUT).
   2. Settle (≥ 5 × time constant).
-  3. Acquire averaged 1f X/Y on the leader   → phasor across R_series → I
+  3. Acquire averaged 1f X/Y on the leader's Current Input → I directly (A)
   4. Acquire averaged 1f X/Y on the follower → phasor across the DUT   → V
   5. Z_diff = V_DUT_phasor / I_phasor   (complex differential impedance)
        R_diff       = Re(Z_diff)   ← the number you want
@@ -65,13 +71,15 @@ Practical guidance:
     changes appreciably (the usual small-signal lock-in assumption) —
     otherwise each point is a chord average across the nonlinearity
     rather than a true local derivative.
-  - series_R_ohm should be chosen so it is comfortably larger than the
-    *largest* expected differential resistance across the whole bias
-    sweep, or the current is no longer well-approximated by
-    V_ac/series_R_ohm at those points (voltage-divider error). If you
-    aren't sure, this script measures I directly via R_series rather than
-    assuming R_series >> R_DUT, so the resistance numbers stay correct —
-    but very low current signals at the R_series input will hurt SNR.
+  - series_R_ohm is now just a current-limiting/protection resistor
+    between the output and the DUT — it plays no part in the I
+    calculation (I is read directly off the Current Input's transimpedance
+    amp). Keep it small enough that its voltage drop doesn't eat into the
+    compliance headroom needed to reach bias_max_V/bias_min_V across the
+    DUT.
+  - current_cfg.input_range must be sized in AMPS (not volts) to the
+    actual DUT current at each bias point — this is the Current Input's
+    own range node, independent of the follower's voltage range.
 
 Requirements:
     pip install zhinst-core zhinst-utils numpy pandas matplotlib
@@ -123,7 +131,10 @@ class OutputConfig:
                                        #   (avoid 50/60 Hz harmonics)
     ac_amplitude_V: float = 5e-3       # AC excitation amplitude [V, peak]
                                        #   keep small — see module docstring
-    series_R_ohm: float  = 1e5         # Current-sense/limiting resistor [Ω]
+    series_R_ohm: float  = 1e5         # Current-limiting/protection resistor
+                                       #   [Ω] — NOT used in the I calculation;
+                                       #   I is read directly off the leader's
+                                       #   Current Input.
     bias_min_V: float    = -0.5        # DC bias sweep lower bound [V]
     bias_max_V: float    = 0.5         # DC bias sweep upper bound [V]
 
@@ -144,11 +155,25 @@ class DemodConfig:
     demod_index: int    = 0            # Demodulator index on that device (0-based)
     harmonic: int       = 1            # 1f — this is a linear-response measurement
     osc_index: int      = 0            # Oscillator to lock to (on THIS device)
-    input_ch: int       = 0            # Signal Input index (0-based)
-    differential: bool  = True         # Enable differential (IN+ / IN−) mode
-    ac_coupling: bool   = False        # DC-couple — we need to see the bias-induced
-                                       #   operating point, not just the AC component
-    input_range_V: float = 1.0         # Input range  [V]
+    input_ch: int       = 0            # Signal/Current Input index (0-based)
+    use_current_input: bool = False    # True: demodulate the device's dedicated
+                                       #   Current Input (currins, transimpedance
+                                       #   amp — reads amps directly) instead of
+                                       #   a Signal Input (sigins, reads volts).
+                                       #   Only input_ch=0 is wired up below;
+                                       #   verify the adcselect enum in the
+                                       #   LabOne node tree before using another
+                                       #   channel.
+    differential: bool  = True         # Signal Input only: enable differential
+                                       #   (IN+ / IN−) mode. Ignored for currins
+                                       #   (no differential mode there).
+    ac_coupling: bool   = False        # Signal Input only: DC-couple — we need to
+                                       #   see the bias-induced operating point,
+                                       #   not just the AC component. Ignored for
+                                       #   currins.
+    input_range: float = 1.0           # Input range — Volts for a Signal Input,
+                                       #   Amps for a Current Input. Units depend
+                                       #   on use_current_input.
     sample_rate_Hz: float = 857.0      # Demodulator output rate  [Sa/s]
     filter: FilterConfig = field(default_factory=FilterConfig)
 
@@ -336,18 +361,34 @@ def configure_demodulator(daq: zi.ziDAQServer, cfg: DemodConfig) -> None:
 
     daq.setDouble(f"/{d}/demods/{di}/rate",          cfg.sample_rate_Hz)
 
-    daq.setInt(   f"/{d}/demods/{di}/adcselect",     cfg.input_ch)
-    daq.setInt(   f"/{d}/demods/{di}/enable",        1)
+    if cfg.use_current_input:
+        # adcselect enum: 0 = sigin0 (Signal Input 1), 1 = currin0 (Current
+        # Input 1). Only channel 0 is verified here — don't extend to other
+        # input_ch values without checking the actual enum in the LabOne
+        # node tree browser first.
+        if cfg.input_ch != 0:
+            raise NotImplementedError(
+                "use_current_input is only wired up for input_ch=0 "
+                "(Current Input 1) — verify the adcselect enum value for "
+                "other channels before using them."
+            )
+        daq.setInt(   f"/{d}/demods/{di}/adcselect", 1)
+        daq.setDouble(f"/{d}/currins/{cfg.input_ch}/range", cfg.input_range)
+        daq.setInt(   f"/{d}/currins/{cfg.input_ch}/on",    1)
+    else:
+        daq.setInt(   f"/{d}/demods/{di}/adcselect",     cfg.input_ch)
+        daq.setInt(   f"/{d}/sigins/{cfg.input_ch}/diff",  int(cfg.differential))
+        daq.setInt(   f"/{d}/sigins/{cfg.input_ch}/ac",    int(cfg.ac_coupling))
+        daq.setDouble(f"/{d}/sigins/{cfg.input_ch}/range", cfg.input_range)
+        daq.setInt(   f"/{d}/sigins/{cfg.input_ch}/on",    1)
 
-    daq.setInt(   f"/{d}/sigins/{cfg.input_ch}/diff",  int(cfg.differential))
-    daq.setInt(   f"/{d}/sigins/{cfg.input_ch}/ac",    int(cfg.ac_coupling))
-    daq.setDouble(f"/{d}/sigins/{cfg.input_ch}/range", cfg.input_range_V)
-    daq.setInt(   f"/{d}/sigins/{cfg.input_ch}/on",    1)
+    daq.setInt(   f"/{d}/demods/{di}/enable",        1)
 
     daq.sync()
     log.info(
-        "Demod %-24s  %s/demod%d  harmonic=%df  TC=%.3f s  order=%d  rate=%.1f Sa/s",
-        cfg.label, d, di, cfg.harmonic, flt.time_constant_s, flt.order, cfg.sample_rate_Hz,
+        "Demod %-24s  %s/demod%d  input=%s  harmonic=%df  TC=%.3f s  order=%d  rate=%.1f Sa/s",
+        cfg.label, d, di, "currin0" if cfg.use_current_input else f"sigin{cfg.input_ch}",
+        cfg.harmonic, flt.time_constant_s, flt.order, cfg.sample_rate_Hz,
     )
 
 
@@ -454,9 +495,12 @@ def run_measurement(
         log.info("   Settling %.2f s ...", settle)
         time.sleep(settle)
 
-        # ── 3. Acquire current-sense phasor (leader, across R_series) ─────────
+        # ── 3. Acquire current-sense phasor (leader, Current Input → amps) ────
         i_raw = acquire_averaged(daq, current_cfg, acq_cfg.n_averages)
-        I_phasor = complex(i_raw["x_mean"], i_raw["y_mean"]) / out_cfg.series_R_ohm
+        if current_cfg.use_current_input:
+            I_phasor = complex(i_raw["x_mean"], i_raw["y_mean"])
+        else:
+            I_phasor = complex(i_raw["x_mean"], i_raw["y_mean"]) / out_cfg.series_R_ohm
 
         # ── 4. Acquire voltage-sense phasor (follower, across the DUT) ─────────
         v_raw = acquire_averaged(daq, voltage_cfg, acq_cfg.n_averages)
@@ -491,7 +535,8 @@ def run_measurement(
             "X_reactive_ohm": X_react,
             "Z_mag_ohm":      Z_mag,
             "Z_phase_deg":    Z_phase,
-            "I_r_std_A":      i_raw["r_std"] / out_cfg.series_R_ohm,
+            "I_r_std_A":      i_raw["r_std"] if current_cfg.use_current_input
+                              else i_raw["r_std"] / out_cfg.series_R_ohm,
             "V_r_std_V":      v_raw["r_std"],
         }
         records.append(record)
@@ -570,15 +615,17 @@ def main() -> None:
         sinc_filter     = True,
     )
 
-    # ── Current-sense demod (on leader, across R_series) ────────────────────
+    # ── Current-sense demod (on leader, Current Input 1 — reads amps directly) ──
     current_cfg = DemodConfig(
-        device         = LEADER,
-        label          = "I (across R_series)",
-        demod_index    = 0,
-        harmonic       = 1,
-        input_range_V  = 0.1,        # size this to the actual V across R_series
-        sample_rate_Hz = 857.0,
-        filter         = shared_filter,
+        device            = LEADER,
+        label             = "I (Current Input 1)",
+        demod_index       = 0,
+        harmonic          = 1,
+        input_ch          = 0,
+        use_current_input = True,
+        input_range       = 1e-6,   # Amps — size this to the actual DUT current
+        sample_rate_Hz    = 857.0,
+        filter            = shared_filter,
     )
     configure_demodulator(daq, current_cfg)
 
@@ -588,7 +635,7 @@ def main() -> None:
         label          = "V (across DUT)",
         demod_index    = 0,
         harmonic       = 1,
-        input_range_V  = 0.1,        # size this to the actual V across the DUT
+        input_range    = 0.1,        # Volts — size this to the actual V across the DUT
         sample_rate_Hz = 857.0,
         filter         = shared_filter,
     )

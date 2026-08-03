@@ -100,7 +100,7 @@ DEFAULTS: dict = {
     "time_constant_s": "0.3",
     "order": "4",
     "sinc_filter": True,
-    "current_input_range_V": "0.1",
+    "current_input_range_A": "1e-6",
     "voltage_input_range_V": "0.1",
     "sample_rate_Hz": "857.0",
     "settling_time_s": "1.5",
@@ -118,7 +118,7 @@ NUMERIC_FIELDS: dict = {
     "bias_min_V": float,
     "bias_max_V": float,
     "time_constant_s": float,
-    "current_input_range_V": float,
+    "current_input_range_A": float,
     "voltage_input_range_V": float,
     "sample_rate_Hz": float,
     "settling_time_s": float,
@@ -227,7 +227,11 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     # ── Excitation & bias ────────────────────────────────────────────────────
     if state["series_R_ohm"] > 0:
         I = state["ac_amplitude_V"] / state["series_R_ohm"]
-        info.append(f"AC excitation current I ≈ {format_si(I, 'A')}")
+        info.append(
+            f"AC excitation current ≈ {format_si(I, 'A')} if R_series >> R_DUT "
+            "(rough order-of-magnitude only, for sizing the Current Input range "
+            "below — the actual I is measured directly, not derived from this)."
+        )
     else:
         errors.append("Series resistor must be > 0 Ω.")
 
@@ -637,7 +641,9 @@ class MFLIDiffResistanceApp(App):
                                 validators=[Number(minimum=0.0, failure_description="must be ≥ 0")])
                     yield field("series_R_ohm", "Series resistor (Ω)",
                                 DEFAULTS["series_R_ohm"],
-                                hint="Sets/measures excitation current: I ≈ V_ac / R.",
+                                hint="Current-limiting/protection resistor between the output "
+                                     "and the DUT. Not used to compute I — the leader's Current "
+                                     "Input reads the DUT current directly.",
                                 validators=[Number(minimum=1.0, failure_description="must be > 0")])
                     yield field("bias_min_V", "DC bias sweep min (V)", DEFAULTS["bias_min_V"])
                     yield field("bias_max_V", "DC bias sweep max (V)", DEFAULTS["bias_max_V"])
@@ -651,9 +657,10 @@ class MFLIDiffResistanceApp(App):
                                        int(DEFAULTS["order"]))
                     yield switch_field("sinc_filter", "Sinc filter (extra harmonic rejection)",
                                        DEFAULTS["sinc_filter"])
-                    yield field("current_input_range_V", "Current-sense input range (V)",
-                                DEFAULTS["current_input_range_V"],
-                                hint="Leader input, across R_series — size to the actual V there.",
+                    yield field("current_input_range_A", "Current-sense input range (A)",
+                                DEFAULTS["current_input_range_A"],
+                                hint="Leader's Current Input 1 (transimpedance amp, reads amps "
+                                     "directly) — size to the actual DUT current.",
                                 validators=[Number(minimum=1e-6, failure_description="must be > 0")])
                     yield field("voltage_input_range_V", "Voltage-sense input range (V)",
                                 DEFAULTS["voltage_input_range_V"],
@@ -818,15 +825,16 @@ class MFLIDiffResistanceApp(App):
             sinc_filter=state["sinc_filter"],
         )
         current_cfg = DemodConfig(
-            device=state["leader_device"], label="I (across R_series)",
+            device=state["leader_device"], label="I (Current Input 1)",
             demod_index=0, harmonic=1,
-            input_range_V=state["current_input_range_V"],
+            input_ch=0, use_current_input=True,
+            input_range=state["current_input_range_A"],
             sample_rate_Hz=state["sample_rate_Hz"], filter=filt,
         )
         voltage_cfg = DemodConfig(
             device=state["follower_device"], label="V (across DUT)",
             demod_index=0, harmonic=1,
-            input_range_V=state["voltage_input_range_V"],
+            input_range=state["voltage_input_range_V"],
             sample_rate_Hz=state["sample_rate_Hz"], filter=filt,
         )
         acq_cfg = AcquisitionConfig(
