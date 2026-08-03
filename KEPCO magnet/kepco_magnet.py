@@ -19,7 +19,7 @@ Usage example:
     psu.mode = "current"
     psu.current = 5.0          # A
     psu.voltage_limit = 20.0   # V (protect limit)
-    psu.enable_output()        # clears any latched OVP/OCP trip and verifies
+    psu.enable_output()        # verifies the output actually turned on
 
     print(psu.measure_current)
     print(psu.measure_voltage)
@@ -168,45 +168,41 @@ class KepkoBOPGL:
     def output_enabled(self, enable: bool) -> None:
         self.write(f"OUTP {'ON' if enable else 'OFF'}")
 
-    def clear_protection(self) -> None:
-        """
-        Clear a latched over-voltage/over-current protection trip (OUTP:PROT:CLE).
-
-        On the BOP-GL series an OVP/OCP trip disables the output and *latches*
-        it off — sending ``OUTP ON`` again is not enough to bring it back; the
-        protection circuit must be explicitly cleared first. This is easy to
-        hit after lowering ``voltage_limit``/``current_limit`` below what the
-        load actually needs at the programmed setpoint. Call this before
-        (re-)enabling the output whenever the compliance limits may have been
-        exceeded.
-        """
-        self.write("OUTP:PROT:CLE")
-
-    def enable_output(self, clear_protection: bool = True, verify: bool = True) -> None:
+    def enable_output(self, verify: bool = True) -> None:
         """
         Enable the output and confirm it actually turned on.
 
         Unlike the ``output_enabled`` setter (a bare ``OUTP ON`` write with no
-        feedback), this clears any latched protection trip first, then reads
-        back ``OUTP?`` and drains the error queue to catch a fault that would
-        otherwise leave the output silently off — e.g. an OVP trip because
-        ``voltage_limit`` is too low for the programmed current through the
-        load's resistance.
+        feedback), this reads back ``OUTP?`` and drains the error queue to
+        catch a fault that would otherwise leave the output silently off.
+
+        Note there is no SCPI command on the BOP-GL to remotely clear a
+        latched protection trip -- and no "trip" for the ordinary case,
+        either. ``voltage_limit``/``current_limit`` (VOLT:PROT/CURR:PROT)
+        are non-latching compliance clamps: they just cap the output and
+        release again on their own once the load condition changes (manual
+        PAR. 3.3.4). What *does* latch is a hardware-level output-stage
+        fault (overvoltage/overcurrent detection, heatsink over-temp, PFC
+        fault -- see Table 1-2, "Output Stage Protection"), and the manual
+        is explicit that the only recovery is cycling the front-panel POWER
+        switch off and on; no digital command reaches it. If ``verify``
+        below raises, that physical power-cycle is what's needed -- an
+        earlier version of this driver sent a nonexistent ``OUTP:PROT:CLE``
+        command here, which did nothing but leave a stale -100 "Command
+        error" in the queue for the next checked write to trip over.
 
         Args:
-            clear_protection: Send OUTP:PROT:CLE before enabling (default True).
             verify: Read back the output state and error queue afterward and
                 raise RuntimeError if the output did not actually turn on.
         """
-        if clear_protection:
-            self.clear_protection()
         self.output_enabled = True
         if verify:
             time.sleep(0.1)
             if not self.output_enabled:
                 errors = self.check_errors()
                 detail = f": {errors}" if errors else (
-                    " (no error queued — check front-panel OVP/OCP fault indicator)"
+                    " (no error queued — this is a latched hardware-stage fault; "
+                    "cycle the front-panel POWER switch off and on to clear it)"
                 )
                 raise RuntimeError(f"Kepco output failed to enable{detail}")
 
