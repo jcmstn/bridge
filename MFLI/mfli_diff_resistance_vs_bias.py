@@ -79,13 +79,14 @@ Requirements:
 
 import time
 import logging
+import threading
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, Callable, List
 
 import zhinst.core as zi
 import zhinst.utils as ziutils
@@ -419,14 +420,29 @@ def run_measurement(
     voltage_cfg:  DemodConfig,     # follower — V across the DUT
     acq_cfg:      AcquisitionConfig,
     points:       List[BiasPoint],
+    stop_event:   Optional[threading.Event] = None,
+    on_point:     Optional[Callable[[dict], None]] = None,
 ) -> pd.DataFrame:
     """
     Iterate over `points`, set each DC bias, acquire the current-sense and
     voltage-sense phasors, compute the differential impedance, log to CSV.
+
+    `stop_event`, if given, is checked before each point — set it to break
+    out of the sweep early (e.g. from a UI abort button) while still
+    returning the data collected so far, so callers can run their normal
+    ramp-down/shutdown path instead of killing the process outright.
+
+    `on_point`, if given, is called with each point's `record` dict right
+    after it's appended — lets a caller (e.g. a live TUI) show progress
+    without polling the output CSV.
     """
     records: List[dict] = []
 
     for idx, pt in enumerate(points):
+        if stop_event is not None and stop_event.is_set():
+            log.info("Measurement aborted after %d / %d points.", idx, len(points))
+            break
+
         log.info("── Point %d / %d   V_bias=%.4f V ──────────────────", idx + 1, len(points), pt.bias_V)
 
         # ── 1. Apply bias ───────────────────────────────────────────────────
@@ -479,6 +495,8 @@ def run_measurement(
             "V_r_std_V":      v_raw["r_std"],
         }
         records.append(record)
+        if on_point is not None:
+            on_point(record)
 
         # ── 6. Write incrementally (never lose data on a crash) ────────────
         Path(acq_cfg.output_file).parent.mkdir(parents=True, exist_ok=True)

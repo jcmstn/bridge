@@ -800,9 +800,9 @@ def main() -> None:
                               gaussmeter=gaussmeter, gauss_cfg=gauss_cfg)
         print("\n", df.to_string(index=False))
     finally:
+        shutdown_output(daq, out_cfg)
         shutdown_magnet(magnet, magnet_cfg)
         shutdown_gaussmeter(gaussmeter)
-        shutdown_output(daq, out_cfg)
 
 
 if __name__ == "__main__":
