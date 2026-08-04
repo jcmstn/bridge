@@ -98,7 +98,7 @@ log = logging.getLogger(__name__)
 @dataclass
 class SourceConfig:
     """Keithley 6221 — DC sense current source."""
-    visa_resource: str      = "GPIB0::12::INSTR"
+    visa_resource: str      = "GPIB0::20::INSTR"
     sense_current_A: float  = 1e-3    # Sense current magnitude [A]
     compliance_V: float     = 2.0     # Voltage compliance [V]
     source_delay_s: float   = 0.05    # Settle time after each current step [s]
@@ -122,8 +122,8 @@ class MagnetConfig:
     current->field calibration constant.
     """
     visa_resource:        str   = "GPIB0::6::INSTR"
-    current_limit_A:      float = 5.0     # Software current limit  [A]
-    voltage_compliance_V: float = 15.0    # CC-mode compliance / OVP limit  [V]
+    current_limit_A:      float = 50.0    # Software current limit  [A]
+    voltage_compliance_V: float = 20.0    # CC-mode compliance / OVP limit  [V]
     ramp_step_A:          float = 0.1     # Ramp step size  [A]
     ramp_delay_s:         float = 0.05    # Delay between ramp steps  [s]
 
