@@ -19,13 +19,27 @@ Method
 ------
 Sources a fixed DC sense current with the 6221 and reads the transverse
 (Hall) voltage with the 2182. At each field point the sense current is
-reversed (+I / -I) and the Hall voltage averaged over repeated +/- pairs:
+reversed (+I / -I) and the voltage decomposed into an odd and even part
+over repeated +/- pairs:
 
-    V_Hall = (V(+I) - V(-I)) / 2
+    V_odd  = (V(+I) - V(-I)) / 2   <- reported as "the" Hall voltage
+    V_even = (V(+I) + V(-I)) / 2   <- recorded, not discarded
 
-which cancels any DC offset common to both polarities — thermal EMFs at
+V_odd cancels any DC offset common to both polarities — thermal EMFs at
 the contacts, amplifier offset, etc. — that a single-polarity reading
-would fold straight into the Hall signal.
+would fold straight into the Hall signal. But "even in current" is not
+the same thing as "boring instrumental offset": expanding V(I) =
+V_offset + R*I + beta*I^2 + gamma*I^3 + ... shows that V_odd keeps only
+odd powers of I and V_even keeps only even powers, including physics
+that genuinely lives there in spin-orbit-coupled stacks (unidirectional
+spin Hall magnetoresistance, Joule-heating-driven Delta-R(T),
+rectification-type effects) — an offset-cancelling average that only
+ever reports V_odd would silently zero all of that out. V_even is
+therefore recorded alongside V_odd on every point (columns
+hall_voltage_even_V / hall_voltage_even_std_V) rather than thrown away:
+if it's flat noise, nothing was lost; if it shows structure vs. field,
+that's a real signal current-reversal averaging alone would otherwise
+hide.
 
 Magnetic field sweep
 --------------------
@@ -296,17 +310,31 @@ def acquire_hall_voltage(
     stop_event: Optional[threading.Event] = None,
 ) -> dict:
     """
-    Reverse the sense current n_reversals times and average the resulting
-    Hall voltage, cancelling any offset common to both polarities (thermal
-    EMFs, amplifier offset, etc.):
+    Reverse the sense current n_reversals times and decompose the
+    resulting Hall voltage into its odd and even parts in I:
 
-        V_Hall = (V(+I) - V(-I)) / 2
+        V_odd  = (V(+I) - V(-I)) / 2   — the Hall signal; cancels any
+                                          offset common to both polarities
+                                          (thermal EMFs, amplifier offset)
+                                          since a true offset doesn't flip
+                                          sign with the current
+        V_even = (V(+I) + V(-I)) / 2   — everything that DOES share the
+                                          offset's sign symmetry: a real
+                                          instrumental offset, but also any
+                                          genuine even-in-I physics (e.g.
+                                          unidirectional SMR, I^2 Joule
+                                          heating) that V_odd alone would
+                                          silently discard
+
+    Both are returned (and both get logged to the CSV by the caller) so
+    V_even can be checked after the fact instead of being thrown away.
 
     Leaves the source at +sense_current_A on return. If `stop_event` fires
     partway through, returns the mean/std of whatever pairs were already
     collected (at least one).
     """
-    samples = np.empty(n_reversals)
+    samples_odd = np.empty(n_reversals)
+    samples_even = np.empty(n_reversals)
     n_used = 0
 
     for i in range(n_reversals):
@@ -316,7 +344,8 @@ def acquire_hall_voltage(
         source.source_current = -src_cfg.sense_current_A
         v_minus = voltmeter.voltage
 
-        samples[i] = (v_plus - v_minus) / 2.0
+        samples_odd[i] = (v_plus - v_minus) / 2.0
+        samples_even[i] = (v_plus + v_minus) / 2.0
         n_used = i + 1
 
         if stop_event is not None and stop_event.is_set():
@@ -324,10 +353,13 @@ def acquire_hall_voltage(
 
     source.source_current = src_cfg.sense_current_A
 
-    used = samples[:n_used]
+    used_odd = samples_odd[:n_used]
+    used_even = samples_even[:n_used]
     return {
-        "mean": float(np.mean(used)),
-        "std": float(np.std(used)),
+        "mean": float(np.mean(used_odd)),
+        "std": float(np.std(used_odd)),
+        "even_mean": float(np.mean(used_even)),
+        "even_std": float(np.std(used_even)),
         "n_reversals": n_used,
     }
 
@@ -400,8 +432,8 @@ def run_measurement(
         # ── 4. Acquire reversal-averaged Hall voltage ───────────────────────
         hv = acquire_hall_voltage(source, voltmeter, src_cfg, acq_cfg.n_reversals, stop_event)
         r_hall = hv["mean"] / src_cfg.sense_current_A
-        log.info("   V_Hall=%.4e V  σ=%.2e V  R_Hall=%.5g Ω  (n=%d reversals)",
-                  hv["mean"], hv["std"], r_hall, hv["n_reversals"])
+        log.info("   V_Hall=%.4e V  σ=%.2e V  R_Hall=%.5g Ω  V_even=%.4e V  (n=%d reversals)",
+                  hv["mean"], hv["std"], r_hall, hv["even_mean"], hv["n_reversals"])
 
         # ── 5. Build record ──────────────────────────────────────────────────
         record: dict = {
@@ -412,6 +444,8 @@ def run_measurement(
             "sense_current_A":  src_cfg.sense_current_A,
             "hall_voltage_V":   hv["mean"],
             "hall_voltage_std_V": hv["std"],
+            "hall_voltage_even_V":     hv["even_mean"],
+            "hall_voltage_even_std_V": hv["even_std"],
             "hall_resistance_ohm": r_hall,
             "n_reversals":      hv["n_reversals"],
         }

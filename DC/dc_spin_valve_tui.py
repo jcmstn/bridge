@@ -691,6 +691,9 @@ class DCSpinValveApp(App):
                                 validators=[Number(minimum=0.0, failure_description="must be ≥ 0")])
                     yield field("n_reversals", "+I/-I reversal pairs averaged per point",
                                 DEFAULTS["n_reversals"], kind="integer",
+                                hint="Splits each point into (V(+I)-V(-I))/2 [reported R] and "
+                                     "(V(+I)+V(-I))/2 [recorded, not discarded — real offsets "
+                                     "land here, but so can genuine even-in-I physics].",
                                 validators=[Number(minimum=1, failure_description="must be ≥ 1")])
                     yield field("output_name", "Output file name (prefix)",
                                 DEFAULTS["output_name"], kind="text")

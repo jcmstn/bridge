@@ -30,14 +30,27 @@ Method
 ------
 Sources a fixed DC sense current with the 6221 and reads the longitudinal
 voltage with the 2182. At each field point the sense current is reversed
-(+I / -I) and the voltage averaged over repeated +/- pairs:
+(+I / -I) and the voltage decomposed into an odd and even part over
+repeated +/- pairs:
 
-    V = (V(+I) - V(-I)) / 2
+    V_odd  = (V(+I) - V(-I)) / 2      <- reported as "the" voltage/R
+    V_even = (V(+I) + V(-I)) / 2      <- recorded, not discarded
 
-which cancels any DC offset common to both polarities (thermal EMFs at
+V_odd cancels any DC offset common to both polarities (thermal EMFs at
 the contacts, amplifier offset, etc.) — this works for any resistive
 element, not just an antisymmetric Hall response, since R itself is
-unchanged by the current's sign.
+unchanged by the current's sign. But "even in current" is not the same
+thing as "boring instrumental offset": expanding V(I) = V_offset + R*I +
+beta*I^2 + gamma*I^3 + ... shows that V_odd keeps only odd powers of I
+and V_even keeps only even powers, including physics that genuinely
+lives there for spin-valve-type stacks with strong spin-orbit coupling
+(unidirectional spin Hall magnetoresistance, Joule-heating-driven
+Delta-R(T), rectification-type effects) — an offset-cancelling average
+that only ever reports V_odd would silently zero all of that out.
+V_even is therefore recorded alongside V_odd on every point (columns
+voltage_even_V / voltage_even_std_V) rather than thrown away: if it's
+flat noise, nothing was lost; if it shows structure vs. field, that's a
+real signal current-reversal averaging alone would otherwise hide.
 
 The gate voltage is held fixed for the whole field sweep (or looped over
 a list — one complete field sweep per value, each saved to its own file).
@@ -310,21 +323,32 @@ def acquire_reversal_averaged_voltage(
     stop_event: Optional[threading.Event] = None,
 ) -> dict:
     """
-    Reverse the sense current n_reversals times and average the resulting
-    voltage, cancelling any offset common to both polarities (thermal
-    EMFs at the contacts, amplifier offset, etc.):
+    Reverse the sense current n_reversals times and decompose the
+    resulting voltage into its odd and even parts in I:
 
-        V = (V(+I) - V(-I)) / 2
+        V_odd  = (V(+I) - V(-I)) / 2   — the resistive signal (R = V_odd/I);
+                                          cancels any offset common to both
+                                          polarities (thermal EMFs at the
+                                          contacts, amplifier offset, etc.),
+                                          since a true offset doesn't flip
+                                          sign with the current but R does
+        V_even = (V(+I) + V(-I)) / 2   — everything that DOES share the
+                                          offset's sign symmetry: a real
+                                          instrumental offset, but also any
+                                          genuine even-in-I physics (e.g.
+                                          unidirectional SMR, I^2 Joule
+                                          heating) that V_odd alone would
+                                          silently discard
 
-    This is valid for any resistive element (not just an antisymmetric
-    Hall response): R = V/I is unchanged when I flips sign, so the
-    average recovers IR while the offset — which does not flip — cancels.
+    Both are returned (and both get logged to the CSV by the caller) so
+    V_even can be checked after the fact instead of being thrown away.
 
     Leaves the source at +sense_current_A on return. If `stop_event` fires
     partway through, returns the mean/std of whatever pairs were already
     collected (at least one).
     """
-    samples = np.empty(n_reversals)
+    samples_odd = np.empty(n_reversals)
+    samples_even = np.empty(n_reversals)
     n_used = 0
 
     for i in range(n_reversals):
@@ -334,7 +358,8 @@ def acquire_reversal_averaged_voltage(
         source.source_current = -src_cfg.sense_current_A
         v_minus = voltmeter.voltage
 
-        samples[i] = (v_plus - v_minus) / 2.0
+        samples_odd[i] = (v_plus - v_minus) / 2.0
+        samples_even[i] = (v_plus + v_minus) / 2.0
         n_used = i + 1
 
         if stop_event is not None and stop_event.is_set():
@@ -342,10 +367,13 @@ def acquire_reversal_averaged_voltage(
 
     source.source_current = src_cfg.sense_current_A
 
-    used = samples[:n_used]
+    used_odd = samples_odd[:n_used]
+    used_even = samples_even[:n_used]
     return {
-        "mean": float(np.mean(used)),
-        "std": float(np.std(used)),
+        "mean": float(np.mean(used_odd)),
+        "std": float(np.std(used_odd)),
+        "even_mean": float(np.mean(used_even)),
+        "even_std": float(np.std(used_even)),
         "n_reversals": n_used,
     }
 
@@ -420,8 +448,8 @@ def run_measurement(
         # ── 4. Acquire reversal-averaged voltage ────────────────────────────
         rv = acquire_reversal_averaged_voltage(source, voltmeter, src_cfg, acq_cfg.n_reversals, stop_event)
         r = rv["mean"] / src_cfg.sense_current_A
-        log.info("   V=%.4e V  σ=%.2e V  R=%.5g Ω  (n=%d reversals)",
-                  rv["mean"], rv["std"], r, rv["n_reversals"])
+        log.info("   V=%.4e V  σ=%.2e V  R=%.5g Ω  V_even=%.4e V  (n=%d reversals)",
+                  rv["mean"], rv["std"], r, rv["even_mean"], rv["n_reversals"])
 
         # ── 5. Build record ──────────────────────────────────────────────────
         record: dict = {
@@ -432,6 +460,8 @@ def run_measurement(
             "sense_current_A":  src_cfg.sense_current_A,
             "voltage_V":        rv["mean"],
             "voltage_std_V":    rv["std"],
+            "voltage_even_V":     rv["even_mean"],
+            "voltage_even_std_V": rv["even_std"],
             "resistance_ohm":   r,
             "n_reversals":      rv["n_reversals"],
             "gate_voltage_V":   gate_voltage_V,
