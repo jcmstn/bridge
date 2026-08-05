@@ -104,9 +104,9 @@ DC_SPIN_VALVE_DESCRIPTION = (
 # ─────────────────────────────────────────────────────────────────────────────
 
 DEFAULTS: dict = {
-    "source_visa_resource": "GPIB0::12::INSTR",
+    "source_visa_resource": "GPIB0::20::INSTR",
     "voltmeter_visa_resource": "GPIB0::7::INSTR",
-    "gate_visa_resource": "GPIB0::24::INSTR",
+    "gate_visa_resource": "GPIB0::25::INSTR",
     "sense_current_A": "0.001",
     "compliance_V": "2.0",
     "source_delay_s": "0.05",

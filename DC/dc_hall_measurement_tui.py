@@ -96,7 +96,7 @@ SETTINGS_PATH = _DATA_DIR / "dc_hall_measurement_tui_settings.json"
 # ─────────────────────────────────────────────────────────────────────────────
 
 DEFAULTS: dict = {
-    "source_visa_resource": "GPIB0::12::INSTR",
+    "source_visa_resource": "GPIB0::20::INSTR",
     "voltmeter_visa_resource": "GPIB0::7::INSTR",
     "sense_current_A": "0.001",
     "compliance_V": "2.0",

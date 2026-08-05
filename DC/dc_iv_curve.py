@@ -85,7 +85,7 @@ log = logging.getLogger(__name__)
 @dataclass
 class SourceConfig:
     """Keithley 6221 — DC current source, sweeping current_min_A..current_max_A."""
-    visa_resource: str     = "GPIB0::12::INSTR"
+    visa_resource: str     = "GPIB0::20::INSTR"
     compliance_V: float    = 2.0      # Voltage compliance [V]
     source_delay_s: float  = 0.05     # 6221's own settle time after each step [s]
     current_min_A: float   = -1e-3    # Sweep lower bound [A]
@@ -108,7 +108,7 @@ class GateConfig:
     before run_measurement() starts, not per point. The program runs fine
     with no 2400 connected at all as long as this stays unused (gate off).
     """
-    visa_resource: str          = "GPIB0::24::INSTR"
+    visa_resource: str          = "GPIB0::25::INSTR"
     gate_voltage_limit_V: float = 20.0    # Software safety ceiling on |gate voltage| [V]
     compliance_current_A: float = 1e-6    # Gate leakage current compliance [A]
     source_delay_s: float       = 0.05

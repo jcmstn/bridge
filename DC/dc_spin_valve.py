@@ -110,7 +110,7 @@ class VoltmeterConfig:
 @dataclass
 class GateConfig:
     """Keithley 2400 — gate voltage, held fixed for the whole field sweep."""
-    visa_resource: str          = "GPIB0::24::INSTR"
+    visa_resource: str          = "GPIB0::25::INSTR"
     gate_voltage_limit_V: float = 20.0    # Software safety ceiling on |gate voltage| [V]
     compliance_current_A: float = 1e-6    # Gate leakage current compliance [A]
     source_delay_s: float       = 0.05

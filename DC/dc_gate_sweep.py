@@ -90,7 +90,7 @@ log = logging.getLogger(__name__)
 @dataclass
 class SourceConfig:
     """Keithley 6221 — fixed DC sense current (not swept in this program)."""
-    visa_resource: str     = "GPIB0::12::INSTR"
+    visa_resource: str     = "GPIB0::20::INSTR"
     sense_current_A: float = 1e-6     # Fixed sense current [A]
     compliance_V: float    = 2.0      # Voltage compliance [V]
     source_delay_s: float  = 0.05     # Settle time after a current step [s]
@@ -107,7 +107,7 @@ class VoltmeterConfig:
 @dataclass
 class GateConfig:
     """Keithley 2400 — gate voltage, the swept axis of this program."""
-    visa_resource: str          = "GPIB0::24::INSTR"
+    visa_resource: str          = "GPIB0::25::INSTR"
     gate_voltage_limit_V: float = 20.0    # Software safety ceiling on |gate voltage| [V]
     compliance_current_A: float = 1e-6    # Gate leakage current compliance [A]
     source_delay_s: float       = 0.05

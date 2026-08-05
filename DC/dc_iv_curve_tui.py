@@ -101,7 +101,7 @@ DC_IV_DESCRIPTION = (
 # ─────────────────────────────────────────────────────────────────────────────
 
 DEFAULTS: dict = {
-    "source_visa_resource": "GPIB0::12::INSTR",
+    "source_visa_resource": "GPIB0::20::INSTR",
     "voltmeter_visa_resource": "GPIB0::7::INSTR",
     "compliance_V": "2.0",
     "source_delay_s": "0.05",
@@ -116,7 +116,7 @@ DEFAULTS: dict = {
     "step_A": "0.00005",
     "bidirectional_sweep": True,
     "enable_gate": False,
-    "gate_visa_resource": "GPIB0::24::INSTR",
+    "gate_visa_resource": "GPIB0::25::INSTR",
     "gate_voltage_limit_V": "20.0",
     "gate_compliance_current_A": "1e-6",
     "gate_voltage_values": "0.0",
