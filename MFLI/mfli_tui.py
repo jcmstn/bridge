@@ -24,6 +24,7 @@ from textual.widgets import Button, Footer, Header, Static
 
 from mfli_dual_harmonic_tui import MFLIDualHarmonicApp
 from mfli_diff_resistance_tui import MFLIDiffResistanceApp
+from mfli_phase_calibration_tui import MFLIPhaseCalibrationApp
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -85,6 +86,33 @@ DIFF_RESISTANCE_SCHEMATIC = """\
     (equal cable lengths on the fan-out)
 """
 
+PHASE_CALIBRATION_DESC = (
+    "Calibrates the leader's 1f reference phase against the sample's own "
+    "resistive Hall response (rather than a separate standard resistor), "
+    "then verifies the result before you trust it: checks the null holds "
+    "across a full field sweep, and empirically identifies which of X2f/Y2f "
+    "carries the real signal. Optional current-amplitude and frequency "
+    "scaling checks help separate a genuine resistive/SOT signal from "
+    "Joule-heating/anomalous-Nernst contamination. Run this before "
+    "mfli_dual_harmonic_tui.py, using the same wiring."
+)
+
+PHASE_CALIBRATION_SCHEMATIC = """\
+  Same wiring as the Dual-Harmonic Measurement (above) —
+  this program calibrates that setup, it doesn't add new wiring.
+
+  LEADER MFLI  (current source, 1f)
+    Signal Output 1 ──[ R_series ]──▶ sample/DUT ── common ground
+    Signal Input 1  (differential)  ──▶ demod 1f   (V_Rseries → I)
+
+  FOLLOWER MFLI  (2f)
+    Signal Input 1  (differential)  ──▶ demod 2f   (across the sample)
+
+  Magnet + Gaussmeter  (both required — the procedure needs a field sweep)
+    Kepco BOP-GL      ──GPIB──▶ electromagnet coil
+    Lake Shore 475    ──GPIB──▶ Gaussmeter probe at the sample
+"""
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Picker screen
@@ -137,6 +165,12 @@ class LauncherApp(App):
                 DIFF_RESISTANCE_SCHEMATIC,
                 "launch_diff", "▶  Launch differential-resistance TUI",
             )
+            yield _card(
+                "3) Phase Calibration (1f Y-null + 2f channel ID)",
+                PHASE_CALIBRATION_DESC,
+                PHASE_CALIBRATION_SCHEMATIC,
+                "launch_phase_cal", "▶  Launch phase-calibration TUI",
+            )
         yield Footer()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -144,6 +178,8 @@ class LauncherApp(App):
             self.exit(result="dual")
         elif event.button.id == "launch_diff":
             self.exit(result="diff")
+        elif event.button.id == "launch_phase_cal":
+            self.exit(result="phase_cal")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -157,6 +193,8 @@ def main() -> None:
             MFLIDualHarmonicApp().run()
         elif mode == "diff":
             MFLIDiffResistanceApp().run()
+        elif mode == "phase_cal":
+            MFLIPhaseCalibrationApp().run()
         else:
             break  # user quit the picker
 

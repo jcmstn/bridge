@@ -615,6 +615,8 @@ def acquire_averaged(
         "r_mean":     float(np.mean(raw["r"])),
         "theta_mean": float(np.mean(raw["theta_deg"])),
         "r_std":      float(np.std(raw["r"])),
+        "x_std":      float(np.std(raw["x"])),
+        "y_std":      float(np.std(raw["y"])),
         "n_samples":  len(raw["r"]),
     }
 
