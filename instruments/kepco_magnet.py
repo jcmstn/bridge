@@ -252,7 +252,7 @@ class KepkoBOPGL:
     @voltage.setter
     def voltage(self, value: float) -> None:
         self._check_range(value, -self.MAX_VOLTAGE, self.MAX_VOLTAGE, "Voltage")
-        self.write_checked(f"VOLT {value:.6g}")
+        self.write_checked(f"VOLT {self._fmt(value)}")
 
     @property
     def voltage_limit(self) -> float:
@@ -267,7 +267,7 @@ class KepkoBOPGL:
     @voltage_limit.setter
     def voltage_limit(self, value: float) -> None:
         self._check_range(value, 0, self.MAX_VOLTAGE, "Voltage limit")
-        self.write_checked(f"VOLT:PROT {value:.6g}")
+        self.write_checked(f"VOLT:PROT {self._fmt(value)}")
 
     @property
     def voltage_setpoint_max(self) -> float:
@@ -290,7 +290,7 @@ class KepkoBOPGL:
     @voltage_setpoint_max.setter
     def voltage_setpoint_max(self, value: float) -> None:
         self._check_range(value, 0, self.MAX_VOLTAGE, "Voltage setpoint limit")
-        self.write_checked(f"VOLT:LIM {value:.6g}")
+        self.write_checked(f"VOLT:LIM {self._fmt(value)}")
 
     # ------------------------------------------------------------------ #
     #  Current programming and protection                                  #
@@ -308,7 +308,7 @@ class KepkoBOPGL:
     @current.setter
     def current(self, value: float) -> None:
         self._check_range(value, -self.MAX_CURRENT, self.MAX_CURRENT, "Current")
-        self.write_checked(f"CURR {value:.6g}")
+        self.write_checked(f"CURR {self._fmt(value)}")
 
     @property
     def current_limit(self) -> float:
@@ -323,7 +323,7 @@ class KepkoBOPGL:
     @current_limit.setter
     def current_limit(self, value: float) -> None:
         self._check_range(value, 0, self.MAX_CURRENT, "Current limit")
-        self.write_checked(f"CURR:PROT {value:.6g}")
+        self.write_checked(f"CURR:PROT {self._fmt(value)}")
 
     @property
     def current_setpoint_max(self) -> float:
@@ -349,7 +349,7 @@ class KepkoBOPGL:
     @current_setpoint_max.setter
     def current_setpoint_max(self, value: float) -> None:
         self._check_range(value, 0, self.MAX_CURRENT, "Current setpoint limit")
-        self.write_checked(f"CURR:LIM {value:.6g}")
+        self.write_checked(f"CURR:LIM {self._fmt(value)}")
 
     def raise_range_limits_to_max(self, persist: bool = False) -> None:
         """
@@ -524,6 +524,20 @@ class KepkoBOPGL:
             raise ValueError(
                 f"{name} {value} is out of range [{lo}, {hi}]."
             )
+
+    @staticmethod
+    def _fmt(value: float) -> str:
+        """
+        Format a setpoint for a SCPI command in plain decimal notation.
+
+        The BOP-GL parser only accepts NR1/NR2 (plain integer/decimal)
+        numbers, not NR3 (exponential) -- but Python's ``g`` format
+        switches to exponential notation for small magnitudes (e.g.
+        ``f"{2e-05:.6g}"`` -> ``"2e-05"``), which the instrument rejects
+        with error -122 "invalid character found in number string". Fixed
+        decimal notation avoids that form for any setpoint in range.
+        """
+        return f"{value:.6f}"
 
     def __repr__(self) -> str:
         return f"KepkoBOPGL(resource={self._inst.resource_name!r})"
