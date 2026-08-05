@@ -1,46 +1,43 @@
 #!/usr/bin/env python3
 """
-DC Hall Voltage Measurement — Keithley 6221 + 2182, with field sweep
-=====================================================================
-Companion to bridge/MFLI/mfli_dual_harmonic.py — same house style
-(dataclass configs, incremental CSV, stop_event/on_point hooks for a
-live UI), different (DC rather than lock-in) measurement technique.
+DC Gate Sweep — Keithley 2400 (gate) + 6221 (fixed sense current) + 2182
+==========================================================================
+Companion to dc_iv_curve.py / dc_hall_measurement.py — same house style
+(dataclass configs, incremental CSV, stop_event/on_point hooks for a live
+UI). Where dc_iv_curve.py sweeps current at a fixed gate, this program
+sweeps the gate voltage at a fixed sense current — the standard
+transfer-curve measurement for a gated device.
 
 Wiring
 ------
     Keithley 6221 (current source)
-      Output (current) ──▶ sample ── common ground
+      Output (current) ──▶ DUT ── common ground
 
     Keithley 2182 (nanovoltmeter)
-      Channel 1 (differential) ──▶ across the transverse (Hall) voltage
-      leads of the sample
+      Channel 1 (differential) ──▶ across the DUT (2-terminal or
+      4-terminal / Kelvin)
+
+    Keithley 2400 (gate source)
+      Output (voltage) ──▶ gate electrode
+
+    Magnet field  (optional — see MagnetConfig/GaussmeterConfig)
+    Kepco BOP-GL      ──GPIB──▶ electromagnet coil
+    Lake Shore 475    ──GPIB──▶ Gaussmeter probe at the sample
 
 Method
 ------
-Sources a fixed DC sense current with the 6221 and reads the transverse
-(Hall) voltage with the 2182. At each field point the sense current is
-reversed (+I / -I) and the Hall voltage averaged over repeated +/- pairs:
+For each gate voltage point:
+  1. Set the 2400's gate voltage.
+  2. Settle (acq_cfg.settling_time_s — gated 2D systems can be slow to
+     re-equilibrate after a gate step).
+  3. Read `n_averages` voltage samples from the 2182 and average them.
+  4. Chord resistance R = V / I_sense is recorded alongside V and Vg.
 
-    V_Hall = (V(+I) - V(-I)) / 2
-
-which cancels any DC offset common to both polarities — thermal EMFs at
-the contacts, amplifier offset, etc. — that a single-polarity reading
-would fold straight into the Hall signal.
-
-Magnetic field sweep
---------------------
-A Kepco BOP-GL bipolar power supply (see kepco_magnet.KepkoBOPGL) drives
-current through an electromagnet to provide the field axis, exactly as
-in mfli_dual_harmonic.py: bidirectional_current_sweep() builds an
-up-then-down magnet-current list so hysteresis is visible, and the
-actual field at the sample is measured directly with a Lake Shore 475
-DSP Gaussmeter (see lakeshore475.LakeShore475) at each point rather than
-inferred from the magnet current via a calibration constant.
-
-Extensibility
--------------
-Add new sweep variables to FieldPoint and a corresponding set_action
-callable — the run_measurement loop handles the rest.
+If a magnet current is given (optional — see GatePlan in the TUI), it is
+parked once before the gate sweep starts (not swept) and the resulting
+field is measured live via the Lake Shore 475 and recorded on every row
+for reference — exactly the "field measured live, never computed from
+current" convention used throughout bridge/DC.
 
 Requirements:
     pip install pymeasure pyvisa numpy pandas
@@ -52,13 +49,13 @@ import logging
 import threading
 import numpy as np
 import pandas as pd
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Callable, List
 
 import pyvisa
-from pymeasure.instruments.keithley import Keithley2182, Keithley6221
+from pymeasure.instruments.keithley import Keithley2182, Keithley2400, Keithley6221
 
 # The Kepco magnet and Lake Shore 475 drivers live in the shared
 # bridge/instruments folder — add it to sys.path directly (it's not
@@ -72,8 +69,7 @@ from lakeshore475 import LakeShore475  # noqa: E402
 from dc_sweep_utils import linear_sweep  # noqa: E402
 
 # Data lives outside "bridge" (a sibling of it) so measurement output never
-# ends up inside the git-tracked source tree. Same location as the MFLI
-# programs' _DATA_DIR (bridge/DC/foo.py -> DC -> bridge -> repo root).
+# ends up inside the git-tracked source tree.
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -93,29 +89,37 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class SourceConfig:
-    """Keithley 6221 — DC sense current source."""
-    visa_resource: str      = "GPIB0::20::INSTR"
-    sense_current_A: float  = 1e-3    # Sense current magnitude [A]
-    compliance_V: float     = 2.0     # Voltage compliance [V]
-    source_delay_s: float   = 0.05    # Settle time after each current step [s]
+    """Keithley 6221 — fixed DC sense current (not swept in this program)."""
+    visa_resource: str     = "GPIB0::12::INSTR"
+    sense_current_A: float = 1e-6     # Fixed sense current [A]
+    compliance_V: float    = 2.0      # Voltage compliance [V]
+    source_delay_s: float  = 0.05     # Settle time after a current step [s]
 
 
 @dataclass
 class VoltmeterConfig:
-    """Keithley 2182 — Hall voltage readout (channel 1, differential)."""
+    """Keithley 2182 — DUT voltage readout (channel 1, differential)."""
     visa_resource: str = "GPIB0::7::INSTR"
     nplc: float        = 5      # Integration time [power line cycles]
     auto_range: bool   = True
 
 
 @dataclass
+class GateConfig:
+    """Keithley 2400 — gate voltage, the swept axis of this program."""
+    visa_resource: str          = "GPIB0::24::INSTR"
+    gate_voltage_limit_V: float = 20.0    # Software safety ceiling on |gate voltage| [V]
+    compliance_current_A: float = 1e-6    # Gate leakage current compliance [A]
+    source_delay_s: float       = 0.05
+
+
+@dataclass
 class MagnetConfig:
     """
     Kepco BOP-GL bipolar power supply, used as a current source for an
-    electromagnet (see kepco_magnet.KepkoBOPGL). Identical role/shape to
-    MagnetConfig in mfli_dual_harmonic.py — the field is measured live via
-    the Gaussmeter (see GaussmeterConfig), never inferred from a
-    current->field calibration constant.
+    electromagnet. Identical role/shape to MagnetConfig in
+    dc_hall_measurement.py, but here the field is parked at a fixed value
+    (or a list of values, each run separately) rather than swept.
     """
     visa_resource:        str   = "GPIB0::6::INSTR"
     current_limit_A:      float = 50.0    # Software current limit  [A]
@@ -126,45 +130,27 @@ class MagnetConfig:
 
 @dataclass
 class GaussmeterConfig:
-    """Lake Shore 475 DSP Gaussmeter (see lakeshore475.LakeShore475)."""
+    """Lake Shore 475 DSP Gaussmeter — measures the actual field once the
+    magnet is parked."""
     visa_resource: str   = "GPIB0::12::INSTR"
     unit:          str   = "T"     # 'T' or 'G' — read_field_mT() only knows these two
-    n_averages:    int   = 10      # Field readings averaged per measurement point
+    n_averages:    int   = 10      # Field readings averaged
     read_delay_s:  float = 0.05    # Delay between successive readings  [s]
 
 
 @dataclass
 class AcquisitionConfig:
     """Timing and averaging parameters."""
-    settling_time_s: float = 1.0      # Dead-time after a field change  [s]
-    n_reversals: int       = 5        # +I/-I reversal pairs averaged per point
-    output_file: str       = "dc_hall.csv"
+    settling_time_s: float = 0.2      # Dead-time after a gate voltage step [s]
+    n_averages: int        = 5        # Voltage samples averaged per point
+    output_file: str       = "dc_gate_sweep.csv"
 
 
 @dataclass
-class FieldPoint:
-    """
-    One point in the measurement sequence.
-
-    The magnetic field sweep (magnet_current_A below) is a worked example
-    of the general pattern for sweeping any external parameter — mirrors
-    MeasurementPoint in mfli_dual_harmonic.py:
-
-        1.  Add a plain field here, e.g. temperature_K: float = 300.0
-        2.  Supply a set_action that applies it.
-        3.  Add the field to the `record` dict inside run_measurement()
-            so it is logged to the CSV.
-
-    The set_action is called first at each point, then the script settles
-    and acquires — no other changes are needed.
-
-    Note there is no `magnet_field_mT` input field: the field isn't known
-    ahead of the sweep, it's measured live by the Lake Shore 475 Gaussmeter
-    inside run_measurement() and only appears in the output `record`.
-    """
-    magnet_current_A: Optional[float] = None
+class GatePoint:
+    """One point in the gate voltage sweep."""
+    gate_voltage_V: float
     settling_override_s: Optional[float] = None
-    set_action: Optional[Callable[[], None]] = field(default=None, repr=False)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -172,13 +158,13 @@ class FieldPoint:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def connect_source(cfg: SourceConfig) -> Keithley6221:
-    """Open and configure the Keithley 6221 as a DC current source."""
+    """Open and configure the Keithley 6221 as a fixed DC current source."""
     source = Keithley6221(cfg.visa_resource)
     source.reset()
     source.source_auto_range = True
     source.source_compliance = cfg.compliance_V
     source.source_delay = cfg.source_delay_s
-    source.source_current = 0.0
+    source.source_current = cfg.sense_current_A
     source.enable_source()
     log.info("Keithley 6221 connected: %s  I_sense=%.4g A  compliance=%.2f V",
               cfg.visa_resource, cfg.sense_current_A, cfg.compliance_V)
@@ -186,7 +172,7 @@ def connect_source(cfg: SourceConfig) -> Keithley6221:
 
 
 def connect_voltmeter(cfg: VoltmeterConfig) -> Keithley2182:
-    """Open and configure the Keithley 2182 for a Hall voltage readout."""
+    """Open and configure the Keithley 2182 for a DUT voltage readout."""
     voltmeter = Keithley2182(cfg.visa_resource)
     voltmeter.reset()
     voltmeter.ch_1.setup_voltage(auto_range=cfg.auto_range, nplc=cfg.nplc)
@@ -202,22 +188,48 @@ def shutdown_source(source: Keithley6221) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Gate control (Keithley 2400)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def connect_gate(cfg: GateConfig) -> Keithley2400:
+    """Open and configure the Keithley 2400 as the gate voltage source."""
+    gate = Keithley2400(cfg.visa_resource)
+    gate.reset()
+    gate.apply_voltage(compliance_current=cfg.compliance_current_A)
+    gate.source_voltage = 0.0
+    gate.enable_source()
+    log.info(
+        "Keithley 2400 gate connected: %s  V_limit=±%.2f V  I_compliance=%.3g A",
+        cfg.visa_resource, cfg.gate_voltage_limit_V, cfg.compliance_current_A,
+    )
+    return gate
+
+
+def set_gate_voltage(gate: Keithley2400, cfg: GateConfig, voltage_V: float) -> None:
+    """Set the gate voltage, refusing to exceed the configured software limit."""
+    if abs(voltage_V) > cfg.gate_voltage_limit_V:
+        raise ValueError(
+            f"Requested gate voltage {voltage_V:.3f} V exceeds configured "
+            f"limit ±{cfg.gate_voltage_limit_V:.3f} V — refusing to set it."
+        )
+    gate.source_voltage = voltage_V
+
+
+def shutdown_gate(gate: Keithley2400) -> None:
+    """Ramp the gate voltage to 0 V and disable the 2400's output."""
+    gate.ramp_to_voltage(0.0)
+    gate.shutdown()
+    log.info("Keithley 2400 gate output disabled")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Magnet control (Kepco BOP-GL current source, via VISA/PyVISA)
 # ─────────────────────────────────────────────────────────────────────────────
-# Identical to mfli_dual_harmonic.py's magnet helpers — duplicated here
-# (rather than imported across the MFLI/DC boundary) so this module stays
-# self-contained, matching the existing house convention.
+# Identical to dc_hall_measurement.py's magnet helpers — duplicated here so
+# this module stays self-contained, matching the existing house convention.
 
 def connect_magnet(cfg: MagnetConfig) -> KepkoBOPGL:
-    """
-    Open a VISA session to the Kepco BOP-GL and arm it as a current source.
-
-    See mfli_dual_harmonic.connect_magnet for the full rationale — in
-    short: clears stale CURR:LIM/VOLT:LIM setpoint ceilings back to the
-    supply's full rating (independent of, and not restored by, *RST),
-    then puts it in constant-current mode with the configured software
-    compliance voltage and current limit.
-    """
+    """Open a VISA session to the Kepco BOP-GL and arm it as a current source."""
     rm = pyvisa.ResourceManager()
     psu = KepkoBOPGL(rm.open_resource(cfg.visa_resource))
 
@@ -288,48 +300,12 @@ def shutdown_gaussmeter(gm: LakeShore475) -> None:
 # Data acquisition
 # ─────────────────────────────────────────────────────────────────────────────
 
-def acquire_hall_voltage(
-    source: Keithley6221,
-    voltmeter: Keithley2182,
-    src_cfg: SourceConfig,
-    n_reversals: int,
-    stop_event: Optional[threading.Event] = None,
-) -> dict:
-    """
-    Reverse the sense current n_reversals times and average the resulting
-    Hall voltage, cancelling any offset common to both polarities (thermal
-    EMFs, amplifier offset, etc.):
-
-        V_Hall = (V(+I) - V(-I)) / 2
-
-    Leaves the source at +sense_current_A on return. If `stop_event` fires
-    partway through, returns the mean/std of whatever pairs were already
-    collected (at least one).
-    """
-    samples = np.empty(n_reversals)
-    n_used = 0
-
-    for i in range(n_reversals):
-        source.source_current = src_cfg.sense_current_A
-        v_plus = voltmeter.voltage
-
-        source.source_current = -src_cfg.sense_current_A
-        v_minus = voltmeter.voltage
-
-        samples[i] = (v_plus - v_minus) / 2.0
-        n_used = i + 1
-
-        if stop_event is not None and stop_event.is_set():
-            break
-
-    source.source_current = src_cfg.sense_current_A
-
-    used = samples[:n_used]
-    return {
-        "mean": float(np.mean(used)),
-        "std": float(np.std(used)),
-        "n_reversals": n_used,
-    }
+def acquire_averaged_voltage(voltmeter: Keithley2182, n_averages: int) -> dict:
+    """Read `n_averages` voltage samples off the 2182 and return mean/std."""
+    samples = np.empty(n_averages)
+    for i in range(n_averages):
+        samples[i] = voltmeter.voltage
+    return {"mean": float(np.mean(samples)), "std": float(np.std(samples))}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -339,34 +315,32 @@ def acquire_hall_voltage(
 def run_measurement(
     source:     Keithley6221,
     voltmeter:  Keithley2182,
+    gate:       Keithley2400,
     src_cfg:    SourceConfig,
+    gate_cfg:   GateConfig,
     acq_cfg:    AcquisitionConfig,
-    points:     List[FieldPoint],
+    points:     List[GatePoint],
     stop_event: Optional[threading.Event] = None,
     on_point:   Optional[Callable[[dict], None]] = None,
-    gaussmeter: Optional[LakeShore475] = None,
-    gauss_cfg:  Optional[GaussmeterConfig] = None,
+    magnet_current_A: Optional[float] = None,
+    magnet_field_mT:  Optional[float] = None,
 ) -> pd.DataFrame:
     """
-    Iterate over `points`, acquire the reversal-averaged Hall voltage at
-    each, log to CSV.
+    Iterate over `points`, set each gate voltage, acquire the averaged
+    voltage, log to CSV.
 
-    Returns a DataFrame of all recorded data. The CSV is written after
-    every point so a crash never loses data.
-
-    `stop_event`, if given, is checked before each point (and mid-reversal
-    inside acquire_hall_voltage) — set it to break out of the sweep early
-    while still returning the data collected so far, so callers can run
-    their normal shutdown/cleanup path instead of killing the process
-    outright.
+    `stop_event`, if given, is checked before each point — set it to break
+    out of the sweep early while still returning the data collected so
+    far, so callers can run their normal ramp-down/shutdown path instead
+    of killing the process outright.
 
     `on_point`, if given, is called with each point's `record` dict right
     after it's appended — lets a caller (e.g. a live TUI) show progress
     without polling the output CSV.
 
-    `gaussmeter`/`gauss_cfg`, if given, are used to measure the actual
-    field at each point (after settling) instead of leaving
-    `magnet_field_mT` unset.
+    `magnet_current_A`/`magnet_field_mT`, if given, are recorded on every
+    point — the magnet is parked once by the caller before the sweep
+    starts, not swept per point.
     """
     records: List[dict] = []
 
@@ -375,58 +349,41 @@ def run_measurement(
             log.info("Measurement aborted after %d / %d points.", idx, len(points))
             break
 
-        if pt.magnet_current_A is not None:
-            log.info("── Point %d / %d   I_magnet=%.4f A ──────────────────",
-                      idx + 1, len(points), pt.magnet_current_A)
-        else:
-            log.info("── Point %d / %d ──────────────────────────────────", idx + 1, len(points))
+        log.info("── Point %d / %d   Vg=%.4g V ──────────────────", idx + 1, len(points), pt.gate_voltage_V)
 
-        # ── 1. Apply external parameter ────────────────────────────────────
-        if pt.set_action is not None:
-            pt.set_action()
+        # ── 1. Apply gate voltage ────────────────────────────────────────────
+        set_gate_voltage(gate, gate_cfg, pt.gate_voltage_V)
 
-        # ── 2. Settle ──────────────────────────────────────────────────────
+        # ── 2. Settle ────────────────────────────────────────────────────────
         settle = pt.settling_override_s if pt.settling_override_s is not None \
                  else acq_cfg.settling_time_s
-        log.info("   Settling %.2f s ...", settle)
-        time.sleep(settle)
+        if settle > 0:
+            time.sleep(settle)
 
-        # ── 3. Measure field (Lake Shore 475 Gaussmeter) ────────────────────
-        field_mT = None
-        if gaussmeter is not None and gauss_cfg is not None:
-            field_mT = read_field_mT(gaussmeter, gauss_cfg)
-            log.info("   B=%.4f mT (measured)", field_mT)
+        # ── 3. Acquire voltage ───────────────────────────────────────────────
+        v = acquire_averaged_voltage(voltmeter, acq_cfg.n_averages)
+        r_chord = v["mean"] / src_cfg.sense_current_A if src_cfg.sense_current_A != 0 else float("nan")
+        log.info("   V=%.4e V  σ=%.2e V  R=%.5g Ω", v["mean"], v["std"], r_chord)
 
-        # ── 4. Acquire reversal-averaged Hall voltage ───────────────────────
-        hv = acquire_hall_voltage(source, voltmeter, src_cfg, acq_cfg.n_reversals, stop_event)
-        r_hall = hv["mean"] / src_cfg.sense_current_A
-        log.info("   V_Hall=%.4e V  σ=%.2e V  R_Hall=%.5g Ω  (n=%d reversals)",
-                  hv["mean"], hv["std"], r_hall, hv["n_reversals"])
-
-        # ── 5. Build record ──────────────────────────────────────────────────
-        record: dict = {
-            "point_index":      idx,
-            "timestamp":        time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "magnet_current_A": pt.magnet_current_A,
-            "magnet_field_mT":  field_mT,
-            "sense_current_A":  src_cfg.sense_current_A,
-            "hall_voltage_V":   hv["mean"],
-            "hall_voltage_std_V": hv["std"],
-            "hall_resistance_ohm": r_hall,
-            "n_reversals":      hv["n_reversals"],
+        # ── 4. Build record ────────────────────────────────────────────────────
+        record = {
+            "point_index":     idx,
+            "timestamp":       time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "gate_voltage_V":  pt.gate_voltage_V,
+            "sense_current_A": src_cfg.sense_current_A,
+            "voltage_V":       v["mean"],
+            "voltage_std_V":   v["std"],
+            "resistance_ohm":  r_chord,
+            "magnet_current_A": magnet_current_A,
+            "magnet_field_mT":  magnet_field_mT,
         }
         records.append(record)
-
         if on_point is not None:
             on_point(record)
 
-        # ── 6. Write incrementally (never lose data on a crash) ────────────
+        # ── 5. Write incrementally (never lose data on a crash) ────────────
         Path(acq_cfg.output_file).parent.mkdir(parents=True, exist_ok=True)
         pd.DataFrame(records).to_csv(acq_cfg.output_file, index=False)
-
-        if stop_event is not None and stop_event.is_set():
-            log.info("User aborted measurement mid-point.")
-            break
 
     log.info("Measurement complete. %d points saved to '%s'.", len(records), acq_cfg.output_file)
     return pd.DataFrame(records)
@@ -440,9 +397,9 @@ def main() -> None:
     # ── Source & voltmeter ───────────────────────────────────────────────────
     src_cfg = SourceConfig(
         visa_resource   = "GPIB0::12::INSTR",
-        sense_current_A = 1e-3,     # A
-        compliance_V    = 2.0,      # V
-        source_delay_s  = 0.05,     # s
+        sense_current_A = 1e-6,
+        compliance_V    = 2.0,
+        source_delay_s  = 0.05,
     )
     source = connect_source(src_cfg)
 
@@ -453,57 +410,33 @@ def main() -> None:
     )
     voltmeter = connect_voltmeter(volt_cfg)
 
+    # ── Gate (Keithley 2400) ──────────────────────────────────────────────────
+    gate_cfg = GateConfig(
+        visa_resource        = "GPIB0::24::INSTR",
+        gate_voltage_limit_V = 20.0,
+        compliance_current_A = 1e-6,
+    )
+    gate = connect_gate(gate_cfg)
+
     # ── Acquisition settings ─────────────────────────────────────────────────
     acq_cfg = AcquisitionConfig(
-        settling_time_s = 1.0,      # wait for magnet to settle
-        n_reversals     = 5,
-        output_file     = str(_DATA_DIR / f"dc_hall_{datetime.now():%Y%m%d_%H%M%S}.csv"),
+        settling_time_s = 0.2,
+        n_averages      = 5,
+        output_file     = str(_DATA_DIR / f"dc_gate_sweep_{datetime.now():%Y%m%d_%H%M%S}.csv"),
     )
 
-    # ── Magnet (Kepco BOP-GL current source) ─────────────────────────────────
-    magnet_cfg = MagnetConfig(
-        visa_resource        = "GPIB0::6::INSTR",
-        current_limit_A      = 35,    # ← safe continuous limit for your magnet
-        voltage_compliance_V = 15.0,
-        ramp_step_A          = 0.1,
-        ramp_delay_s         = 0.05,
-    )
-    magnet = connect_magnet(magnet_cfg)
+    # ── Gate voltage sweep points ─────────────────────────────────────────────
+    gate_voltages_V = linear_sweep(start=-10.0, stop=10.0, step=0.5, bidirectional=True)
+    points = [GatePoint(gate_voltage_V=float(v)) for v in gate_voltages_V]
 
-    # ── Gaussmeter (Lake Shore 475, measures the actual field) ────────────────
-    gauss_cfg = GaussmeterConfig(
-        visa_resource = "GPIB0::12::INSTR",   # ← set to your 475's GPIB address
-        unit          = "T",
-        n_averages    = 10,
-        read_delay_s  = 0.05,
-    )
-    gaussmeter = connect_gaussmeter(gauss_cfg)
-
-    # ── Measurement points  — bidirectional magnet-current sweep ─────────────
-    # The field itself (magnet_field_mT in the output) is measured live by
-    # the gaussmeter at each point, not computed from the current.
-    currents_A = linear_sweep(start=-20.0, stop=20.0, step=2.0, bidirectional=True)
-
-    points = [
-        FieldPoint(
-            magnet_current_A = I,
-            set_action = lambda I=I: set_magnet_current(magnet, magnet_cfg, I),
-        )
-        for I in currents_A
-    ]
-
-    # ── Run ──────────────────────────────────────────────────────────────────
-    # The magnet drives an inductive load, so always ramp it back to zero and
-    # disable the output — even if the measurement raises partway through.
-    # Likewise always disable the 6221's current output.
+    # ── Run (no field parked in this example — see the TUI for the optional
+    #    single-value-or-list magnet current) ─────────────────────────────────
     try:
-        df = run_measurement(source, voltmeter, src_cfg, acq_cfg, points,
-                              gaussmeter=gaussmeter, gauss_cfg=gauss_cfg)
+        df = run_measurement(source, voltmeter, gate, src_cfg, gate_cfg, acq_cfg, points)
         print("\n", df.to_string(index=False))
     finally:
+        shutdown_gate(gate)
         shutdown_source(source)
-        shutdown_magnet(magnet, magnet_cfg)
-        shutdown_gaussmeter(gaussmeter)
 
 
 if __name__ == "__main__":

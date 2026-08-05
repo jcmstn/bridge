@@ -40,6 +40,7 @@ Requirements:
 
 import sys
 import time
+import math
 import logging
 import threading
 import numpy as np
@@ -54,19 +55,13 @@ import zhinst.utils as ziutils
 
 import pyvisa
 
-# The Kepco magnet driver lives in a sibling folder whose name contains a
-# space ("KEPCO magnet"), so it can't be installed as a normal package —
-# add it to sys.path directly.
-_KEPCO_DIR = Path(__file__).resolve().parent.parent / "KEPCO magnet"
-if str(_KEPCO_DIR) not in sys.path:
-    sys.path.insert(0, str(_KEPCO_DIR))
+# The Kepco magnet and Lake Shore 475 drivers live in the shared
+# bridge/instruments folder — add it to sys.path directly (it's not
+# installed as a normal package).
+_INSTRUMENTS_DIR = Path(__file__).resolve().parent.parent / "instruments"
+if str(_INSTRUMENTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_INSTRUMENTS_DIR))
 from kepco_magnet import KepkoBOPGL  # noqa: E402
-
-# Same story for the Lake Shore 475 Gaussmeter driver — its own sibling
-# folder, shared by every program in bridge/ that needs a field reading.
-_LAKESHORE_DIR = Path(__file__).resolve().parent.parent / "LakeShore 475"
-if str(_LAKESHORE_DIR) not in sys.path:
-    sys.path.insert(0, str(_LAKESHORE_DIR))
 from lakeshore475 import LakeShore475  # noqa: E402
 
 # Data lives outside "bridge" (a sibling of it) so measurement output never
@@ -172,6 +167,19 @@ class GaussmeterConfig:
     unit:          str   = "T"     # 'T' or 'G' — read_field_mT() only knows these two
     n_averages:    int   = 10      # Field readings averaged per measurement point
     read_delay_s:  float = 0.05    # Delay between successive readings  [s]
+
+
+@dataclass
+class PhaseCalibrationResult:
+    """Outcome of auto_null_phase() — see that function's docstring."""
+    phase_before_deg: float    # demod phaseshift node value before calibration
+    phase_after_deg:  float    # demod phaseshift node value on return (already applied)
+    iterations:       int      # number of measure/adjust cycles actually run
+    x_V:              float    # last-measured X at the final phase
+    y_V:              float    # last-measured Y at the final phase (the nulled quadrature)
+    r_V:              float    # last-measured R
+    residual_ratio:   float    # |Y| / R at the final phase — ~0 means well nulled
+    converged:        bool     # whether |Y|/R reached tol_deg before max_iterations
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -342,6 +350,103 @@ def update_filter(daq: zi.ziDAQServer, cfg: DemodConfig, new_filter: FilterConfi
     daq.sync()
     log.info("Filter updated: %s/demod%d  TC=%.3f s  order=%d",
              d, di, new_filter.time_constant_s, new_filter.order)
+
+
+def get_demod_phase_deg(daq: zi.ziDAQServer, cfg: DemodConfig) -> float:
+    """Read a demodulator's reference phase-shift node (degrees)."""
+    return daq.getDouble(f"/{cfg.device}/demods/{cfg.demod_index}/phaseshift")
+
+
+def set_demod_phase_deg(daq: zi.ziDAQServer, cfg: DemodConfig, phase_deg: float) -> None:
+    """
+    Set a demodulator's reference phase-shift (degrees) — the ZI-supported
+    way to compensate cable/contact/electronics delay without touching the
+    excitation itself. This is the same node LabOne's front-panel "Phase"
+    field (and its "Auto" button) writes to.
+
+    It's per-demodulator: adjusting it on one demod does not affect any
+    other demod, even one sharing the same oscillator (e.g. this doesn't
+    touch the follower's 2f phase), and it is independent of Multi-Device
+    Synchronization — MDS aligns sample clocks/trigger across devices, not
+    per-demod reference phase, so this is safe to call any time after
+    configure_demodulator().
+    """
+    daq.setDouble(f"/{cfg.device}/demods/{cfg.demod_index}/phaseshift", phase_deg)
+    daq.sync()
+
+
+def auto_null_phase(
+    daq: zi.ziDAQServer,
+    cfg: DemodConfig,
+    n_averages: int = 20,
+    max_iterations: int = 5,
+    tol_deg: float = 0.02,
+) -> PhaseCalibrationResult:
+    """
+    Null the Y quadrature of `cfg`'s demodulator by adjusting its reference
+    phaseshift node — equivalent to LabOne's "Auto" phase button.
+
+    Why this is the right calibration target: at 1st harmonic, a Hall bar's
+    transverse voltage is dominated by the planar/anomalous/ordinary Hall
+    effect, a purely resistive response (V ∝ R·I(t)) that must be exactly
+    in phase with the drive current. Any measured Y at 1f is therefore
+    instrumental delay — cabling, contact impedance, source/ADC — not
+    physics. Calibrating against the device's own signal (rather than a
+    separate standard resistor) captures that real, in-situ delay. Run
+    this with the sample actually driven, ideally at a saturated field
+    point where the PHE/AHE signal is large and well-behaved.
+
+    Note this only calibrates `cfg`'s own device/demod. In a dual-MFLI
+    setup where 1f and 2f are measured on different physical devices, this
+    does NOT establish the 2f device's phase — that needs its own check
+    (see the module docstring / TUI hint on verifying which of X2f/Y2f
+    actually carries the field-dependent signal).
+
+    Iterates because a single large correction can interact with the
+    filter's own delay/settling; each round re-measures before deciding
+    whether to adjust further. Stops once |residual angle| < tol_deg or
+    `max_iterations` is reached. The node's sign convention (whether
+    increasing phaseshift increases or decreases measured Y) isn't assumed
+    — if a correction makes the residual worse, the sign is flipped.
+    """
+    phase_before = get_demod_phase_deg(daq, cfg)
+    phase = phase_before
+    sign = 1.0
+    prev_abs_residual_deg: Optional[float] = None
+    result: Optional[PhaseCalibrationResult] = None
+
+    for i in range(max_iterations):
+        d = acquire_averaged(daq, cfg, n_averages)
+        if d["r_mean"] <= 0:
+            raise RuntimeError(
+                f"No signal on {cfg.device}/demod{cfg.demod_index} (R=0) — "
+                "can't null a phase against zero amplitude."
+            )
+        residual_deg = math.degrees(math.atan2(d["y_mean"], d["x_mean"]))
+        abs_residual = abs(residual_deg)
+        converged = abs_residual < tol_deg
+        result = PhaseCalibrationResult(
+            phase_before_deg=phase_before, phase_after_deg=phase, iterations=i + 1,
+            x_V=d["x_mean"], y_V=d["y_mean"], r_V=d["r_mean"],
+            residual_ratio=abs(d["y_mean"]) / d["r_mean"], converged=converged,
+        )
+        if converged or i == max_iterations - 1:
+            break
+        if prev_abs_residual_deg is not None and abs_residual > prev_abs_residual_deg:
+            # Last correction made the residual worse — this node's sign
+            # convention is opposite to what we assumed; flip and continue.
+            sign = -sign
+        phase = (phase + sign * residual_deg + 180.0) % 360.0 - 180.0
+        set_demod_phase_deg(daq, cfg, phase)
+        prev_abs_residual_deg = abs_residual
+
+    log.info(
+        "Phase null on %s/demod%d: %.4f° → %.4f°  (%d iteration(s), %s, |Y|/R=%.2e)",
+        cfg.device, cfg.demod_index, phase_before, result.phase_after_deg,
+        result.iterations, "converged" if result.converged else "did not fully converge",
+        result.residual_ratio,
+    )
+    return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -28,6 +28,7 @@ import logging
 import math
 import multiprocessing as mp
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -65,6 +66,8 @@ from mfli_dual_harmonic import (
     MagnetConfig,
     MeasurementPoint,
     OutputConfig,
+    acquire_averaged,
+    auto_null_phase,
     bidirectional_current_sweep,
     configure_demodulator,
     configure_output,
@@ -123,6 +126,10 @@ DEFAULTS: dict = {
     "gaussmeter_visa_resource": "GPIB0::12::INSTR",
     "gaussmeter_n_averages": "10",
     "gaussmeter_read_delay_s": "0.05",
+    "enable_phase_cal": False,
+    "phase_cal_current_A": "",
+    "phase_cal_n_averages": "20",
+    "phase_cal_max_iterations": "5",
 }
 
 # id -> caster, for every free-text numeric field (Select/Switch handled separately)
@@ -146,9 +153,14 @@ NUMERIC_FIELDS: dict = {
     "n_points": int,
     "gaussmeter_n_averages": int,
     "gaussmeter_read_delay_s": float,
+    "phase_cal_n_averages": int,
+    "phase_cal_max_iterations": int,
 }
 TEXT_FIELDS = ["leader_device", "follower_device", "daq_host", "output_name", "visa_resource",
                "gaussmeter_visa_resource"]
+# Free-text, blank-allowed: parsed to Optional[float] by hand in parse_state()
+# rather than going through NUMERIC_FIELDS' "blank is an error" casting.
+OPTIONAL_NUMERIC_FIELDS = ["phase_cal_current_A"]
 MAGNET_FIELD_IDS = [
     "visa_resource", "current_limit_A", "voltage_compliance_V",
     "ramp_step_A", "ramp_delay_s", "i_min_A", "i_max_A", "n_points",
@@ -205,6 +217,10 @@ class MeasurementPlan:
     magnet_cfg: Optional[MagnetConfig]
     gauss_cfg: Optional[GaussmeterConfig]
     currents_A: Optional[np.ndarray]
+    phase_cal_enabled: bool
+    phase_cal_current_A: Optional[float]
+    phase_cal_n_averages: int
+    phase_cal_max_iterations: int
 
     @property
     def total_points(self) -> int:
@@ -216,10 +232,10 @@ class MeasurementPlan:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def field(field_id: str, label_text: str, default: str, *, kind: str = "number",
-          hint: str = "", validators=None) -> Vertical:
+          hint: str = "", validators=None, valid_empty: bool = False) -> Vertical:
     children = [Label(label_text, classes="field-label"),
                 Input(value=default, id=field_id, type=kind, validators=validators,
-                      valid_empty=False)]
+                      valid_empty=valid_empty)]
     if hint:
         children.append(Label(hint, classes="hint"))
     return Vertical(*children, classes="field")
@@ -321,6 +337,34 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     else:
         info.append("Single point — no field sweep, magnet untouched.")
         info.append(f"Estimated run time ≈ {format_duration(per_point_s)}")
+
+    # ── Phase calibration ───────────────────────────────────────────────────
+    if state["enable_phase_cal"]:
+        if state["phase_cal_current_A"] is not None:
+            if not state["enable_sweep"]:
+                warnings.append(
+                    "Phase-cal current is set but field sweep is disabled — "
+                    "it will be ignored; calibration runs at the present field."
+                )
+            else:
+                max_abs_I = max(abs(state["i_min_A"]), abs(state["i_max_A"]))
+                if abs(state["phase_cal_current_A"]) > state["current_limit_A"]:
+                    errors.append(
+                        f"Phase-cal current ({state['phase_cal_current_A']:g} A) exceeds "
+                        f"the current limit ({state['current_limit_A']:g} A)."
+                    )
+                elif abs(state["phase_cal_current_A"]) < max_abs_I:
+                    warnings.append(
+                        f"Phase-cal current ({state['phase_cal_current_A']:g} A) is smaller "
+                        f"than the sweep extremes (±{max_abs_I:g} A) — pick a point near "
+                        "saturation for a clean, well-behaved PHE/AHE null."
+                    )
+                info.append(
+                    f"Phase cal: ramp to {state['phase_cal_current_A']:g} A, null 1f Y "
+                    "(leader demod phaseshift), then run the sweep."
+                )
+        else:
+            info.append("Phase cal: null 1f Y at the present field (no magnet ramp).")
 
     return info, warnings, errors
 
@@ -600,6 +644,40 @@ class RunScreen(Screen):
             else:
                 points = [MeasurementPoint()]
 
+            if plan.phase_cal_enabled:
+                self._set_status_threadsafe(
+                    "Phase calibration: nulling 1f Y (leader demod phaseshift) …"
+                )
+                if magnet is not None and plan.phase_cal_current_A is not None:
+                    log.info("Phase calibration: ramping magnet to %.4f A ...",
+                             plan.phase_cal_current_A)
+                    set_magnet_current(magnet, plan.magnet_cfg, plan.phase_cal_current_A)
+                    time.sleep(plan.acq_cfg.settling_time_s)
+                result = auto_null_phase(
+                    daq, plan.demod1_cfg,
+                    n_averages=plan.phase_cal_n_averages,
+                    max_iterations=plan.phase_cal_max_iterations,
+                )
+                if not result.converged:
+                    log.warning(
+                        "Phase null did not fully converge after %d iteration(s) "
+                        "(|Y|/R=%.2e) — check cabling/contacts before trusting the 2f data.",
+                        result.iterations, result.residual_ratio,
+                    )
+                # 2f is measured on a different physical device (the follower) with its
+                # own delay chain, so nulling the leader's 1f phase says nothing about
+                # which 2f channel is physically correct — that must be verified
+                # empirically. Both X2f/Y2f are already saved per point in the CSV;
+                # this snapshot just gives an immediate look at the calibration point.
+                d2 = acquire_averaged(daq, plan.demod2_cfg, plan.phase_cal_n_averages)
+                log.info(
+                    "2f snapshot at calibration point: X=%.4e V  Y=%.4e V  R=%.4e V — "
+                    "don't assume this matches 1f's X/Y convention (V_2w ~ cos, not sin); "
+                    "check which channel carries the structured field dependence in the "
+                    "recorded sweep before trusting either one.",
+                    d2["x_mean"], d2["y_mean"], d2["r_mean"],
+                )
+
             self._set_status_threadsafe("Running measurement …")
             run_measurement(
                 daq, plan.demod1_cfg, plan.demod2_cfg, plan.acq_cfg, points,
@@ -747,6 +825,42 @@ class MFLIDualHarmonicApp(App):
                         yield field("gaussmeter_read_delay_s", "Delay between readings (s)",
                                     DEFAULTS["gaussmeter_read_delay_s"])
 
+                with Collapsible(title="Phase calibration (Zurich lock-in null)", collapsed=True):
+                    yield switch_field(
+                        "enable_phase_cal",
+                        "Auto-null 1f phase before run (leader demod phaseshift)",
+                        DEFAULTS["enable_phase_cal"],
+                    )
+                    yield field(
+                        "phase_cal_current_A", "Calibration magnet current (A)",
+                        DEFAULTS["phase_cal_current_A"], kind="text", valid_empty=True,
+                        hint="Blank = null at the present field (no ramp). Otherwise pick a "
+                             "point near saturation — e.g. matching i_max — so the PHE/AHE "
+                             "1f signal is large and well-behaved. Only used if the field "
+                             "sweep above is enabled.",
+                    )
+                    yield field("phase_cal_n_averages", "Averages per phase read",
+                                DEFAULTS["phase_cal_n_averages"], kind="integer",
+                                validators=[Number(minimum=1, failure_description="must be ≥ 1")])
+                    yield field("phase_cal_max_iterations", "Max null iterations",
+                                DEFAULTS["phase_cal_max_iterations"], kind="integer",
+                                validators=[Number(minimum=1, failure_description="must be ≥ 1")])
+                    yield Static(
+                        "Nulls the leader's 1f Y quadrature by adjusting its demod "
+                        "phaseshift node (the same thing LabOne's \"Auto\" phase button "
+                        "does) — the resistive PHE/AHE response at 1f must be exactly in "
+                        "phase with the drive current, so any measured Y there is pure "
+                        "instrumental delay. Per-demodulator and independent of MDS, so it "
+                        "doesn't touch the follower's 2f phase. X and Y at 2f are both "
+                        "already recorded per point in the CSV — check which one actually "
+                        "tracks field there before trusting it (V₂ω ∝ cos, "
+                        "not sin, so X₁f being right says nothing about X₂f). "
+                        "Repeating the check at a couple of currents or frequencies helps "
+                        "separate real electrical delay from Joule-heating/ANE "
+                        "contamination.",
+                        classes="hint",
+                    )
+
             with Vertical(id="sidebar"):
                 yield Static("Summary", classes="sidebar-title")
                 yield Static(id="summary")
@@ -769,12 +883,13 @@ class MFLIDualHarmonicApp(App):
     # ── Form state I/O ───────────────────────────────────────────────────────
 
     def _all_field_ids(self) -> list[str]:
-        return list(NUMERIC_FIELDS) + TEXT_FIELDS
+        return list(NUMERIC_FIELDS) + TEXT_FIELDS + OPTIONAL_NUMERIC_FIELDS
 
     def collect_raw(self) -> dict:
         raw: dict = {fid: self.query_one(f"#{fid}", Input).value for fid in self._all_field_ids()}
         raw["sinc_filter"] = self.query_one("#sinc_filter", Switch).value
         raw["enable_sweep"] = self.query_one("#enable_sweep", Switch).value
+        raw["enable_phase_cal"] = self.query_one("#enable_phase_cal", Switch).value
         raw["order"] = self.query_one("#order", Select).value
         return raw
 
@@ -793,6 +908,8 @@ class MFLIDualHarmonicApp(App):
             self.query_one("#sinc_filter", Switch).value = bool(saved["sinc_filter"])
         if "enable_sweep" in saved:
             self.query_one("#enable_sweep", Switch).value = bool(saved["enable_sweep"])
+        if "enable_phase_cal" in saved:
+            self.query_one("#enable_phase_cal", Switch).value = bool(saved["enable_phase_cal"])
         if "order" in saved:
             try:
                 self.query_one("#order", Select).value = int(saved["order"])
@@ -818,8 +935,19 @@ class MFLIDualHarmonicApp(App):
                 state[fid] = 0
         for fid in TEXT_FIELDS:
             state[fid] = self.query_one(f"#{fid}", Input).value.strip()
+        for fid in OPTIONAL_NUMERIC_FIELDS:
+            raw = self.query_one(f"#{fid}", Input).value.strip()
+            if raw:
+                try:
+                    state[fid] = float(raw)
+                except ValueError:
+                    errors.append(f"'{fid}' is not a valid number: {raw!r}")
+                    state[fid] = None
+            else:
+                state[fid] = None
         state["sinc_filter"] = self.query_one("#sinc_filter", Switch).value
         state["enable_sweep"] = self.query_one("#enable_sweep", Switch).value
+        state["enable_phase_cal"] = self.query_one("#enable_phase_cal", Switch).value
         state["order"] = int(self.query_one("#order", Select).value)
         return state, errors
 
@@ -933,6 +1061,10 @@ class MFLIDualHarmonicApp(App):
             leader=state["leader_device"], follower=state["follower_device"],
             out_cfg=out_cfg, demod1_cfg=demod1_cfg, demod2_cfg=demod2_cfg,
             acq_cfg=acq_cfg, magnet_cfg=magnet_cfg, gauss_cfg=gauss_cfg, currents_A=currents_A,
+            phase_cal_enabled=state["enable_phase_cal"],
+            phase_cal_current_A=state["phase_cal_current_A"],
+            phase_cal_n_averages=state["phase_cal_n_averages"],
+            phase_cal_max_iterations=state["phase_cal_max_iterations"],
         )
 
 

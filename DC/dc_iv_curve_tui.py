@@ -12,6 +12,12 @@ time, estimated sweep duration) and flags anything that risks a bad
 measurement (source/voltmeter sharing a GPIB address, a degenerate
 current range) as you type.
 
+An optional gate voltage (Keithley 2400, off by default) can be held
+fixed for the whole sweep, or given a comma-separated list of values —
+one complete current sweep runs per value, each saved to its own file and
+plotted together in the same window with a different color. The program
+runs fine with no 2400 connected as long as the gate stays off.
+
 Run with:
     python dc_iv_curve_tui.py
 
@@ -28,7 +34,7 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import numpy as np
 from rich.text import Text
@@ -56,15 +62,19 @@ from textual.widgets import (
 from dc_iv_curve import (
     AcquisitionConfig,
     CurrentPoint,
+    GateConfig,
     SourceConfig,
     VoltmeterConfig,
-    bidirectional_current_sweep,
+    connect_gate,
     connect_source,
     connect_voltmeter,
     ramp_current_to_zero,
     run_measurement,
+    set_gate_voltage,
+    shutdown_gate,
     shutdown_source,
 )
+from dc_sweep_utils import build_output_path, linear_sweep, parse_value_list
 
 log = logging.getLogger("dc_iv_curve_tui")
 
@@ -72,6 +82,18 @@ log = logging.getLogger("dc_iv_curve_tui")
 # dc_iv_curve.py.
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 SETTINGS_PATH = _DATA_DIR / "dc_iv_curve_tui_settings.json"
+
+DC_IV_DESCRIPTION = (
+    "Sweeps a DC current with a Keithley 6221 and records the DC voltage "
+    "response with a Keithley 2182 at each point — a direct I-V curve, "
+    "swept bidirectionally so hysteresis is visible. Far more informative "
+    "than a single-point resistance for anything nonlinear (contacts, "
+    "tunnel junctions, diodes, gated 2D systems). No magnet is involved; "
+    "the current sweep is the whole measurement. An optional Keithley 2400 "
+    "gate voltage (off by default) can be held fixed, or swept through a "
+    "list of values — one complete I-V sweep per gate value, plotted "
+    "together in different colors."
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -90,7 +112,14 @@ DEFAULTS: dict = {
     "settling_time_s": "0.2",
     "n_averages": "5",
     "output_name": "dc_iv_curve",
-    "n_points": "41",
+    "output_subdir": "",
+    "step_A": "0.00005",
+    "bidirectional_sweep": True,
+    "enable_gate": False,
+    "gate_visa_resource": "GPIB0::24::INSTR",
+    "gate_voltage_limit_V": "20.0",
+    "gate_compliance_current_A": "1e-6",
+    "gate_voltage_values": "0.0",
 }
 
 # id -> caster, for every free-text numeric field (Switch handled separately)
@@ -102,9 +131,14 @@ NUMERIC_FIELDS: dict = {
     "nplc": float,
     "settling_time_s": float,
     "n_averages": int,
-    "n_points": int,
+    "step_A": float,
+    "gate_voltage_limit_V": float,
+    "gate_compliance_current_A": float,
 }
-TEXT_FIELDS = ["source_visa_resource", "voltmeter_visa_resource", "output_name"]
+TEXT_FIELDS = ["source_visa_resource", "voltmeter_visa_resource", "output_name",
+               "output_subdir", "gate_visa_resource", "gate_voltage_values"]
+GATE_FIELD_IDS = ["gate_visa_resource", "gate_voltage_limit_V",
+                   "gate_compliance_current_A", "gate_voltage_values"]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -148,10 +182,19 @@ class MeasurementPlan:
     volt_cfg: VoltmeterConfig
     acq_cfg: AcquisitionConfig
     currents_A: np.ndarray
+    output_subdir: str
+    output_prefix: str
+    gate_cfg: Optional[GateConfig] = None
+    gate_voltages: Optional[List[float]] = None
+
+    @property
+    def series_values(self) -> List[Optional[float]]:
+        """[None] for a single (gate-less or fixed) run, else one entry per gate voltage."""
+        return list(self.gate_voltages) if self.gate_voltages else [None]
 
     @property
     def total_points(self) -> int:
-        return len(self.currents_A)
+        return len(self.currents_A) * len(self.series_values)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -203,14 +246,43 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
 
     per_point_s = state["settling_time_s"] + state["n_averages"] * read_s
 
-    if state["n_points"] < 2:
-        errors.append("Points per sweep direction must be ≥ 2.")
-    total_points = max(0, 2 * state["n_points"] - 1)
-    info.append(
-        f"Sweep: {state['current_min_A']:g} A → {state['current_max_A']:g} A → "
-        f"{state['current_min_A']:g} A, {total_points} points (bidirectional — reveals hysteresis)"
-    )
-    info.append(f"Estimated total run time ≈ {format_duration(total_points * per_point_s)}")
+    if state["step_A"] <= 0:
+        errors.append("Sweep step size must be > 0 A.")
+        n_one_way = 0
+    else:
+        n_one_way = max(2, round(abs(state["current_max_A"] - state["current_min_A"]) / state["step_A"]) + 1)
+    n_sweep_points = n_one_way if not state["bidirectional_sweep"] else max(0, 2 * n_one_way - 1)
+    direction = (f"{state['current_min_A']:g} A → {state['current_max_A']:g} A → {state['current_min_A']:g} A"
+                 if state["bidirectional_sweep"]
+                 else f"{state['current_min_A']:g} A → {state['current_max_A']:g} A")
+    info.append(f"Sweep: {direction}, step={state['step_A']:g} A, {n_sweep_points} points")
+
+    # ── Gate (optional) ─────────────────────────────────────────────────────
+    if state["enable_gate"]:
+        if state["gate_visa_resource"] in (state["source_visa_resource"], state["voltmeter_visa_resource"]):
+            errors.append("Gate (2400) VISA resource must differ from the source/voltmeter resources.")
+        if state["gate_voltage_limit_V"] <= 0:
+            errors.append("Gate voltage limit must be > 0 V.")
+        gate_list = state.get("gate_voltage_list", [])
+        if state.get("gate_parse_error"):
+            errors.append(f"Gate voltage list: {state['gate_parse_error']}")
+        else:
+            over_limit = [v for v in gate_list if abs(v) > state["gate_voltage_limit_V"]]
+            if over_limit:
+                errors.append(
+                    f"Gate voltage(s) {over_limit} exceed the configured limit "
+                    f"±{state['gate_voltage_limit_V']:g} V."
+                )
+            n_series = len(gate_list)
+            if n_series > 1:
+                info.append(f"Gate: {n_series} values {gate_list} — {n_series} complete sweeps, "
+                            f"one file each, plotted together")
+            else:
+                info.append(f"Gate held fixed at {format_si(gate_list[0], 'V')}" if gate_list else "")
+            total_points = n_sweep_points * max(1, n_series)
+            info.append(f"Estimated total run time ≈ {format_duration(total_points * per_point_s)}")
+    else:
+        info.append(f"Estimated total run time ≈ {format_duration(n_sweep_points * per_point_s)}")
 
     return info, warnings, errors
 
@@ -221,9 +293,11 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
 # A GUI matplotlib backend and Textual's terminal control both want the main
 # thread. Rather than fight that, the live preview gets its own process with
 # its own main thread; new points are streamed to it over a
-# multiprocessing.Queue. The final two-panel PNG (I-V + numerical dV/dI) is
-# saved independently by dc_iv_curve.plot_results once the full sweep is in
-# hand — see _save_measurement_png below.
+# multiprocessing.Queue, tagged with a series_index/series_label so a
+# gate-voltage list shows up as one colored trace per value. The final
+# combined overlay PNG is saved independently by the TUI process itself
+# (see _save_measurement_png), so it doesn't depend on this window still
+# being open when the run finishes.
 
 def _live_plot_worker(queue: "mp.Queue") -> None:
     import matplotlib.pyplot as plt
@@ -234,51 +308,81 @@ def _live_plot_worker(queue: "mp.Queue") -> None:
         fig.canvas.manager.set_window_title("DC I-V live measurement")
     except Exception:
         pass
-    line, = ax.plot([], [], "o-", color="#2E3192")
     ax.set_xlabel("Current (A)")
     ax.set_ylabel("Voltage (V)")
     ax.set_title("Live measurement — I-V curve")
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
 
-    xs: list[float] = []
-    ys: list[float] = []
+    cmap = plt.get_cmap("tab10")
+    lines: dict[int, "plt.Line2D"] = {}
+    series_data: dict[int, tuple[list, list]] = {}
 
     def _drain(_frame=None):
-        updated = False
+        updated: set[int] = set()
+        new_series = False
         while True:
             try:
                 record = queue.get_nowait()
             except Exception:
                 break
+            idx = record.get("series_index", 0)
+            if idx not in lines:
+                label = record.get("series_label")
+                (line,) = ax.plot([], [], "o-", color=cmap(idx % 10), label=label)
+                lines[idx] = line
+                series_data[idx] = ([], [])
+                new_series = True
+            xs, ys = series_data[idx]
             xs.append(record["current_A"])
             ys.append(record["voltage_V"])
-            updated = True
+            updated.add(idx)
         if updated:
-            line.set_data(xs, ys)
+            for idx in updated:
+                xs, ys = series_data[idx]
+                lines[idx].set_data(xs, ys)
+            if new_series and any(l.get_label() and not l.get_label().startswith("_") for l in lines.values()):
+                ax.legend(loc="best", fontsize=8)
             ax.relim()
             ax.autoscale_view()
-        return (line,)
+        return tuple(lines.values())
 
     # Keep a reference so it isn't garbage-collected mid-run.
     _ani = FuncAnimation(fig, _drain, interval=300, cache_frame_data=False)
     plt.show()
 
 
-def _save_measurement_png(records: list[dict], csv_path: str) -> None:
-    """Save the two-panel I-V / dV/dI summary PNG from whatever points were
-    actually collected (including an aborted/partial run)."""
+def _save_measurement_png(records: list[dict], png_path: Path) -> None:
+    """Save a combined I-V overlay PNG (one color per gate-voltage series, if
+    any) from whatever points were actually collected (including an
+    aborted/partial run)."""
     if not records:
         return
 
     import matplotlib
     matplotlib.use("Agg")  # headless — must not touch the TUI's terminal
-    import pandas as pd
-    from dc_iv_curve import plot_results
+    import matplotlib.pyplot as plt
 
-    df = pd.DataFrame(records)
-    png_path = Path(csv_path).with_suffix(".png")
-    plot_results(df, png_path)
+    cmap = plt.get_cmap("tab10")
+    fig, ax = plt.subplots(figsize=(7, 5))
+
+    series_ids = sorted({r.get("series_index", 0) for r in records})
+    for idx in series_ids:
+        rows = [r for r in records if r.get("series_index", 0) == idx]
+        label = rows[0].get("series_label")
+        ax.plot([r["current_A"] for r in rows], [r["voltage_V"] for r in rows],
+                ".-", color=cmap(idx % 10), label=label)
+
+    ax.set_xlabel("Current (A)")
+    ax.set_ylabel("Voltage (V)")
+    ax.set_title("Measurement result")
+    ax.grid(alpha=0.3)
+    if any(r.get("series_label") for r in records):
+        ax.legend(loc="best", fontsize=8)
+    fig.tight_layout()
+    fig.savefig(png_path, dpi=150)
+    plt.close(fig)
+    log.info("Saved plot to '%s'", png_path)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -330,6 +434,7 @@ class RunScreen(Screen):
         self._records: list[dict] = []
         self._plot_queue: Optional["mp.Queue"] = None
         self._plot_process: Optional[mp.Process] = None
+        self._session_timestamp = f"{datetime.now():%Y%m%d_%H%M%S}"
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -344,7 +449,7 @@ class RunScreen(Screen):
 
     def on_mount(self) -> None:
         self.query_one("#results_table", DataTable).add_columns(
-            "#", "I (A)", "V (V)", "R (Ω)"
+            "#", "Vg (V)", "I (A)", "V (V)", "R (Ω)"
         )
         self._log_handler = _LogRelay(self)
         root = logging.getLogger()
@@ -387,15 +492,17 @@ class RunScreen(Screen):
             except Exception:
                 pass
         table = self.query_one("#results_table", DataTable)
+        gate_V = record.get("gate_voltage_V")
         table.add_row(
             str(record["point_index"] + 1),
+            f"{gate_V:.4g}" if gate_V is not None else "—",
             f"{record['current_A']:.4e}",
             f"{record['voltage_V']:.4e}",
             f"{record['resistance_ohm']:.5g}",
         )
         table.move_cursor(row=table.row_count - 1, scroll=True)
         self.query_one("#progress", ProgressBar).advance(1)
-        self._set_status(f"Point {record['point_index'] + 1} / {self.plan.total_points} complete.")
+        self._set_status(f"Point {len(self._records)} / {self.plan.total_points} complete.")
 
     def _on_finished(self, final_status: str) -> None:
         self._measurement_running = False
@@ -403,7 +510,9 @@ class RunScreen(Screen):
         self.query_one("#back_btn", Button).disabled = False
         self.query_one("#abort_btn", Button).disabled = True
         try:
-            _save_measurement_png(self._records, self.plan.acq_cfg.output_file)
+            out_dir = _DATA_DIR / self.plan.output_subdir if self.plan.output_subdir else _DATA_DIR
+            png_path = out_dir / f"{self.plan.output_prefix}_{self._session_timestamp}_combined.png"
+            _save_measurement_png(self._records, png_path)
         except Exception:
             log.exception("Could not save measurement plot PNG")
 
@@ -424,29 +533,67 @@ class RunScreen(Screen):
         elif event.button.id == "back_btn":
             self.app.pop_screen()
 
+    def _make_on_point(self, series_index: int, series_label: Optional[str]):
+        def _cb(record: dict) -> None:
+            record["series_index"] = series_index
+            record["series_label"] = series_label
+            self.app.call_from_thread(self._on_point, record)
+        return _cb
+
     @work(thread=True, exclusive=True)
     def do_run(self) -> None:
         plan = self.plan
         source = None
         voltmeter = None
+        gate = None
         try:
             self._set_status_threadsafe("Connecting to Keithley 6221 & 2182 …")
             source = connect_source(plan.src_cfg)
             voltmeter = connect_voltmeter(plan.volt_cfg)
 
-            points = [CurrentPoint(current_A=float(i)) for i in plan.currents_A]
+            if plan.gate_cfg is not None:
+                self._set_status_threadsafe("Connecting gate (Keithley 2400) …")
+                gate = connect_gate(plan.gate_cfg)
 
-            self._set_status_threadsafe("Running measurement …")
-            run_measurement(
-                source, voltmeter, plan.src_cfg, plan.acq_cfg, points,
-                stop_event=self._stop_event,
-                on_point=lambda record: self.app.call_from_thread(self._on_point, record),
-            )
+            for series_idx, gate_V in enumerate(plan.series_values):
+                if self._stop_event.is_set():
+                    break
+
+                label = None
+                suffix = ""
+                if gate_V is not None:
+                    label = f"Vg={gate_V:g}V"
+                    suffix = f"_Vg{gate_V:g}V"
+                    self._set_status_threadsafe(f"Setting gate to {gate_V:g} V …")
+                    set_gate_voltage(gate, plan.gate_cfg, gate_V)
+
+                plan.acq_cfg.output_file = str(build_output_path(
+                    _DATA_DIR, plan.output_subdir, plan.output_prefix,
+                    self._session_timestamp, suffix,
+                ))
+
+                points = [CurrentPoint(current_A=float(i)) for i in plan.currents_A]
+
+                status = "Running measurement …" if gate_V is None \
+                    else f"Running measurement (Vg={gate_V:g} V) …"
+                self._set_status_threadsafe(status)
+                run_measurement(
+                    source, voltmeter, plan.src_cfg, plan.acq_cfg, points,
+                    stop_event=self._stop_event,
+                    on_point=self._make_on_point(series_idx, label),
+                    gate_voltage_V=gate_V,
+                )
+
             final = "Measurement aborted." if self._stop_event.is_set() else "Measurement complete."
         except Exception as exc:
             log.exception("Measurement failed")
             final = f"ERROR: {exc}"
         finally:
+            if gate is not None:
+                try:
+                    shutdown_gate(gate)
+                except Exception:
+                    log.exception("Error while shutting down gate")
             if source is not None:
                 try:
                     ramp_current_to_zero(source)
@@ -468,7 +615,7 @@ class RunScreen(Screen):
 
 class DCIVCurveApp(App):
     TITLE = "DC I-V Curve"
-    SUB_TITLE = "Keithley 6221 + 2182 · current sweep"
+    SUB_TITLE = "Keithley 6221 + 2182 · current sweep · optional gate"
 
     CSS = """
     #body { height: 1fr; }
@@ -480,6 +627,7 @@ class DCIVCurveApp(App):
     .switch-row { height: 3; }
     .switch-row Label { margin-left: 1; content-align: left middle; height: 3; }
     .sidebar-title { text-style: bold underline; margin-bottom: 1; }
+    .card-desc { color: $text-muted; margin-bottom: 1; }
     #actionbar { height: 3; align: center middle; }
     """
 
@@ -527,14 +675,37 @@ class DCIVCurveApp(App):
                                 validators=[Number(minimum=1, failure_description="must be ≥ 1")])
                     yield field("output_name", "Output file name (prefix)",
                                 DEFAULTS["output_name"], kind="text")
+                    yield field("output_subdir", "Data sub-directory (optional)",
+                                DEFAULTS["output_subdir"], kind="text",
+                                hint="Saved to data/<sub-directory>/<prefix>_<timestamp>.csv")
 
                 with Collapsible(title="Sweep resolution", collapsed=False):
-                    yield field("n_points", "Points per sweep direction",
-                                DEFAULTS["n_points"], kind="integer",
-                                hint="Bidirectional: min → max → min (reveals hysteresis).",
-                                validators=[Number(minimum=2, failure_description="must be ≥ 2")])
+                    yield field("step_A", "Sweep step size (A)",
+                                DEFAULTS["step_A"],
+                                validators=[Number(minimum=1e-12, failure_description="must be > 0")])
+                    yield switch_field("bidirectional_sweep",
+                                       "Bidirectional sweep (min → max → min)",
+                                       DEFAULTS["bidirectional_sweep"])
+
+                with Collapsible(title="Gate voltage (Keithley 2400, optional)", collapsed=True):
+                    yield switch_field("enable_gate", "Enable gate (Keithley 2400)",
+                                       DEFAULTS["enable_gate"])
+                    yield field("gate_visa_resource", "Keithley 2400 (gate) VISA resource",
+                                DEFAULTS["gate_visa_resource"], kind="text")
+                    yield field("gate_voltage_limit_V", "Gate voltage software limit (V)",
+                                DEFAULTS["gate_voltage_limit_V"],
+                                hint="Hard safety ceiling on any gate voltage below.")
+                    yield field("gate_compliance_current_A", "Gate leakage compliance (A)",
+                                DEFAULTS["gate_compliance_current_A"])
+                    yield field("gate_voltage_values", "Gate voltage (V)",
+                                DEFAULTS["gate_voltage_values"], kind="text",
+                                hint="Single value, or comma-separated list — one complete "
+                                     "current sweep runs per value, each saved to its own "
+                                     "file and plotted together.")
 
             with Vertical(id="sidebar"):
+                yield Static("Description", classes="sidebar-title")
+                yield Static(DC_IV_DESCRIPTION, classes="card-desc")
                 yield Static("Summary", classes="sidebar-title")
                 yield Static(id="summary")
 
@@ -551,6 +722,7 @@ class DCIVCurveApp(App):
         # handler for the duration of a measurement.
         logging.getLogger().handlers.clear()
         self._load_settings()
+        self._set_gate_fields_enabled(self.query_one("#enable_gate", Switch).value)
         self.refresh_summary()
 
     # ── Form state I/O ───────────────────────────────────────────────────────
@@ -561,6 +733,8 @@ class DCIVCurveApp(App):
     def collect_raw(self) -> dict:
         raw: dict = {fid: self.query_one(f"#{fid}", Input).value for fid in self._all_field_ids()}
         raw["auto_range"] = self.query_one("#auto_range", Switch).value
+        raw["bidirectional_sweep"] = self.query_one("#bidirectional_sweep", Switch).value
+        raw["enable_gate"] = self.query_one("#enable_gate", Switch).value
         return raw
 
     def _load_settings(self) -> None:
@@ -576,6 +750,10 @@ class DCIVCurveApp(App):
                     pass
         if "auto_range" in saved:
             self.query_one("#auto_range", Switch).value = bool(saved["auto_range"])
+        if "bidirectional_sweep" in saved:
+            self.query_one("#bidirectional_sweep", Switch).value = bool(saved["bidirectional_sweep"])
+        if "enable_gate" in saved:
+            self.query_one("#enable_gate", Switch).value = bool(saved["enable_gate"])
 
     def _save_settings(self, raw: dict) -> None:
         try:
@@ -597,6 +775,17 @@ class DCIVCurveApp(App):
         for fid in TEXT_FIELDS:
             state[fid] = self.query_one(f"#{fid}", Input).value.strip()
         state["auto_range"] = self.query_one("#auto_range", Switch).value
+        state["bidirectional_sweep"] = self.query_one("#bidirectional_sweep", Switch).value
+        state["enable_gate"] = self.query_one("#enable_gate", Switch).value
+
+        state["gate_voltage_list"] = []
+        state["gate_parse_error"] = None
+        if state["enable_gate"]:
+            try:
+                state["gate_voltage_list"] = parse_value_list(state["gate_voltage_values"])
+            except ValueError as exc:
+                state["gate_parse_error"] = str(exc)
+
         return state, errors
 
     # ── Reactivity ───────────────────────────────────────────────────────────
@@ -605,7 +794,13 @@ class DCIVCurveApp(App):
         self.refresh_summary()
 
     def on_switch_changed(self, event: Switch.Changed) -> None:
+        if event.switch.id == "enable_gate":
+            self._set_gate_fields_enabled(event.value)
         self.refresh_summary()
+
+    def _set_gate_fields_enabled(self, enabled: bool) -> None:
+        for fid in GATE_FIELD_IDS:
+            self.query_one(f"#{fid}", Input).disabled = not enabled
 
     def refresh_summary(self) -> None:
         state, parse_errors = self.parse_state()
@@ -622,7 +817,7 @@ class DCIVCurveApp(App):
             lines.append("[bold yellow]Warnings[/bold yellow]")
             lines += [f"  [yellow]⚠ {w}[/yellow]" for w in warnings]
         lines.append("[bold]Derived values[/bold]")
-        lines += [f"  [dim]•[/dim] {i}" for i in info]
+        lines += [f"  [dim]•[/dim] {i}" for i in info if i]
 
         self.query_one("#summary", Static).update("\n".join(lines))
         self.query_one("#start", Button).disabled = bool(errors)
@@ -663,15 +858,28 @@ class DCIVCurveApp(App):
         acq_cfg = AcquisitionConfig(
             settling_time_s=state["settling_time_s"],
             n_averages=state["n_averages"],
-            output_file=str(_DATA_DIR / f"{state['output_name']}_{datetime.now():%Y%m%d_%H%M%S}.csv"),
+            output_file=str(_DATA_DIR / "dc_iv_curve.csv"),  # placeholder — overwritten per series in RunScreen
         )
 
-        currents_A = bidirectional_current_sweep(
-            i_min=state["current_min_A"], i_max=state["current_max_A"], n_points=state["n_points"],
+        currents_A = linear_sweep(
+            start=state["current_min_A"], stop=state["current_max_A"], step=state["step_A"],
+            bidirectional=state["bidirectional_sweep"],
         )
+
+        gate_cfg = None
+        gate_voltages = None
+        if state["enable_gate"]:
+            gate_cfg = GateConfig(
+                visa_resource=state["gate_visa_resource"],
+                gate_voltage_limit_V=state["gate_voltage_limit_V"],
+                compliance_current_A=state["gate_compliance_current_A"],
+            )
+            gate_voltages = state["gate_voltage_list"]
 
         return MeasurementPlan(
             src_cfg=src_cfg, volt_cfg=volt_cfg, acq_cfg=acq_cfg, currents_A=currents_A,
+            output_subdir=state["output_subdir"], output_prefix=state["output_name"],
+            gate_cfg=gate_cfg, gate_voltages=gate_voltages,
         )
 
 

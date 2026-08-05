@@ -59,7 +59,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Callable, List
 
-from pymeasure.instruments.keithley import Keithley2182, Keithley6221
+from pymeasure.instruments.keithley import Keithley2182, Keithley2400, Keithley6221
+
+from dc_sweep_utils import linear_sweep
 
 # Data lives outside "bridge" (a sibling of it), same convention as
 # dc_hall_measurement.py / the MFLI programs.
@@ -96,6 +98,20 @@ class VoltmeterConfig:
     visa_resource: str = "GPIB0::7::INSTR"
     nplc: float        = 5      # Integration time [power line cycles]
     auto_range: bool   = True
+
+
+@dataclass
+class GateConfig:
+    """
+    Keithley 2400 — optional gate voltage bias (see item 3, "IV curves vs
+    gate voltage"). Held fixed for the whole current sweep — set once
+    before run_measurement() starts, not per point. The program runs fine
+    with no 2400 connected at all as long as this stays unused (gate off).
+    """
+    visa_resource: str          = "GPIB0::24::INSTR"
+    gate_voltage_limit_V: float = 20.0    # Software safety ceiling on |gate voltage| [V]
+    compliance_current_A: float = 1e-6    # Gate leakage current compliance [A]
+    source_delay_s: float       = 0.05
 
 
 @dataclass
@@ -168,18 +184,39 @@ def shutdown_source(source: Keithley6221) -> None:
     log.info("Keithley 6221 output disabled")
 
 
-def bidirectional_current_sweep(i_min: float, i_max: float, n_points: int) -> np.ndarray:
-    """
-    Build a current sweep that goes i_min → i_max → i_min.
+# ─────────────────────────────────────────────────────────────────────────────
+# Gate control (Keithley 2400, optional — see GateConfig)
+# ─────────────────────────────────────────────────────────────────────────────
 
-    Sweeping both directions reveals hysteresis (charge traps,
-    self-heating, memristive contacts) — the up and down traces should sit
-    on top of each other for a clean, purely resistive DUT. The
-    turn-around point (i_max) is not duplicated.
-    """
-    up   = np.linspace(i_min, i_max, n_points)
-    down = np.linspace(i_max, i_min, n_points)[1:]
-    return np.concatenate([up, down])
+def connect_gate(cfg: GateConfig) -> Keithley2400:
+    """Open and configure the Keithley 2400 as a fixed gate voltage source."""
+    gate = Keithley2400(cfg.visa_resource)
+    gate.reset()
+    gate.apply_voltage(compliance_current=cfg.compliance_current_A)
+    gate.source_voltage = 0.0
+    gate.enable_source()
+    log.info(
+        "Keithley 2400 gate connected: %s  V_limit=±%.2f V  I_compliance=%.3g A",
+        cfg.visa_resource, cfg.gate_voltage_limit_V, cfg.compliance_current_A,
+    )
+    return gate
+
+
+def set_gate_voltage(gate: Keithley2400, cfg: GateConfig, voltage_V: float) -> None:
+    """Set the gate voltage, refusing to exceed the configured software limit."""
+    if abs(voltage_V) > cfg.gate_voltage_limit_V:
+        raise ValueError(
+            f"Requested gate voltage {voltage_V:.3f} V exceeds configured "
+            f"limit ±{cfg.gate_voltage_limit_V:.3f} V — refusing to set it."
+        )
+    gate.source_voltage = voltage_V
+
+
+def shutdown_gate(gate: Keithley2400) -> None:
+    """Ramp the gate voltage to 0 V and disable the 2400's output."""
+    gate.ramp_to_voltage(0.0)
+    gate.shutdown()
+    log.info("Keithley 2400 gate output disabled")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -206,6 +243,7 @@ def run_measurement(
     points:     List[CurrentPoint],
     stop_event: Optional[threading.Event] = None,
     on_point:   Optional[Callable[[dict], None]] = None,
+    gate_voltage_V: Optional[float] = None,
 ) -> pd.DataFrame:
     """
     Iterate over `points`, set each current, acquire the averaged voltage,
@@ -219,6 +257,9 @@ def run_measurement(
     `on_point`, if given, is called with each point's `record` dict right
     after it's appended — lets a caller (e.g. a live TUI) show progress
     without polling the output CSV.
+
+    `gate_voltage_V`, if given, is recorded on every point (the gate itself
+    is set once by the caller before the sweep starts, not per point).
     """
     records: List[dict] = []
 
@@ -251,6 +292,7 @@ def run_measurement(
             "voltage_V":       v["mean"],
             "voltage_std_V":   v["std"],
             "resistance_ohm":  r_chord,
+            "gate_voltage_V":  gate_voltage_V,
         }
         records.append(record)
         if on_point is not None:
@@ -321,7 +363,7 @@ def main() -> None:
 
     # ── Current sweep points ───────────────────────────────────────────────────
     # Bidirectional (up then down) so hysteresis is visible.
-    currents_A = bidirectional_current_sweep(src_cfg.current_min_A, src_cfg.current_max_A, n_points=41)
+    currents_A = linear_sweep(src_cfg.current_min_A, src_cfg.current_max_A, step=5e-5, bidirectional=True)
     points = [CurrentPoint(current_A=float(i)) for i in currents_A]
 
     # ── Run ──────────────────────────────────────────────────────────────────

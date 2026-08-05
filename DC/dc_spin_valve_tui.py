@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
 """
-Textual TUI front-end for dc_hall_measurement.py
-==================================================
-Same house style as mfli_dual_harmonic_tui.py: lets you edit the
-parameters that decide whether a DC Hall measurement is good or bad —
-sense current, compliance, reversal averaging, and the magnet sweep —
-without touching the dataclasses in the script itself.
+Textual TUI front-end for dc_spin_valve.py
+=============================================
+Same house style as dc_hall_measurement_tui.py / dc_gate_sweep_tui.py: lets
+you edit the parameters that decide whether a spin-valve/field-sweep
+measurement is good or bad — sense current, compliance, reversal
+averaging, the magnet sweep, and the gate voltage — without touching the
+dataclasses in the script itself.
 
-The sidebar recomputes derived values (estimated per-point acquisition
-time, estimated sweep duration) and flags anything that risks a bad
-measurement (source/voltmeter sharing a GPIB address, a sweep exceeding
-the magnet's software current limit, zero sense current) as you type.
+The gate voltage (single value, or a comma-separated list — see item 2 of
+the gate program spec, "Gate: single value or list of values") is held
+fixed for each complete field sweep; a list runs one complete field sweep
+per gate value, each saved to its own file and plotted together in the
+same window with a different color.
 
 Run with:
-    python dc_hall_measurement_tui.py
+    python dc_spin_valve_tui.py
 
 Requirements:
-    pip install textual matplotlib  (in addition to
-    dc_hall_measurement.py's own deps)
+    pip install textual matplotlib  (in addition to dc_spin_valve.py's own deps)
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import numpy as np
 from rich.text import Text
@@ -54,50 +55,58 @@ from textual.widgets import (
     Switch,
 )
 
-from dc_hall_measurement import (
+from dc_spin_valve import (
     AcquisitionConfig,
     FieldPoint,
+    GateConfig,
     GaussmeterConfig,
     MagnetConfig,
     SourceConfig,
     VoltmeterConfig,
+    connect_gate,
     connect_gaussmeter,
     connect_magnet,
     connect_source,
     connect_voltmeter,
     run_measurement,
+    set_gate_voltage,
     set_magnet_current,
+    shutdown_gate,
     shutdown_gaussmeter,
     shutdown_magnet,
     shutdown_source,
 )
-from dc_sweep_utils import build_output_path, linear_sweep
+from dc_sweep_utils import build_output_path, linear_sweep, parse_value_list
 
-DC_HALL_DESCRIPTION = (
-    "Sources a fixed DC sense current with a Keithley 6221 and reads the "
-    "transverse (Hall) voltage with a Keithley 2182, reversing the current "
-    "each rep to cancel thermal-EMF offsets. Optionally sweeps a Kepco "
-    "electromagnet's field (bidirectionally, for hysteresis) with the "
-    "field measured live via a Lake Shore 475 Gaussmeter at every point — "
-    "the standard DC (non-lock-in) Hall-effect measurement."
-)
-
-log = logging.getLogger("dc_hall_measurement_tui")
+log = logging.getLogger("dc_spin_valve_tui")
 
 # Data/settings live outside "bridge" (a sibling of it), same convention as
-# dc_hall_measurement.py, so nothing generated at runtime ends up in the
-# git-tracked source tree.
+# dc_spin_valve.py.
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
-SETTINGS_PATH = _DATA_DIR / "dc_hall_measurement_tui_settings.json"
+SETTINGS_PATH = _DATA_DIR / "dc_spin_valve_tui_settings.json"
+
+DC_SPIN_VALVE_DESCRIPTION = (
+    "Sources a fixed DC sense current with a Keithley 6221 and reads the "
+    "longitudinal voltage with a Keithley 2182, reversing the current each "
+    "rep to cancel thermal-EMF offsets — the same reversal-averaging "
+    "technique as the Hall measurement, but for a longitudinal (spin-valve "
+    "/ magnetoresistance) read. Sweeps a Kepco electromagnet's field "
+    "(bidirectionally, for hysteresis) with the field measured live via a "
+    "Lake Shore 475 Gaussmeter at every point. The gate voltage (Keithley "
+    "2400) is held fixed for each field sweep — single value or a "
+    "comma-separated list — one complete sweep per value, each saved to "
+    "its own file and plotted together in different colors."
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Field definitions & defaults  ── mirrors dc_hall_measurement.main()'s example
+# Field definitions & defaults  ── mirrors dc_spin_valve.main()'s example
 # ─────────────────────────────────────────────────────────────────────────────
 
 DEFAULTS: dict = {
     "source_visa_resource": "GPIB0::12::INSTR",
     "voltmeter_visa_resource": "GPIB0::7::INSTR",
+    "gate_visa_resource": "GPIB0::24::INSTR",
     "sense_current_A": "0.001",
     "compliance_V": "2.0",
     "source_delay_s": "0.05",
@@ -105,9 +114,11 @@ DEFAULTS: dict = {
     "auto_range": True,
     "settling_time_s": "1.0",
     "n_reversals": "5",
-    "output_name": "dc_hall",
+    "output_name": "dc_spin_valve",
     "output_subdir": "",
-    "enable_sweep": True,
+    "gate_voltage_limit_V": "20.0",
+    "gate_compliance_current_A": "0.000001",
+    "gate_voltage_values": "0.0",
     "magnet_visa_resource": "GPIB0::6::INSTR",
     "current_limit_A": "35",
     "voltage_compliance_V": "15.0",
@@ -122,7 +133,6 @@ DEFAULTS: dict = {
     "gaussmeter_read_delay_s": "0.05",
 }
 
-# id -> caster, for every free-text numeric field (Switch handled separately)
 NUMERIC_FIELDS: dict = {
     "sense_current_A": float,
     "compliance_V": float,
@@ -130,6 +140,8 @@ NUMERIC_FIELDS: dict = {
     "nplc": float,
     "settling_time_s": float,
     "n_reversals": int,
+    "gate_voltage_limit_V": float,
+    "gate_compliance_current_A": float,
     "current_limit_A": float,
     "voltage_compliance_V": float,
     "ramp_step_A": float,
@@ -140,13 +152,9 @@ NUMERIC_FIELDS: dict = {
     "gaussmeter_n_averages": int,
     "gaussmeter_read_delay_s": float,
 }
-TEXT_FIELDS = ["source_visa_resource", "voltmeter_visa_resource", "output_name",
-               "output_subdir", "magnet_visa_resource", "gaussmeter_visa_resource"]
-MAGNET_FIELD_IDS = [
-    "magnet_visa_resource", "current_limit_A", "voltage_compliance_V",
-    "ramp_step_A", "ramp_delay_s", "i_min_A", "i_max_A", "step_A",
-    "gaussmeter_visa_resource", "gaussmeter_n_averages", "gaussmeter_read_delay_s",
-]
+TEXT_FIELDS = ["source_visa_resource", "voltmeter_visa_resource", "gate_visa_resource",
+               "output_name", "output_subdir", "magnet_visa_resource",
+               "gaussmeter_visa_resource", "gate_voltage_values"]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -154,7 +162,6 @@ MAGNET_FIELD_IDS = [
 # ─────────────────────────────────────────────────────────────────────────────
 
 def format_si(value: float, unit: str) -> str:
-    """Format a value with an SI prefix, e.g. 1.2e-8 -> '12.000 nA'."""
     av = abs(value)
     if av == 0:
         return f"0 {unit}"
@@ -176,7 +183,6 @@ def format_duration(seconds: float) -> str:
 
 
 def _reading_duration_s(nplc: float) -> float:
-    """Rough per-reading time for the 2182 — NPLC/line_frequency, worst case 50 Hz."""
     return max(1e-3, nplc / 50.0)
 
 
@@ -188,14 +194,22 @@ def _reading_duration_s(nplc: float) -> float:
 class MeasurementPlan:
     src_cfg: SourceConfig
     volt_cfg: VoltmeterConfig
+    gate_cfg: GateConfig
+    magnet_cfg: MagnetConfig
+    gauss_cfg: GaussmeterConfig
     acq_cfg: AcquisitionConfig
-    magnet_cfg: Optional[MagnetConfig]
-    gauss_cfg: Optional[GaussmeterConfig]
-    currents_A: Optional[np.ndarray]
+    currents_A: np.ndarray
+    gate_voltages_V: List[float]
+    output_subdir: str
+    output_prefix: str
+
+    @property
+    def series_values(self) -> List[float]:
+        return self.gate_voltages_V
 
     @property
     def total_points(self) -> int:
-        return len(self.currents_A) if self.currents_A is not None else 1
+        return len(self.currents_A) * len(self.series_values)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -225,56 +239,70 @@ def switch_field(field_id: str, label_text: str, default: bool) -> Vertical:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
-    """Return (info, warnings, errors) for a fully-parsed state dict."""
     info: list[str] = []
     warnings: list[str] = []
     errors: list[str] = []
 
-    if state["source_visa_resource"] == state["voltmeter_visa_resource"]:
-        errors.append("Source (6221) and voltmeter (2182) VISA resources must be different.")
+    resources = [state["source_visa_resource"], state["voltmeter_visa_resource"], state["gate_visa_resource"]]
+    if len(set(resources)) < len(resources):
+        errors.append("Source (6221), voltmeter (2182), and gate (2400) VISA resources must all be different.")
 
-    # ── Source ───────────────────────────────────────────────────────────────
     if state["sense_current_A"] == 0:
-        errors.append("Sense current must be nonzero (Hall resistance divides by it).")
+        errors.append("Sense current must be nonzero (resistance divides by it).")
     else:
         info.append(f"Sense current I = {format_si(state['sense_current_A'], 'A')}")
 
     if state["compliance_V"] <= 0:
         errors.append("Compliance voltage must be > 0 V.")
 
-    # ── Voltmeter timing ─────────────────────────────────────────────────────
     read_s = _reading_duration_s(state["nplc"])
     info.append(f"Estimated 2182 reading time ≈ {read_s * 1000:.0f} ms (NPLC={state['nplc']:g})")
-
     per_point_s = state["settling_time_s"] + state["n_reversals"] * 2 * read_s
 
-    # ── Sweep ────────────────────────────────────────────────────────────────
-    if state["enable_sweep"]:
-        if state["step_A"] <= 0:
-            errors.append("Sweep step size must be > 0 A.")
-        max_abs_I = max(abs(state["i_min_A"]), abs(state["i_max_A"]))
-        if max_abs_I > state["current_limit_A"]:
-            errors.append(
-                f"Sweep range (±{max_abs_I:g} A) exceeds the current limit "
-                f"({state['current_limit_A']:g} A)."
-            )
-        if state["i_min_A"] == state["i_max_A"]:
-            warnings.append("i_min equals i_max — sweep will repeat a single point.")
-
-        total_points = 0
-        if state["step_A"] > 0:
-            n_one_way = max(2, round(abs(state["i_max_A"] - state["i_min_A"]) / state["step_A"]) + 1)
-            total_points = n_one_way if not state["bidirectional_sweep"] else 2 * n_one_way - 1
-            direction = (f"{state['i_min_A']:g} A → {state['i_max_A']:g} A → {state['i_min_A']:g} A"
-                         if state["bidirectional_sweep"]
-                         else f"{state['i_min_A']:g} A → {state['i_max_A']:g} A")
-            info.append(f"Sweep: {direction}, step={state['step_A']:g} A, {total_points} points")
-        info.append("Field measured live at each point via Lake Shore 475 Gaussmeter "
-                     f"({state['gaussmeter_visa_resource']})")
-        info.append(f"Estimated total run time ≈ {format_duration(total_points * per_point_s)}")
+    # ── Gate ─────────────────────────────────────────────────────────────────
+    if state.get("gate_parse_error"):
+        errors.append(f"Gate voltage list: {state['gate_parse_error']}")
+        gate_list: list[float] = []
     else:
-        info.append("Single point — no field sweep, magnet untouched.")
-        info.append(f"Estimated run time ≈ {format_duration(per_point_s)}")
+        gate_list = state.get("gate_voltage_list", [])
+        over_limit = [v for v in gate_list if abs(v) > state["gate_voltage_limit_V"]]
+        if over_limit:
+            errors.append(
+                f"Gate voltage(s) {over_limit} exceed the configured limit "
+                f"±{state['gate_voltage_limit_V']:g} V."
+            )
+    n_series = len(gate_list)
+    if n_series > 1:
+        info.append(f"Gate: {n_series} values {gate_list} V — {n_series} complete field sweeps, "
+                    f"one file each, plotted together")
+    elif n_series == 1:
+        info.append(f"Gate held fixed at {format_si(gate_list[0], 'V')}")
+
+    # ── Field sweep ──────────────────────────────────────────────────────────
+    max_abs_I = max(abs(state["i_min_A"]), abs(state["i_max_A"]))
+    if max_abs_I > state["current_limit_A"]:
+        errors.append(
+            f"Sweep range (±{max_abs_I:g} A) exceeds the current limit "
+            f"({state['current_limit_A']:g} A)."
+        )
+    if state["i_min_A"] == state["i_max_A"]:
+        warnings.append("i_min equals i_max — sweep will repeat a single point.")
+
+    n_one_way = 0
+    if state["step_A"] <= 0:
+        errors.append("Sweep step size must be > 0 A.")
+    else:
+        n_one_way = max(2, round(abs(state["i_max_A"] - state["i_min_A"]) / state["step_A"]) + 1)
+    n_sweep_points = n_one_way if not state["bidirectional_sweep"] else max(0, 2 * n_one_way - 1)
+    direction = (f"{state['i_min_A']:g} A → {state['i_max_A']:g} A → {state['i_min_A']:g} A"
+                 if state["bidirectional_sweep"]
+                 else f"{state['i_min_A']:g} A → {state['i_max_A']:g} A")
+    info.append(f"Field sweep: {direction}, step={state['step_A']:g} A, {n_sweep_points} points")
+    info.append("Field measured live at each point via Lake Shore 475 Gaussmeter "
+                 f"({state['gaussmeter_visa_resource']})")
+
+    total_points = n_sweep_points * max(1, n_series)
+    info.append(f"Estimated total run time ≈ {format_duration(total_points * per_point_s)}")
 
     return info, warnings, errors
 
@@ -282,85 +310,93 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
 # ─────────────────────────────────────────────────────────────────────────────
 # Live plot  ── runs in its own OS process, well away from the TUI
 # ─────────────────────────────────────────────────────────────────────────────
-# A GUI matplotlib backend and Textual's terminal control both want the main
-# thread. Rather than fight that, the live preview gets its own process with
-# its own main thread; new points are streamed to it over a
-# multiprocessing.Queue. The final PNG is saved independently by the TUI
-# process itself (see _save_measurement_png), so it doesn't depend on this
-# window still being open when the run finishes.
 
-def _live_plot_worker(queue: "mp.Queue", has_field_sweep: bool) -> None:
+def _live_plot_worker(queue: "mp.Queue") -> None:
     import matplotlib.pyplot as plt
     from matplotlib.animation import FuncAnimation
 
     fig, ax = plt.subplots(figsize=(7, 5))
     try:
-        fig.canvas.manager.set_window_title("DC Hall live measurement")
+        fig.canvas.manager.set_window_title("DC Spin-Valve live measurement")
     except Exception:
         pass
-    line, = ax.plot([], [], "o-", color="tab:blue")
-    ax.set_ylabel("Hall voltage (V)")
-    ax.set_xlabel("Magnetic field (mT)" if has_field_sweep else "Point #")
-    ax.set_title("Live measurement")
+    ax.set_xlabel("Magnetic field (mT)")
+    ax.set_ylabel("Voltage (V)")
+    ax.set_title("Live measurement — field sweep")
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
 
-    xs: list[float] = []
-    ys: list[float] = []
+    cmap = plt.get_cmap("tab10")
+    lines: dict[int, "plt.Line2D"] = {}
+    series_data: dict[int, tuple[list, list]] = {}
 
     def _drain(_frame=None):
-        updated = False
+        updated: set[int] = set()
+        new_series = False
         while True:
             try:
                 record = queue.get_nowait()
             except Exception:
                 break
-            x = record.get("magnet_field_mT") if has_field_sweep else None
+            idx = record.get("series_index", 0)
+            if idx not in lines:
+                label = record.get("series_label")
+                (line,) = ax.plot([], [], "o-", color=cmap(idx % 10), label=label)
+                lines[idx] = line
+                series_data[idx] = ([], [])
+                new_series = True
+            xs, ys = series_data[idx]
+            x = record.get("magnet_field_mT")
             xs.append(x if x is not None else record["point_index"])
-            ys.append(record["hall_voltage_V"])
-            updated = True
+            ys.append(record["voltage_V"])
+            updated.add(idx)
         if updated:
-            line.set_data(xs, ys)
+            for idx in updated:
+                xs, ys = series_data[idx]
+                lines[idx].set_data(xs, ys)
+            if new_series and any(l.get_label() and not l.get_label().startswith("_") for l in lines.values()):
+                ax.legend(loc="best", fontsize=8)
             ax.relim()
             ax.autoscale_view()
-        return (line,)
+        return tuple(lines.values())
 
-    # Keep a reference so it isn't garbage-collected mid-run.
     _ani = FuncAnimation(fig, _drain, interval=300, cache_frame_data=False)
     plt.show()
 
 
-def _save_measurement_png(records: list[dict], csv_path: str) -> None:
-    """Save a static Hall-voltage-vs-field PNG alongside the CSV, from
-    whatever points were actually collected (including an aborted/partial
-    run)."""
+def _save_measurement_png(records: list[dict], png_path: Path) -> None:
     if not records:
         return
 
     import matplotlib
-    matplotlib.use("Agg")  # headless — must not touch the TUI's terminal
+    matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    has_field = any(r.get("magnet_field_mT") is not None for r in records)
-    xs = [r["magnet_field_mT"] if has_field else r["point_index"] for r in records]
-    ys = [r["hall_voltage_V"] for r in records]
-
+    cmap = plt.get_cmap("tab10")
     fig, ax = plt.subplots(figsize=(7, 5))
-    ax.plot(xs, ys, "o-", color="tab:blue")
-    ax.set_ylabel("Hall voltage (V)")
-    ax.set_xlabel("Magnetic field (mT)" if has_field else "Point #")
-    ax.set_title("Measurement result")
-    ax.grid(True, alpha=0.3)
-    fig.tight_layout()
 
-    png_path = Path(csv_path).with_suffix(".png")
+    has_field = any(r.get("magnet_field_mT") is not None for r in records)
+    series_ids = sorted({r.get("series_index", 0) for r in records})
+    for idx in series_ids:
+        rows = [r for r in records if r.get("series_index", 0) == idx]
+        label = rows[0].get("series_label")
+        xs = [r["magnet_field_mT"] if has_field else r["point_index"] for r in rows]
+        ax.plot(xs, [r["voltage_V"] for r in rows], ".-", color=cmap(idx % 10), label=label)
+
+    ax.set_xlabel("Magnetic field (mT)" if has_field else "Point #")
+    ax.set_ylabel("Voltage (V)")
+    ax.set_title("Measurement result")
+    ax.grid(alpha=0.3)
+    if any(r.get("series_label") for r in records):
+        ax.legend(loc="best", fontsize=8)
+    fig.tight_layout()
     fig.savefig(png_path, dpi=150)
     plt.close(fig)
     log.info("Saved plot to '%s'", png_path)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Logging -> RichLog relay (keeps raw log lines from corrupting the alt screen)
+# Logging -> RichLog relay
 # ─────────────────────────────────────────────────────────────────────────────
 
 class _LogRelay(logging.Handler):
@@ -401,13 +437,12 @@ class RunScreen(Screen):
         super().__init__()
         self.plan = plan
         self._stop_event = threading.Event()
-        # Not named `_running` — that attribute already exists on Textual's
-        # MessagePump base class and shadowing it silently breaks mounting.
         self._measurement_running = True
         self._log_handler: Optional[_LogRelay] = None
         self._records: list[dict] = []
         self._plot_queue: Optional["mp.Queue"] = None
         self._plot_process: Optional[mp.Process] = None
+        self._session_timestamp = f"{datetime.now():%Y%m%d_%H%M%S}"
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -422,11 +457,10 @@ class RunScreen(Screen):
 
     def on_mount(self) -> None:
         self.query_one("#results_table", DataTable).add_columns(
-            "#", "I_magnet (A)", "B (mT)", "V_Hall (V)", "R_Hall (Ω)", "n_rev"
+            "#", "Vg (V)", "I_magnet (A)", "B (mT)", "V (V)", "R (Ω)", "n_rev"
         )
         self._log_handler = _LogRelay(self)
-        root = logging.getLogger()
-        root.addHandler(self._log_handler)
+        logging.getLogger().addHandler(self._log_handler)
         self._start_live_plot()
         self.do_run()
 
@@ -440,11 +474,7 @@ class RunScreen(Screen):
         try:
             ctx = mp.get_context("spawn")
             self._plot_queue = ctx.Queue()
-            self._plot_process = ctx.Process(
-                target=_live_plot_worker,
-                args=(self._plot_queue, self.plan.magnet_cfg is not None),
-                daemon=True,
-            )
+            self._plot_process = ctx.Process(target=_live_plot_worker, args=(self._plot_queue,), daemon=True)
             self._plot_process.start()
         except Exception:
             log.exception("Could not start live plot window (is matplotlib installed?)")
@@ -467,17 +497,19 @@ class RunScreen(Screen):
         table = self.query_one("#results_table", DataTable)
         I = record.get("magnet_current_A")
         B = record.get("magnet_field_mT")
+        Vg = record.get("gate_voltage_V")
         table.add_row(
             str(record["point_index"] + 1),
+            f"{Vg:.4g}" if Vg is not None else "—",
             f"{I:.4f}" if I is not None else "—",
             f"{B:.2f}" if B is not None else "—",
-            f"{record['hall_voltage_V']:.4e}",
-            f"{record['hall_resistance_ohm']:.5g}",
+            f"{record['voltage_V']:.4e}",
+            f"{record['resistance_ohm']:.5g}",
             str(record["n_reversals"]),
         )
         table.move_cursor(row=table.row_count - 1, scroll=True)
         self.query_one("#progress", ProgressBar).advance(1)
-        self._set_status(f"Point {record['point_index'] + 1} / {self.plan.total_points} complete.")
+        self._set_status(f"Point {len(self._records)} / {self.plan.total_points} complete.")
 
     def _on_finished(self, final_status: str) -> None:
         self._measurement_running = False
@@ -485,7 +517,9 @@ class RunScreen(Screen):
         self.query_one("#back_btn", Button).disabled = False
         self.query_one("#abort_btn", Button).disabled = True
         try:
-            _save_measurement_png(self._records, self.plan.acq_cfg.output_file)
+            out_dir = _DATA_DIR / self.plan.output_subdir if self.plan.output_subdir else _DATA_DIR
+            png_path = out_dir / f"{self.plan.output_prefix}_{self._session_timestamp}_combined.png"
+            _save_measurement_png(self._records, png_path)
         except Exception:
             log.exception("Could not save measurement plot PNG")
 
@@ -506,23 +540,46 @@ class RunScreen(Screen):
         elif event.button.id == "back_btn":
             self.app.pop_screen()
 
+    def _make_on_point(self, series_index: int, series_label: Optional[str]):
+        def _cb(record: dict) -> None:
+            record["series_index"] = series_index
+            record["series_label"] = series_label
+            self.app.call_from_thread(self._on_point, record)
+        return _cb
+
     @work(thread=True, exclusive=True)
     def do_run(self) -> None:
         plan = self.plan
         source = None
         voltmeter = None
+        gate = None
         magnet = None
         gaussmeter = None
         try:
-            self._set_status_threadsafe("Connecting to Keithley 6221 & 2182 …")
+            self._set_status_threadsafe("Connecting to Keithley 6221, 2182 & 2400 …")
             source = connect_source(plan.src_cfg)
             voltmeter = connect_voltmeter(plan.volt_cfg)
+            gate = connect_gate(plan.gate_cfg)
 
-            if plan.magnet_cfg is not None and plan.currents_A is not None:
-                self._set_status_threadsafe("Connecting magnet power supply …")
-                magnet = connect_magnet(plan.magnet_cfg)
-                self._set_status_threadsafe("Connecting gaussmeter …")
-                gaussmeter = connect_gaussmeter(plan.gauss_cfg)
+            self._set_status_threadsafe("Connecting magnet power supply …")
+            magnet = connect_magnet(plan.magnet_cfg)
+            self._set_status_threadsafe("Connecting gaussmeter …")
+            gaussmeter = connect_gaussmeter(plan.gauss_cfg)
+
+            for series_idx, gate_V in enumerate(plan.series_values):
+                if self._stop_event.is_set():
+                    break
+
+                label = f"Vg={gate_V:g}V"
+                suffix = f"_Vg{gate_V:g}V"
+                self._set_status_threadsafe(f"Setting gate to {gate_V:g} V …")
+                set_gate_voltage(gate, plan.gate_cfg, gate_V)
+
+                plan.acq_cfg.output_file = str(build_output_path(
+                    _DATA_DIR, plan.output_subdir, plan.output_prefix,
+                    self._session_timestamp, suffix,
+                ))
+
                 points = [
                     FieldPoint(
                         magnet_current_A=I,
@@ -530,16 +587,16 @@ class RunScreen(Screen):
                     )
                     for I in plan.currents_A
                 ]
-            else:
-                points = [FieldPoint()]
 
-            self._set_status_threadsafe("Running measurement …")
-            run_measurement(
-                source, voltmeter, plan.src_cfg, plan.acq_cfg, points,
-                stop_event=self._stop_event,
-                on_point=lambda record: self.app.call_from_thread(self._on_point, record),
-                gaussmeter=gaussmeter, gauss_cfg=plan.gauss_cfg,
-            )
+                self._set_status_threadsafe(f"Running field sweep (Vg={gate_V:g} V) …")
+                run_measurement(
+                    source, voltmeter, plan.src_cfg, plan.acq_cfg, points,
+                    stop_event=self._stop_event,
+                    on_point=self._make_on_point(series_idx, label),
+                    gaussmeter=gaussmeter, gauss_cfg=plan.gauss_cfg,
+                    gate_voltage_V=gate_V,
+                )
+
             final = "Measurement aborted." if self._stop_event.is_set() else "Measurement complete."
         except Exception as exc:
             log.exception("Measurement failed")
@@ -555,6 +612,11 @@ class RunScreen(Screen):
                     shutdown_gaussmeter(gaussmeter)
                 except Exception:
                     log.exception("Error while shutting down gaussmeter")
+            if gate is not None:
+                try:
+                    shutdown_gate(gate)
+                except Exception:
+                    log.exception("Error while shutting down gate")
             if source is not None:
                 try:
                     shutdown_source(source)
@@ -570,9 +632,9 @@ class RunScreen(Screen):
 # Main app  ── the parameter form
 # ─────────────────────────────────────────────────────────────────────────────
 
-class DCHallMeasurementApp(App):
-    TITLE = "DC Hall Measurement"
-    SUB_TITLE = "Keithley 6221 + 2182 · magnet field sweep"
+class DCSpinValveApp(App):
+    TITLE = "DC Spin-Valve / Field Sweep"
+    SUB_TITLE = "Keithley 6221 + 2182 + 2400 · magnet field sweep"
 
     CSS = """
     #body { height: 1fr; }
@@ -600,14 +662,15 @@ class DCHallMeasurementApp(App):
                 with Collapsible(title="Instruments", collapsed=False):
                     yield field("source_visa_resource", "Keithley 6221 (current source)",
                                 DEFAULTS["source_visa_resource"], kind="text")
-                    yield field("voltmeter_visa_resource", "Keithley 2182 (Hall voltage)",
+                    yield field("voltmeter_visa_resource", "Keithley 2182 (voltage)",
                                 DEFAULTS["voltmeter_visa_resource"], kind="text")
+                    yield field("gate_visa_resource", "Keithley 2400 (gate)",
+                                DEFAULTS["gate_visa_resource"], kind="text")
 
                 with Collapsible(title="Sense current & compliance", collapsed=False):
                     yield field("sense_current_A", "Sense current (A)",
                                 DEFAULTS["sense_current_A"],
-                                hint="Reversed +I/-I each rep to cancel thermal-EMF offsets.",
-                                validators=[Number(failure_description="must be a number")])
+                                hint="Reversed +I/-I each rep to cancel thermal-EMF offsets.")
                     yield field("compliance_V", "Compliance voltage (V)",
                                 DEFAULTS["compliance_V"],
                                 validators=[Number(minimum=0.0, failure_description="must be ≥ 0")])
@@ -635,9 +698,19 @@ class DCHallMeasurementApp(App):
                                 DEFAULTS["output_subdir"], kind="text",
                                 hint="Saved to data/<sub-directory>/<prefix>_<timestamp>.csv")
 
+                with Collapsible(title="Gate voltage (Keithley 2400)", collapsed=False):
+                    yield field("gate_voltage_limit_V", "Gate voltage software limit (V)",
+                                DEFAULTS["gate_voltage_limit_V"],
+                                hint="Hard safety ceiling — independent of the values below.")
+                    yield field("gate_compliance_current_A", "Gate leakage compliance (A)",
+                                DEFAULTS["gate_compliance_current_A"])
+                    yield field("gate_voltage_values", "Gate voltage (V)",
+                                DEFAULTS["gate_voltage_values"], kind="text",
+                                hint="Single value, or comma-separated list — one complete "
+                                     "field sweep runs per value, each saved to its own file "
+                                     "and plotted together.")
+
                 with Collapsible(title="Magnet & field sweep", collapsed=False):
-                    yield switch_field("enable_sweep", "Sweep magnetic field (Kepco magnet)",
-                                       DEFAULTS["enable_sweep"])
                     yield field("magnet_visa_resource", "Magnet VISA resource",
                                 DEFAULTS["magnet_visa_resource"], kind="text")
                     yield field("current_limit_A", "Software current limit (A)",
@@ -650,8 +723,7 @@ class DCHallMeasurementApp(App):
                         yield field("ramp_delay_s", "Ramp delay (s)", DEFAULTS["ramp_delay_s"])
                     yield field("i_min_A", "Sweep current min (A)", DEFAULTS["i_min_A"])
                     yield field("i_max_A", "Sweep current max (A)", DEFAULTS["i_max_A"])
-                    yield field("step_A", "Sweep step size (A)",
-                                DEFAULTS["step_A"],
+                    yield field("step_A", "Sweep step size (A)", DEFAULTS["step_A"],
                                 validators=[Number(minimum=1e-9, failure_description="must be > 0")])
                     yield switch_field("bidirectional_sweep",
                                        "Bidirectional sweep (min → max → min)",
@@ -668,7 +740,7 @@ class DCHallMeasurementApp(App):
 
             with Vertical(id="sidebar"):
                 yield Static("Description", classes="sidebar-title")
-                yield Static(DC_HALL_DESCRIPTION, classes="card-desc")
+                yield Static(DC_SPIN_VALVE_DESCRIPTION, classes="card-desc")
                 yield Static("Summary", classes="sidebar-title")
                 yield Static(id="summary")
 
@@ -679,10 +751,6 @@ class DCHallMeasurementApp(App):
     # ── Lifecycle ────────────────────────────────────────────────────────────
 
     def on_mount(self) -> None:
-        # basicConfig (in dc_hall_measurement) put a StreamHandler on the root
-        # logger; writing to stdout while Textual owns the alt-screen would
-        # corrupt the display, so drop it. RunScreen attaches its own
-        # RichLog-backed handler for the duration of a measurement.
         logging.getLogger().handlers.clear()
         self._load_settings()
         self.refresh_summary()
@@ -695,7 +763,6 @@ class DCHallMeasurementApp(App):
     def collect_raw(self) -> dict:
         raw: dict = {fid: self.query_one(f"#{fid}", Input).value for fid in self._all_field_ids()}
         raw["auto_range"] = self.query_one("#auto_range", Switch).value
-        raw["enable_sweep"] = self.query_one("#enable_sweep", Switch).value
         raw["bidirectional_sweep"] = self.query_one("#bidirectional_sweep", Switch).value
         return raw
 
@@ -712,8 +779,6 @@ class DCHallMeasurementApp(App):
                     pass
         if "auto_range" in saved:
             self.query_one("#auto_range", Switch).value = bool(saved["auto_range"])
-        if "enable_sweep" in saved:
-            self.query_one("#enable_sweep", Switch).value = bool(saved["enable_sweep"])
         if "bidirectional_sweep" in saved:
             self.query_one("#bidirectional_sweep", Switch).value = bool(saved["bidirectional_sweep"])
 
@@ -737,8 +802,15 @@ class DCHallMeasurementApp(App):
         for fid in TEXT_FIELDS:
             state[fid] = self.query_one(f"#{fid}", Input).value.strip()
         state["auto_range"] = self.query_one("#auto_range", Switch).value
-        state["enable_sweep"] = self.query_one("#enable_sweep", Switch).value
         state["bidirectional_sweep"] = self.query_one("#bidirectional_sweep", Switch).value
+
+        state["gate_voltage_list"] = []
+        state["gate_parse_error"] = None
+        try:
+            state["gate_voltage_list"] = parse_value_list(state["gate_voltage_values"])
+        except ValueError as exc:
+            state["gate_parse_error"] = str(exc)
+
         return state, errors
 
     # ── Reactivity ───────────────────────────────────────────────────────────
@@ -747,14 +819,7 @@ class DCHallMeasurementApp(App):
         self.refresh_summary()
 
     def on_switch_changed(self, event: Switch.Changed) -> None:
-        if event.switch.id == "enable_sweep":
-            self._set_magnet_fields_enabled(event.value)
         self.refresh_summary()
-
-    def _set_magnet_fields_enabled(self, enabled: bool) -> None:
-        for fid in MAGNET_FIELD_IDS:
-            self.query_one(f"#{fid}", Input).disabled = not enabled
-        self.query_one("#bidirectional_sweep", Switch).disabled = not enabled
 
     def refresh_summary(self) -> None:
         state, parse_errors = self.parse_state()
@@ -771,7 +836,7 @@ class DCHallMeasurementApp(App):
             lines.append("[bold yellow]Warnings[/bold yellow]")
             lines += [f"  [yellow]⚠ {w}[/yellow]" for w in warnings]
         lines.append("[bold]Derived values[/bold]")
-        lines += [f"  [dim]•[/dim] {i}" for i in info]
+        lines += [f"  [dim]•[/dim] {i}" for i in info if i]
 
         self.query_one("#summary", Static).update("\n".join(lines))
         self.query_one("#start", Button).disabled = bool(errors)
@@ -808,44 +873,44 @@ class DCHallMeasurementApp(App):
             nplc=state["nplc"],
             auto_range=state["auto_range"],
         )
+        gate_cfg = GateConfig(
+            visa_resource=state["gate_visa_resource"],
+            gate_voltage_limit_V=state["gate_voltage_limit_V"],
+            compliance_current_A=state["gate_compliance_current_A"],
+        )
+        magnet_cfg = MagnetConfig(
+            visa_resource=state["magnet_visa_resource"],
+            current_limit_A=state["current_limit_A"],
+            voltage_compliance_V=state["voltage_compliance_V"],
+            ramp_step_A=state["ramp_step_A"],
+            ramp_delay_s=state["ramp_delay_s"],
+        )
+        gauss_cfg = GaussmeterConfig(
+            visa_resource=state["gaussmeter_visa_resource"],
+            n_averages=state["gaussmeter_n_averages"],
+            read_delay_s=state["gaussmeter_read_delay_s"],
+        )
         acq_cfg = AcquisitionConfig(
             settling_time_s=state["settling_time_s"],
             n_reversals=state["n_reversals"],
-            output_file=str(build_output_path(
-                _DATA_DIR, state["output_subdir"], state["output_name"],
-                f"{datetime.now():%Y%m%d_%H%M%S}",
-            )),
+            output_file=str(_DATA_DIR / "dc_spin_valve.csv"),  # placeholder — overwritten per series
         )
 
-        magnet_cfg = None
-        gauss_cfg = None
-        currents_A = None
-        if state["enable_sweep"]:
-            magnet_cfg = MagnetConfig(
-                visa_resource=state["magnet_visa_resource"],
-                current_limit_A=state["current_limit_A"],
-                voltage_compliance_V=state["voltage_compliance_V"],
-                ramp_step_A=state["ramp_step_A"],
-                ramp_delay_s=state["ramp_delay_s"],
-            )
-            gauss_cfg = GaussmeterConfig(
-                visa_resource=state["gaussmeter_visa_resource"],
-                n_averages=state["gaussmeter_n_averages"],
-                read_delay_s=state["gaussmeter_read_delay_s"],
-            )
-            currents_A = linear_sweep(
-                start=state["i_min_A"], stop=state["i_max_A"], step=state["step_A"],
-                bidirectional=state["bidirectional_sweep"],
-            )
+        currents_A = linear_sweep(
+            start=state["i_min_A"], stop=state["i_max_A"], step=state["step_A"],
+            bidirectional=state["bidirectional_sweep"],
+        )
 
         return MeasurementPlan(
-            src_cfg=src_cfg, volt_cfg=volt_cfg, acq_cfg=acq_cfg,
-            magnet_cfg=magnet_cfg, gauss_cfg=gauss_cfg, currents_A=currents_A,
+            src_cfg=src_cfg, volt_cfg=volt_cfg, gate_cfg=gate_cfg,
+            magnet_cfg=magnet_cfg, gauss_cfg=gauss_cfg, acq_cfg=acq_cfg,
+            currents_A=currents_A, gate_voltages_V=state["gate_voltage_list"],
+            output_subdir=state["output_subdir"], output_prefix=state["output_name"],
         )
 
 
 def main() -> None:
-    DCHallMeasurementApp().run()
+    DCSpinValveApp().run()
 
 
 if __name__ == "__main__":
