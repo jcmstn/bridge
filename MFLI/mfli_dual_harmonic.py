@@ -381,6 +381,7 @@ def auto_null_phase(
     n_averages: int = 20,
     max_iterations: int = 5,
     tol_deg: float = 0.02,
+    settle_time_s: Optional[float] = None,
 ) -> PhaseCalibrationResult:
     """
     Null the Y quadrature of `cfg`'s demodulator by adjusting its reference
@@ -408,7 +409,25 @@ def auto_null_phase(
     `max_iterations` is reached. The node's sign convention (whether
     increasing phaseshift increases or decreases measured Y) isn't assumed
     — if a correction makes the residual worse, the sign is flipped.
+
+    `settle_time_s` (default 5x the demod's own filter time_constant_s,
+    matching the settling convention used elsewhere in this module) is
+    slept after every phaseshift write, before the next measurement.
+    This is not optional bookkeeping: writing phaseshift rotates the
+    pre-filter mixer output exactly like a step change in the input
+    signal, so the demod's low-pass filter needs to settle again just
+    like after any other signal change — daq.sync() only confirms the
+    register write reached the device, it does not wait for the filter's
+    output to converge. Skipping this delay means every iteration after
+    the first reads the filter mid-transient rather than its settled
+    value; since a sudden phase rotation is not a monotonic transient in
+    X/Y, that shows up as the residual bouncing around unpredictably
+    instead of shrinking, which starves this function's sign-flip logic
+    of a trustworthy "did that help?" signal and it never converges.
     """
+    if settle_time_s is None:
+        settle_time_s = 5.0 * cfg.filter.time_constant_s
+
     phase_before = get_demod_phase_deg(daq, cfg)
     phase = phase_before
     sign = 1.0
@@ -438,6 +457,7 @@ def auto_null_phase(
             sign = -sign
         phase = (phase + sign * residual_deg + 180.0) % 360.0 - 180.0
         set_demod_phase_deg(daq, cfg, phase)
+        time.sleep(settle_time_s)   # let the demod filter settle to the new phase
         prev_abs_residual_deg = abs_residual
 
     log.info(
