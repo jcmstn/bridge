@@ -66,6 +66,7 @@ from mfli_dual_harmonic import (
     MagnetConfig,
     MeasurementPoint,
     OutputConfig,
+    TemperatureControllerConfig,
     acquire_averaged,
     auto_null_phase,
     bidirectional_current_sweep,
@@ -75,12 +76,14 @@ from mfli_dual_harmonic import (
     connect_device,
     connect_gaussmeter,
     connect_magnet,
+    connect_temperature_controller,
     run_measurement,
     set_magnet_current,
     setup_mds,
     shutdown_gaussmeter,
     shutdown_magnet,
     shutdown_output,
+    shutdown_temperature_controller,
     sync_follower_oscillator,
 )
 
@@ -126,6 +129,9 @@ DEFAULTS: dict = {
     "gaussmeter_visa_resource": "GPIB0::12::INSTR",
     "gaussmeter_n_averages": "10",
     "gaussmeter_read_delay_s": "0.05",
+    "enable_temperature": True,
+    "temperature_visa_resource": "TCPIP0::192.168.1.5::7020::SOCKET",
+    "temperature_sensor_uids": "DB6.T1",
     "enable_phase_cal": False,
     "phase_cal_current_A": "",
     "phase_cal_n_averages": "20",
@@ -157,7 +163,7 @@ NUMERIC_FIELDS: dict = {
     "phase_cal_max_iterations": int,
 }
 TEXT_FIELDS = ["leader_device", "follower_device", "daq_host", "output_name", "visa_resource",
-               "gaussmeter_visa_resource"]
+               "gaussmeter_visa_resource", "temperature_visa_resource", "temperature_sensor_uids"]
 # Free-text, blank-allowed: parsed to Optional[float] by hand in parse_state()
 # rather than going through NUMERIC_FIELDS' "blank is an error" casting.
 OPTIONAL_NUMERIC_FIELDS = ["phase_cal_current_A"]
@@ -166,6 +172,13 @@ MAGNET_FIELD_IDS = [
     "ramp_step_A", "ramp_delay_s", "i_min_A", "i_max_A", "n_points",
     "gaussmeter_visa_resource", "gaussmeter_n_averages", "gaussmeter_read_delay_s",
 ]
+TEMPERATURE_FIELD_IDS = ["temperature_visa_resource", "temperature_sensor_uids"]
+
+
+def parse_sensor_uids(raw: str) -> tuple:
+    """Parse a comma-separated "DB6.T1, DB5.T1" field into a 1- or 2-tuple of UIDs."""
+    uids = [u.strip() for u in raw.split(",") if u.strip()]
+    return tuple(uids[:2])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -217,6 +230,7 @@ class MeasurementPlan:
     magnet_cfg: Optional[MagnetConfig]
     gauss_cfg: Optional[GaussmeterConfig]
     currents_A: Optional[np.ndarray]
+    temp_cfg: Optional[TemperatureControllerConfig]
     phase_cal_enabled: bool
     phase_cal_current_A: Optional[float]
     phase_cal_n_averages: int
@@ -337,6 +351,18 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     else:
         info.append("Single point — no field sweep, magnet untouched.")
         info.append(f"Estimated run time ≈ {format_duration(per_point_s)}")
+
+    # ── Temperature (MercuryiTC, optional) ──────────────────────────────────
+    if state["enable_temperature"]:
+        uids = parse_sensor_uids(state["temperature_sensor_uids"])
+        if not uids:
+            warnings.append("Temperature logging is on but no sensor UID is set — "
+                             "temperature columns will be empty.")
+        else:
+            info.append(f"Temperature logged via MercuryiTC ({', '.join(uids)}) — "
+                         "if unreachable, columns are simply left empty.")
+    else:
+        info.append("Temperature logging off.")
 
     # ── Phase calibration ───────────────────────────────────────────────────
     if state["enable_phase_cal"]:
@@ -523,7 +549,8 @@ class RunScreen(Screen):
 
     def on_mount(self) -> None:
         self.query_one("#results_table", DataTable).add_columns(
-            "#", "I (A)", "B (mT)", "1f R (V)", "1f θ (°)", "2f R (V)", "2f θ (°)"
+            "#", "I (A)", "B (mT)", "1f R (V)", "1f θ (°)", "2f R (V)", "2f θ (°)",
+            "T1 (K)", "T2 (K)",
         )
         self._log_handler = _LogRelay(self)
         root = logging.getLogger()
@@ -568,6 +595,8 @@ class RunScreen(Screen):
         table = self.query_one("#results_table", DataTable)
         I = record.get("magnet_current_A")
         B = record.get("magnet_field_mT")
+        T1 = record.get("temperature_1_K")
+        T2 = record.get("temperature_2_K")
         table.add_row(
             str(record["point_index"] + 1),
             f"{I:.4f}" if I is not None else "—",
@@ -576,6 +605,8 @@ class RunScreen(Screen):
             f"{record['1f_theta_deg']:.2f}",
             f"{record['2f_R_V']:.4e}",
             f"{record['2f_theta_deg']:.2f}",
+            f"{T1:.3f}" if T1 is not None else "—",
+            f"{T2:.3f}" if T2 is not None else "—",
         )
         table.move_cursor(row=table.row_count - 1, scroll=True)
         self.query_one("#progress", ProgressBar).advance(1)
@@ -614,6 +645,7 @@ class RunScreen(Screen):
         daq = None
         magnet = None
         gaussmeter = None
+        temp_ctrl = None
         try:
             self._set_status_threadsafe("Connecting to LabOne data server …")
             daq = connect(plan.daq_host, plan.daq_port)
@@ -628,6 +660,10 @@ class RunScreen(Screen):
             sync_follower_oscillator(daq, plan.out_cfg, plan.follower)
             configure_demodulator(daq, plan.demod1_cfg)
             configure_demodulator(daq, plan.demod2_cfg)
+
+            if plan.temp_cfg is not None:
+                self._set_status_threadsafe("Connecting to MercuryiTC (temperature) …")
+                temp_ctrl = connect_temperature_controller(plan.temp_cfg)
 
             if plan.magnet_cfg is not None and plan.currents_A is not None:
                 self._set_status_threadsafe("Connecting magnet power supply …")
@@ -684,6 +720,7 @@ class RunScreen(Screen):
                 stop_event=self._stop_event,
                 on_point=lambda record: self.app.call_from_thread(self._on_point, record),
                 gaussmeter=gaussmeter, gauss_cfg=plan.gauss_cfg,
+                temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg,
             )
             final = "Measurement aborted." if self._stop_event.is_set() else "Measurement complete."
         except Exception as exc:
@@ -700,6 +737,11 @@ class RunScreen(Screen):
                     shutdown_gaussmeter(gaussmeter)
                 except Exception:
                     log.exception("Error while shutting down gaussmeter")
+            if temp_ctrl is not None:
+                try:
+                    shutdown_temperature_controller(temp_ctrl)
+                except Exception:
+                    log.exception("Error while shutting down MercuryiTC")
             if daq is not None:
                 try:
                     shutdown_output(daq, plan.out_cfg)
@@ -825,6 +867,19 @@ class MFLIDualHarmonicApp(App):
                         yield field("gaussmeter_read_delay_s", "Delay between readings (s)",
                                     DEFAULTS["gaussmeter_read_delay_s"])
 
+                with Collapsible(title="Temperature (MercuryiTC)", collapsed=False):
+                    yield switch_field("enable_temperature",
+                                        "Log temperature (Oxford Instruments MercuryiTC)",
+                                        DEFAULTS["enable_temperature"])
+                    yield field("temperature_visa_resource", "MercuryiTC VISA resource",
+                                DEFAULTS["temperature_visa_resource"], kind="text",
+                                hint="e.g. TCPIP0::<ip>::7020::SOCKET (Ethernet) or an ASRL resource.")
+                    yield field("temperature_sensor_uids", "Sensor board UID(s)",
+                                DEFAULTS["temperature_sensor_uids"], kind="text",
+                                hint="1 or 2 board UIDs, comma-separated, e.g. 'DB6.T1, DB5.T1'. "
+                                     "Not connected, or only one probe wired up? Fine either way — "
+                                     "missing readings just leave the column empty.")
+
                 with Collapsible(title="Phase calibration (Zurich lock-in null)", collapsed=True):
                     yield switch_field(
                         "enable_phase_cal",
@@ -889,6 +944,7 @@ class MFLIDualHarmonicApp(App):
         raw: dict = {fid: self.query_one(f"#{fid}", Input).value for fid in self._all_field_ids()}
         raw["sinc_filter"] = self.query_one("#sinc_filter", Switch).value
         raw["enable_sweep"] = self.query_one("#enable_sweep", Switch).value
+        raw["enable_temperature"] = self.query_one("#enable_temperature", Switch).value
         raw["enable_phase_cal"] = self.query_one("#enable_phase_cal", Switch).value
         raw["order"] = self.query_one("#order", Select).value
         return raw
@@ -908,6 +964,8 @@ class MFLIDualHarmonicApp(App):
             self.query_one("#sinc_filter", Switch).value = bool(saved["sinc_filter"])
         if "enable_sweep" in saved:
             self.query_one("#enable_sweep", Switch).value = bool(saved["enable_sweep"])
+        if "enable_temperature" in saved:
+            self.query_one("#enable_temperature", Switch).value = bool(saved["enable_temperature"])
         if "enable_phase_cal" in saved:
             self.query_one("#enable_phase_cal", Switch).value = bool(saved["enable_phase_cal"])
         if "order" in saved:
@@ -947,6 +1005,7 @@ class MFLIDualHarmonicApp(App):
                 state[fid] = None
         state["sinc_filter"] = self.query_one("#sinc_filter", Switch).value
         state["enable_sweep"] = self.query_one("#enable_sweep", Switch).value
+        state["enable_temperature"] = self.query_one("#enable_temperature", Switch).value
         state["enable_phase_cal"] = self.query_one("#enable_phase_cal", Switch).value
         state["order"] = int(self.query_one("#order", Select).value)
         return state, errors
@@ -959,6 +1018,8 @@ class MFLIDualHarmonicApp(App):
     def on_switch_changed(self, event: Switch.Changed) -> None:
         if event.switch.id == "enable_sweep":
             self._set_magnet_fields_enabled(event.value)
+        elif event.switch.id == "enable_temperature":
+            self._set_temperature_fields_enabled(event.value)
         self.refresh_summary()
 
     def on_select_changed(self, event: Select.Changed) -> None:
@@ -966,6 +1027,10 @@ class MFLIDualHarmonicApp(App):
 
     def _set_magnet_fields_enabled(self, enabled: bool) -> None:
         for fid in MAGNET_FIELD_IDS:
+            self.query_one(f"#{fid}", Input).disabled = not enabled
+
+    def _set_temperature_fields_enabled(self, enabled: bool) -> None:
+        for fid in TEMPERATURE_FIELD_IDS:
             self.query_one(f"#{fid}", Input).disabled = not enabled
 
     def refresh_summary(self) -> None:
@@ -1056,11 +1121,21 @@ class MFLIDualHarmonicApp(App):
                 i_min=state["i_min_A"], i_max=state["i_max_A"], n_points=state["n_points"],
             )
 
+        temp_cfg = None
+        if state["enable_temperature"]:
+            uids = parse_sensor_uids(state["temperature_sensor_uids"])
+            if uids:
+                temp_cfg = TemperatureControllerConfig(
+                    visa_resource=state["temperature_visa_resource"],
+                    sensor_uids=uids,
+                )
+
         return MeasurementPlan(
             daq_host=state["daq_host"], daq_port=state["daq_port"],
             leader=state["leader_device"], follower=state["follower_device"],
             out_cfg=out_cfg, demod1_cfg=demod1_cfg, demod2_cfg=demod2_cfg,
             acq_cfg=acq_cfg, magnet_cfg=magnet_cfg, gauss_cfg=gauss_cfg, currents_A=currents_A,
+            temp_cfg=temp_cfg,
             phase_cal_enabled=state["enable_phase_cal"],
             phase_cal_current_A=state["phase_cal_current_A"],
             phase_cal_n_averages=state["phase_cal_n_averages"],

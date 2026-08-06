@@ -60,8 +60,10 @@ from mfli_dual_harmonic import (
     KepkoBOPGL,
     LakeShore475,
     MagnetConfig,
+    MercuryITC,
     OutputConfig,
     PhaseCalibrationResult,
+    TemperatureControllerConfig,
     _DATA_DIR,
     acquire_averaged,
     auto_null_phase,
@@ -72,12 +74,15 @@ from mfli_dual_harmonic import (
     connect_device,
     connect_gaussmeter,
     connect_magnet,
+    connect_temperature_controller,
     read_field_mT,
+    read_temperature,
     set_magnet_current,
     setup_mds,
     shutdown_gaussmeter,
     shutdown_magnet,
     shutdown_output,
+    shutdown_temperature_controller,
     sync_follower_oscillator,
 )
 
@@ -208,11 +213,19 @@ def run_field_sweep_diagnostic(
     gauss_cfg: Optional[GaussmeterConfig] = None,
     stop_event: Optional[threading.Event] = None,
     on_point: Optional[Callable[[dict], None]] = None,
+    temp_ctrl: Optional[MercuryITC] = None,
+    temp_cfg: Optional[TemperatureControllerConfig] = None,
 ) -> pd.DataFrame:
     """
     Sweep the magnet current bidirectionally (see bidirectional_current_sweep)
     and record 1f + 2f X/Y/R at every point, with the field measured live if
     a gaussmeter is given.
+
+    `temp_ctrl`/`temp_cfg`, if given, log the sample/probe temperature
+    (temperature_1_K / temperature_2_K) at each point via the shared
+    MercuryiTC controller (see mercury_itc.py). Passing `temp_ctrl=None`
+    (e.g. because the MercuryiTC isn't connected) simply leaves those
+    columns empty — it's never a reason to stop the measurement.
     """
     currents_A = bidirectional_current_sweep(sweep_cfg.i_min_A, sweep_cfg.i_max_A, sweep_cfg.n_points)
     records: List[dict] = []
@@ -231,10 +244,15 @@ def run_field_sweep_diagnostic(
         field_mT = read_field_mT(gaussmeter, gauss_cfg) if gaussmeter is not None else None
         residual_ratio = abs(d1["y_mean"]) / d1["r_mean"] if d1["r_mean"] > 0 else float("nan")
 
+        temp_1_K, temp_2_K = read_temperature(temp_ctrl, temp_cfg) \
+            if temp_cfg is not None else (None, None)
+
         record = {
             "point_index":       idx,
             "magnet_current_A":  I,
             "magnet_field_mT":   field_mT,
+            "temperature_1_K":   temp_1_K,
+            "temperature_2_K":   temp_2_K,
             "1f_X_V":            d1["x_mean"],
             "1f_Y_V":            d1["y_mean"],
             "1f_R_V":            d1["r_mean"],
@@ -466,6 +484,8 @@ def run_phase_calibration(
     stop_event: Optional[threading.Event] = None,
     on_point: Optional[Callable[[dict], None]] = None,
     on_status: Optional[Callable[[str], None]] = None,
+    temp_ctrl: Optional[MercuryITC] = None,
+    temp_cfg: Optional[TemperatureControllerConfig] = None,
 ) -> PhaseCalibrationReport:
     """
     Run the full phase-calibration procedure end to end:
@@ -511,6 +531,7 @@ def run_phase_calibration(
         daq, demod1_cfg, demod2_cfg, sweep_cfg, magnet, magnet_cfg,
         gaussmeter=gaussmeter, gauss_cfg=gauss_cfg,
         stop_event=stop_event, on_point=on_point,
+        temp_ctrl=temp_ctrl, temp_cfg=temp_cfg,
     )
     Path(output_csv).parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(output_csv, index=False)
@@ -641,6 +662,16 @@ def main() -> None:
     )
     gaussmeter = connect_gaussmeter(gauss_cfg)
 
+    # ── Temperature (Oxford Instruments MercuryiTC, optional) ────────────────
+    # Not every rig has one, and not every MercuryiTC has two probes wired up
+    # — connect_temperature_controller() returns None rather than raising if
+    # it can't be reached, and the measurement runs fine either way.
+    temp_cfg = TemperatureControllerConfig(
+        visa_resource = "TCPIP0::192.168.1.5::7020::SOCKET",  # ← set to your iTC's address
+        sensor_uids   = ("DB6.T1",),   # ← 1 or 2 board UIDs, e.g. ("DB6.T1", "DB5.T1")
+    )
+    temp_ctrl = connect_temperature_controller(temp_cfg)
+
     # Sweep used to verify the null holds and identify the 2f channel — pick
     # the same range you'd actually use for a Hall-effect measurement.
     sweep_cfg = SweepConfig(
@@ -680,12 +711,15 @@ def main() -> None:
             gauss_cfg             = gauss_cfg,
             amplitude_check_cfg   = amplitude_check_cfg,
             frequency_check_cfg   = frequency_check_cfg,
+            temp_ctrl             = temp_ctrl,
+            temp_cfg              = temp_cfg,
         )
         print_report(report)
     finally:
         shutdown_output(daq, out_cfg)
         shutdown_magnet(magnet, magnet_cfg)
         shutdown_gaussmeter(gaussmeter)
+        shutdown_temperature_controller(temp_ctrl)
 
 
 if __name__ == "__main__":

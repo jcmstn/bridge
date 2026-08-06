@@ -61,16 +61,20 @@ from mfli_diff_resistance_vs_bias import (
     BiasPoint,
     DemodConfig,
     FilterConfig,
+    MercuryITC,
     OutputConfig,
+    TemperatureControllerConfig,
     bidirectional_bias_sweep,
     configure_demodulator,
     configure_output,
     connect,
     connect_device,
+    connect_temperature_controller,
     ramp_bias_to_zero,
     run_measurement,
     setup_mds,
     shutdown_output,
+    shutdown_temperature_controller,
     sync_follower_oscillator,
 )
 
@@ -107,6 +111,9 @@ DEFAULTS: dict = {
     "n_averages": "50",
     "output_name": "diff_resistance_vs_bias",
     "n_points": "41",
+    "enable_temperature": True,
+    "temperature_visa_resource": "TCPIP0::192.168.1.5::7020::SOCKET",
+    "temperature_sensor_uids": "DB6.T1",
 }
 
 # id -> caster, for every free-text numeric field (Select/Switch handled separately)
@@ -125,7 +132,14 @@ NUMERIC_FIELDS: dict = {
     "n_averages": int,
     "n_points": int,
 }
-TEXT_FIELDS = ["leader_device", "follower_device", "daq_host", "output_name"]
+TEXT_FIELDS = ["leader_device", "follower_device", "daq_host", "output_name",
+               "temperature_visa_resource", "temperature_sensor_uids"]
+
+
+def parse_sensor_uids(raw: str) -> tuple:
+    """Parse a comma-separated "DB6.T1, DB5.T1" field into a 1- or 2-tuple of UIDs."""
+    uids = [u.strip() for u in raw.split(",") if u.strip()]
+    return tuple(uids[:2])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -175,6 +189,7 @@ class MeasurementPlan:
     voltage_cfg: DemodConfig
     acq_cfg: AcquisitionConfig
     biases_V: np.ndarray
+    temp_cfg: Optional[TemperatureControllerConfig] = None
 
     @property
     def total_points(self) -> int:
@@ -288,6 +303,18 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         f"{state['bias_min_V']:g} V, {total_points} points (bidirectional — reveals hysteresis)"
     )
     info.append(f"Estimated total run time ≈ {format_duration(total_points * per_point_s)}")
+
+    # ── Temperature (MercuryiTC, optional) ──────────────────────────────────
+    if state["enable_temperature"]:
+        uids = parse_sensor_uids(state["temperature_sensor_uids"])
+        if not uids:
+            warnings.append("Temperature logging is on but no sensor UID is set — "
+                             "temperature columns will be empty.")
+        else:
+            info.append(f"Temperature logged via MercuryiTC ({', '.join(uids)}) — "
+                         "if unreachable, columns are simply left empty.")
+    else:
+        info.append("Temperature logging off.")
 
     return info, warnings, errors
 
@@ -455,7 +482,7 @@ class RunScreen(Screen):
     def on_mount(self) -> None:
         self.query_one("#results_table", DataTable).add_columns(
             "#", "V_bias (V)", "I_ac (A)", "V_dut (V)", "R_diff (Ω)", "X_react (Ω)",
-            "|Z| (Ω)", "phase (°)"
+            "|Z| (Ω)", "phase (°)", "T1 (K)", "T2 (K)"
         )
         self._log_handler = _LogRelay(self)
         root = logging.getLogger()
@@ -498,6 +525,8 @@ class RunScreen(Screen):
             except Exception:
                 pass
         table = self.query_one("#results_table", DataTable)
+        T1 = record.get("temperature_1_K")
+        T2 = record.get("temperature_2_K")
         table.add_row(
             str(record["point_index"] + 1),
             f"{record['bias_V']:.4f}",
@@ -507,6 +536,8 @@ class RunScreen(Screen):
             f"{record['X_reactive_ohm']:.3g}",
             f"{record['Z_mag_ohm']:.5g}",
             f"{record['Z_phase_deg']:.2f}",
+            f"{T1:.3f}" if T1 is not None else "—",
+            f"{T2:.3f}" if T2 is not None else "—",
         )
         table.move_cursor(row=table.row_count - 1, scroll=True)
         self.query_one("#progress", ProgressBar).advance(1)
@@ -544,11 +575,16 @@ class RunScreen(Screen):
         plan = self.plan
         daq = None
         output_configured = False
+        temp_ctrl = None
         try:
             self._set_status_threadsafe("Connecting to LabOne data server …")
             daq = connect(plan.daq_host, plan.daq_port)
             connect_device(daq, plan.leader, interface="1GbE")
             connect_device(daq, plan.follower, interface="1GbE")
+
+            if plan.temp_cfg is not None:
+                self._set_status_threadsafe("Connecting to MercuryiTC (temperature) …")
+                temp_ctrl = connect_temperature_controller(plan.temp_cfg)
 
             self._set_status_threadsafe("Synchronizing MDS …")
             setup_mds(daq, leader=plan.leader, follower=plan.follower)
@@ -567,6 +603,7 @@ class RunScreen(Screen):
                 daq, plan.out_cfg, plan.current_cfg, plan.voltage_cfg, plan.acq_cfg, points,
                 stop_event=self._stop_event,
                 on_point=lambda record: self.app.call_from_thread(self._on_point, record),
+                temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg,
             )
             final = "Measurement aborted." if self._stop_event.is_set() else "Measurement complete."
         except Exception as exc:
@@ -582,6 +619,11 @@ class RunScreen(Screen):
                     shutdown_output(daq, plan.out_cfg)
                 except Exception:
                     log.exception("Error while shutting down output")
+            if temp_ctrl is not None:
+                try:
+                    shutdown_temperature_controller(temp_ctrl)
+                except Exception:
+                    log.exception("Error while shutting down MercuryiTC")
             self.app.call_from_thread(self._on_finished, final)
 
     def _set_status_threadsafe(self, text: str) -> None:
@@ -687,6 +729,19 @@ class MFLIDiffResistanceApp(App):
                                 hint="Bidirectional: min → max → min (reveals hysteresis).",
                                 validators=[Number(minimum=2, failure_description="must be ≥ 2")])
 
+                with Collapsible(title="Temperature (MercuryiTC)", collapsed=False):
+                    yield switch_field("enable_temperature",
+                                        "Log temperature (Oxford Instruments MercuryiTC)",
+                                        DEFAULTS["enable_temperature"])
+                    yield field("temperature_visa_resource", "MercuryiTC VISA resource",
+                                DEFAULTS["temperature_visa_resource"], kind="text",
+                                hint="e.g. TCPIP0::<ip>::7020::SOCKET (Ethernet) or an ASRL resource.")
+                    yield field("temperature_sensor_uids", "Sensor board UID(s)",
+                                DEFAULTS["temperature_sensor_uids"], kind="text",
+                                hint="1 or 2 board UIDs, comma-separated, e.g. 'DB6.T1, DB5.T1'. "
+                                     "Not connected, or only one probe wired up? Fine either way — "
+                                     "missing readings just leave the column empty.")
+
             with Vertical(id="sidebar"):
                 yield Static("Summary", classes="sidebar-title")
                 yield Static(id="summary")
@@ -715,6 +770,7 @@ class MFLIDiffResistanceApp(App):
         raw: dict = {fid: self.query_one(f"#{fid}", Input).value for fid in self._all_field_ids()}
         raw["sinc_filter"] = self.query_one("#sinc_filter", Switch).value
         raw["order"] = self.query_one("#order", Select).value
+        raw["enable_temperature"] = self.query_one("#enable_temperature", Switch).value
         return raw
 
     def _load_settings(self) -> None:
@@ -735,6 +791,8 @@ class MFLIDiffResistanceApp(App):
                 self.query_one("#order", Select).value = int(saved["order"])
             except Exception:
                 pass
+        if "enable_temperature" in saved:
+            self.query_one("#enable_temperature", Switch).value = bool(saved["enable_temperature"])
 
     def _save_settings(self, raw: dict) -> None:
         try:
@@ -757,6 +815,7 @@ class MFLIDiffResistanceApp(App):
             state[fid] = self.query_one(f"#{fid}", Input).value.strip()
         state["sinc_filter"] = self.query_one("#sinc_filter", Switch).value
         state["order"] = int(self.query_one("#order", Select).value)
+        state["enable_temperature"] = self.query_one("#enable_temperature", Switch).value
         return state, errors
 
     # ── Reactivity ───────────────────────────────────────────────────────────
@@ -847,11 +906,21 @@ class MFLIDiffResistanceApp(App):
             v_min=state["bias_min_V"], v_max=state["bias_max_V"], n_points=state["n_points"],
         )
 
+        temp_cfg = None
+        if state["enable_temperature"]:
+            uids = parse_sensor_uids(state["temperature_sensor_uids"])
+            if uids:
+                temp_cfg = TemperatureControllerConfig(
+                    visa_resource=state["temperature_visa_resource"],
+                    sensor_uids=uids,
+                )
+
         return MeasurementPlan(
             daq_host=state["daq_host"], daq_port=state["daq_port"],
             leader=state["leader_device"], follower=state["follower_device"],
             out_cfg=out_cfg, current_cfg=current_cfg, voltage_cfg=voltage_cfg,
             acq_cfg=acq_cfg, biases_V=biases_V,
+            temp_cfg=temp_cfg,
         )
 
 

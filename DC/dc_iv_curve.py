@@ -48,6 +48,7 @@ Requirements:
     pip install pymeasure pyvisa numpy pandas matplotlib
 """
 
+import sys
 import time
 import logging
 import threading
@@ -61,7 +62,20 @@ from typing import Optional, Callable, List
 
 from pymeasure.instruments.keithley import Keithley2182, Keithley2400, Keithley6221
 
-from dc_sweep_utils import linear_sweep
+# The MercuryiTC driver lives in the shared bridge/instruments folder — add
+# it to sys.path directly (it's not installed as a normal package).
+_INSTRUMENTS_DIR = Path(__file__).resolve().parent.parent / "instruments"
+if str(_INSTRUMENTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_INSTRUMENTS_DIR))
+from mercury_itc import (  # noqa: E402
+    MercuryITC,
+    TemperatureControllerConfig,
+    connect_temperature_controller,
+    read_temperature,
+    shutdown_temperature_controller,
+)
+
+from dc_sweep_utils import linear_sweep  # noqa: E402
 
 # Data lives outside "bridge" (a sibling of it), same convention as
 # dc_hall_measurement.py / the MFLI programs.
@@ -244,6 +258,8 @@ def run_measurement(
     stop_event: Optional[threading.Event] = None,
     on_point:   Optional[Callable[[dict], None]] = None,
     gate_voltage_V: Optional[float] = None,
+    temp_ctrl: Optional[MercuryITC] = None,
+    temp_cfg:  Optional[TemperatureControllerConfig] = None,
 ) -> pd.DataFrame:
     """
     Iterate over `points`, set each current, acquire the averaged voltage,
@@ -260,6 +276,12 @@ def run_measurement(
 
     `gate_voltage_V`, if given, is recorded on every point (the gate itself
     is set once by the caller before the sweep starts, not per point).
+
+    `temp_ctrl`/`temp_cfg`, if given, log the sample/probe temperature
+    (temperature_1_K / temperature_2_K) at each point via the shared
+    MercuryiTC controller (see mercury_itc.py). Passing `temp_ctrl=None`
+    (e.g. because the MercuryiTC isn't connected) simply leaves those
+    columns empty — it's never a reason to stop the measurement.
     """
     records: List[dict] = []
 
@@ -284,6 +306,10 @@ def run_measurement(
         r_chord = v["mean"] / pt.current_A if pt.current_A != 0 else float("nan")
         log.info("   V=%.4e V  σ=%.2e V  R=%.5g Ω", v["mean"], v["std"], r_chord)
 
+        # ── 3b. Read temperature (MercuryiTC, optional) ─────────────────────
+        temp_1_K, temp_2_K = read_temperature(temp_ctrl, temp_cfg) \
+            if temp_cfg is not None else (None, None)
+
         # ── 4. Build record ────────────────────────────────────────────────────
         record = {
             "point_index":     idx,
@@ -293,6 +319,8 @@ def run_measurement(
             "voltage_std_V":   v["std"],
             "resistance_ohm":  r_chord,
             "gate_voltage_V":  gate_voltage_V,
+            "temperature_1_K": temp_1_K,
+            "temperature_2_K": temp_2_K,
         }
         records.append(record)
         if on_point is not None:
@@ -354,6 +382,16 @@ def main() -> None:
     )
     voltmeter = connect_voltmeter(volt_cfg)
 
+    # ── Temperature (Oxford Instruments MercuryiTC, optional) ────────────────
+    # Not every rig has one, and not every MercuryiTC has two probes wired up
+    # — connect_temperature_controller() returns None rather than raising if
+    # it can't be reached, and the measurement runs fine either way.
+    temp_cfg = TemperatureControllerConfig(
+        visa_resource = "TCPIP0::192.168.1.5::7020::SOCKET",  # ← set to your iTC's address
+        sensor_uids   = ("DB6.T1",),   # ← 1 or 2 board UIDs, e.g. ("DB6.T1", "DB5.T1")
+    )
+    temp_ctrl = connect_temperature_controller(temp_cfg)
+
     # ── Acquisition settings ─────────────────────────────────────────────────
     acq_cfg = AcquisitionConfig(
         settling_time_s = 0.2,
@@ -370,7 +408,8 @@ def main() -> None:
     # Always ramp the current back to zero and disable the output, even if
     # the measurement raises partway through.
     try:
-        df = run_measurement(source, voltmeter, src_cfg, acq_cfg, points)
+        df = run_measurement(source, voltmeter, src_cfg, acq_cfg, points,
+                              temp_ctrl=temp_ctrl, temp_cfg=temp_cfg)
         print("\n", df.to_string(index=False))
         plot_path = Path(acq_cfg.output_file).with_suffix(".png")
         plot_results(df, plot_path)
@@ -378,6 +417,7 @@ def main() -> None:
     finally:
         ramp_current_to_zero(source)
         shutdown_source(source)
+        shutdown_temperature_controller(temp_ctrl)
 
 
 if __name__ == "__main__":

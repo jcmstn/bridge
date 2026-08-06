@@ -62,11 +62,13 @@ from dc_spin_valve import (
     GaussmeterConfig,
     MagnetConfig,
     SourceConfig,
+    TemperatureControllerConfig,
     VoltmeterConfig,
     connect_gate,
     connect_gaussmeter,
     connect_magnet,
     connect_source,
+    connect_temperature_controller,
     connect_voltmeter,
     run_measurement,
     set_gate_voltage,
@@ -75,6 +77,7 @@ from dc_spin_valve import (
     shutdown_gaussmeter,
     shutdown_magnet,
     shutdown_source,
+    shutdown_temperature_controller,
 )
 from dc_sweep_utils import build_output_path, linear_sweep, parse_value_list
 
@@ -131,6 +134,9 @@ DEFAULTS: dict = {
     "gaussmeter_visa_resource": "GPIB0::12::INSTR",
     "gaussmeter_n_averages": "10",
     "gaussmeter_read_delay_s": "0.05",
+    "enable_temperature": True,
+    "temperature_visa_resource": "TCPIP0::192.168.1.5::7020::SOCKET",
+    "temperature_sensor_uids": "DB6.T1",
 }
 
 NUMERIC_FIELDS: dict = {
@@ -154,7 +160,15 @@ NUMERIC_FIELDS: dict = {
 }
 TEXT_FIELDS = ["source_visa_resource", "voltmeter_visa_resource", "gate_visa_resource",
                "output_name", "output_subdir", "magnet_visa_resource",
-               "gaussmeter_visa_resource", "gate_voltage_values"]
+               "gaussmeter_visa_resource", "gate_voltage_values",
+               "temperature_visa_resource", "temperature_sensor_uids"]
+TEMPERATURE_FIELD_IDS = ["temperature_visa_resource", "temperature_sensor_uids"]
+
+
+def parse_sensor_uids(raw: str) -> tuple:
+    """Parse a comma-separated "DB6.T1, DB5.T1" field into a 1- or 2-tuple of UIDs."""
+    uids = [u.strip() for u in raw.split(",") if u.strip()]
+    return tuple(uids[:2])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -202,6 +216,7 @@ class MeasurementPlan:
     gate_voltages_V: List[float]
     output_subdir: str
     output_prefix: str
+    temp_cfg: Optional[TemperatureControllerConfig] = None
 
     @property
     def series_values(self) -> List[float]:
@@ -303,6 +318,18 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
 
     total_points = n_sweep_points * max(1, n_series)
     info.append(f"Estimated total run time ≈ {format_duration(total_points * per_point_s)}")
+
+    # ── Temperature (MercuryiTC, optional) ──────────────────────────────────
+    if state["enable_temperature"]:
+        uids = parse_sensor_uids(state["temperature_sensor_uids"])
+        if not uids:
+            warnings.append("Temperature logging is on but no sensor UID is set — "
+                             "temperature columns will be empty.")
+        else:
+            info.append(f"Temperature logged via MercuryiTC ({', '.join(uids)}) — "
+                         "if unreachable, columns are simply left empty.")
+    else:
+        info.append("Temperature logging off.")
 
     return info, warnings, errors
 
@@ -457,7 +484,8 @@ class RunScreen(Screen):
 
     def on_mount(self) -> None:
         self.query_one("#results_table", DataTable).add_columns(
-            "#", "Vg (V)", "I_magnet (A)", "B (mT)", "V (V)", "R (Ω)", "n_rev"
+            "#", "Vg (V)", "I_magnet (A)", "B (mT)", "V (V)", "R (Ω)", "n_rev",
+            "T1 (K)", "T2 (K)",
         )
         self._log_handler = _LogRelay(self)
         logging.getLogger().addHandler(self._log_handler)
@@ -498,6 +526,8 @@ class RunScreen(Screen):
         I = record.get("magnet_current_A")
         B = record.get("magnet_field_mT")
         Vg = record.get("gate_voltage_V")
+        T1 = record.get("temperature_1_K")
+        T2 = record.get("temperature_2_K")
         table.add_row(
             str(record["point_index"] + 1),
             f"{Vg:.4g}" if Vg is not None else "—",
@@ -506,6 +536,8 @@ class RunScreen(Screen):
             f"{record['voltage_V']:.4e}",
             f"{record['resistance_ohm']:.5g}",
             str(record["n_reversals"]),
+            f"{T1:.3f}" if T1 is not None else "—",
+            f"{T2:.3f}" if T2 is not None else "—",
         )
         table.move_cursor(row=table.row_count - 1, scroll=True)
         self.query_one("#progress", ProgressBar).advance(1)
@@ -555,11 +587,16 @@ class RunScreen(Screen):
         gate = None
         magnet = None
         gaussmeter = None
+        temp_ctrl = None
         try:
             self._set_status_threadsafe("Connecting to Keithley 6221, 2182 & 2400 …")
             source = connect_source(plan.src_cfg)
             voltmeter = connect_voltmeter(plan.volt_cfg)
             gate = connect_gate(plan.gate_cfg)
+
+            if plan.temp_cfg is not None:
+                self._set_status_threadsafe("Connecting to MercuryiTC (temperature) …")
+                temp_ctrl = connect_temperature_controller(plan.temp_cfg)
 
             self._set_status_threadsafe("Connecting magnet power supply …")
             magnet = connect_magnet(plan.magnet_cfg)
@@ -595,6 +632,7 @@ class RunScreen(Screen):
                     on_point=self._make_on_point(series_idx, label),
                     gaussmeter=gaussmeter, gauss_cfg=plan.gauss_cfg,
                     gate_voltage_V=gate_V,
+                    temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg,
                 )
 
             final = "Measurement aborted." if self._stop_event.is_set() else "Measurement complete."
@@ -612,6 +650,11 @@ class RunScreen(Screen):
                     shutdown_gaussmeter(gaussmeter)
                 except Exception:
                     log.exception("Error while shutting down gaussmeter")
+            if temp_ctrl is not None:
+                try:
+                    shutdown_temperature_controller(temp_ctrl)
+                except Exception:
+                    log.exception("Error while shutting down MercuryiTC")
             if gate is not None:
                 try:
                     shutdown_gate(gate)
@@ -741,6 +784,19 @@ class DCSpinValveApp(App):
                         yield field("gaussmeter_read_delay_s", "Delay between readings (s)",
                                     DEFAULTS["gaussmeter_read_delay_s"])
 
+                with Collapsible(title="Temperature (MercuryiTC)", collapsed=False):
+                    yield switch_field("enable_temperature",
+                                        "Log temperature (Oxford Instruments MercuryiTC)",
+                                        DEFAULTS["enable_temperature"])
+                    yield field("temperature_visa_resource", "MercuryiTC VISA resource",
+                                DEFAULTS["temperature_visa_resource"], kind="text",
+                                hint="e.g. TCPIP0::<ip>::7020::SOCKET (Ethernet) or an ASRL resource.")
+                    yield field("temperature_sensor_uids", "Sensor board UID(s)",
+                                DEFAULTS["temperature_sensor_uids"], kind="text",
+                                hint="1 or 2 board UIDs, comma-separated, e.g. 'DB6.T1, DB5.T1'. "
+                                     "Not connected, or only one probe wired up? Fine either way — "
+                                     "missing readings just leave the column empty.")
+
             with Vertical(id="sidebar"):
                 yield Static("Description", classes="sidebar-title")
                 yield Static(DC_SPIN_VALVE_DESCRIPTION, classes="card-desc")
@@ -756,6 +812,7 @@ class DCSpinValveApp(App):
     def on_mount(self) -> None:
         logging.getLogger().handlers.clear()
         self._load_settings()
+        self._set_temperature_fields_enabled(self.query_one("#enable_temperature", Switch).value)
         self.refresh_summary()
 
     # ── Form state I/O ───────────────────────────────────────────────────────
@@ -767,6 +824,7 @@ class DCSpinValveApp(App):
         raw: dict = {fid: self.query_one(f"#{fid}", Input).value for fid in self._all_field_ids()}
         raw["auto_range"] = self.query_one("#auto_range", Switch).value
         raw["bidirectional_sweep"] = self.query_one("#bidirectional_sweep", Switch).value
+        raw["enable_temperature"] = self.query_one("#enable_temperature", Switch).value
         return raw
 
     def _load_settings(self) -> None:
@@ -784,6 +842,8 @@ class DCSpinValveApp(App):
             self.query_one("#auto_range", Switch).value = bool(saved["auto_range"])
         if "bidirectional_sweep" in saved:
             self.query_one("#bidirectional_sweep", Switch).value = bool(saved["bidirectional_sweep"])
+        if "enable_temperature" in saved:
+            self.query_one("#enable_temperature", Switch).value = bool(saved["enable_temperature"])
 
     def _save_settings(self, raw: dict) -> None:
         try:
@@ -806,6 +866,7 @@ class DCSpinValveApp(App):
             state[fid] = self.query_one(f"#{fid}", Input).value.strip()
         state["auto_range"] = self.query_one("#auto_range", Switch).value
         state["bidirectional_sweep"] = self.query_one("#bidirectional_sweep", Switch).value
+        state["enable_temperature"] = self.query_one("#enable_temperature", Switch).value
 
         state["gate_voltage_list"] = []
         state["gate_parse_error"] = None
@@ -822,7 +883,13 @@ class DCSpinValveApp(App):
         self.refresh_summary()
 
     def on_switch_changed(self, event: Switch.Changed) -> None:
+        if event.switch.id == "enable_temperature":
+            self._set_temperature_fields_enabled(event.value)
         self.refresh_summary()
+
+    def _set_temperature_fields_enabled(self, enabled: bool) -> None:
+        for fid in TEMPERATURE_FIELD_IDS:
+            self.query_one(f"#{fid}", Input).disabled = not enabled
 
     def refresh_summary(self) -> None:
         state, parse_errors = self.parse_state()
@@ -904,11 +971,21 @@ class DCSpinValveApp(App):
             bidirectional=state["bidirectional_sweep"],
         )
 
+        temp_cfg = None
+        if state["enable_temperature"]:
+            uids = parse_sensor_uids(state["temperature_sensor_uids"])
+            if uids:
+                temp_cfg = TemperatureControllerConfig(
+                    visa_resource=state["temperature_visa_resource"],
+                    sensor_uids=uids,
+                )
+
         return MeasurementPlan(
             src_cfg=src_cfg, volt_cfg=volt_cfg, gate_cfg=gate_cfg,
             magnet_cfg=magnet_cfg, gauss_cfg=gauss_cfg, acq_cfg=acq_cfg,
             currents_A=currents_A, gate_voltages_V=state["gate_voltage_list"],
             output_subdir=state["output_subdir"], output_prefix=state["output_name"],
+            temp_cfg=temp_cfg,
         )
 
 

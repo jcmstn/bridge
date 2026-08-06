@@ -54,17 +54,21 @@ from mfli_dual_harmonic import (
     FilterConfig,
     GaussmeterConfig,
     MagnetConfig,
+    MercuryITC,
     OutputConfig,
+    TemperatureControllerConfig,
     configure_demodulator,
     configure_output,
     connect,
     connect_device,
     connect_gaussmeter,
     connect_magnet,
+    connect_temperature_controller,
     setup_mds,
     shutdown_gaussmeter,
     shutdown_magnet,
     shutdown_output,
+    shutdown_temperature_controller,
     sync_follower_oscillator,
 )
 from mfli_dual_harmonic_tui import (
@@ -137,6 +141,9 @@ DEFAULTS: dict = {
     "freq_max_iterations": "5",
     "freq_tol_deg": "0.02",
     "output_name": "phase_calibration",
+    "enable_temperature": True,
+    "temperature_visa_resource": "TCPIP0::192.168.1.5::7020::SOCKET",
+    "temperature_sensor_uids": "DB6.T1",
 }
 
 # id -> caster, for every free-text numeric field (Select/Switch/list handled separately)
@@ -171,9 +178,16 @@ NUMERIC_FIELDS: dict = {
     "freq_tol_deg": float,
 }
 TEXT_FIELDS = ["leader_device", "follower_device", "daq_host", "visa_resource",
-               "gaussmeter_visa_resource", "output_name"]
+               "gaussmeter_visa_resource", "output_name",
+               "temperature_visa_resource", "temperature_sensor_uids"]
 # Free-text, comma-separated floats — parsed to List[float] by hand in parse_state()
 LIST_FIELDS = ["amplitudes_V", "frequencies_Hz"]
+
+
+def parse_sensor_uids(raw: str) -> tuple:
+    """Parse a comma-separated "DB6.T1, DB5.T1" field into a 1- or 2-tuple of UIDs."""
+    uids = [u.strip() for u in raw.split(",") if u.strip()]
+    return tuple(uids[:2])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -200,6 +214,7 @@ class CalibrationPlan:
     amplitude_check_cfg: Optional[AmplitudeCheckConfig]
     frequency_check_cfg: Optional[FrequencyCheckConfig]
     output_csv: str
+    temp_cfg: Optional[TemperatureControllerConfig] = None
 
     @property
     def total_points(self) -> int:
@@ -294,6 +309,18 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
             errors.append("Frequency check needs at least 2 frequencies (comma-separated).")
         else:
             info.append(f"Frequency check: {len(state['frequencies_Hz'])} frequencies")
+
+    # ── Temperature (MercuryiTC, optional) ──────────────────────────────────
+    if state["enable_temperature"]:
+        uids = parse_sensor_uids(state["temperature_sensor_uids"])
+        if not uids:
+            warnings.append("Temperature logging is on but no sensor UID is set — "
+                             "temperature columns will be empty.")
+        else:
+            info.append(f"Temperature logged via MercuryiTC ({', '.join(uids)}) — "
+                         "if unreachable, columns are simply left empty.")
+    else:
+        info.append("Temperature logging off.")
 
     return info, warnings, errors
 
@@ -434,7 +461,7 @@ class RunScreen(Screen):
 
     def on_mount(self) -> None:
         self.query_one("#results_table", DataTable).add_columns(
-            "#", "I (A)", "B (mT)", "1f |Y|/R", "2f X (V)", "2f Y (V)"
+            "#", "I (A)", "B (mT)", "1f |Y|/R", "2f X (V)", "2f Y (V)", "T1 (K)", "T2 (K)"
         )
         self._log_handler = _LogRelay(self)
         root = logging.getLogger()
@@ -477,6 +504,8 @@ class RunScreen(Screen):
         table = self.query_one("#results_table", DataTable)
         B = record.get("magnet_field_mT")
         residual = record.get("1f_residual_ratio")
+        T1 = record.get("temperature_1_K")
+        T2 = record.get("temperature_2_K")
         table.add_row(
             str(record["point_index"] + 1),
             f"{record['magnet_current_A']:.4f}",
@@ -484,6 +513,8 @@ class RunScreen(Screen):
             f"{residual:.2e}" if residual is not None else "—",
             f"{record['2f_X_V']:.4e}",
             f"{record['2f_Y_V']:.4e}",
+            f"{T1:.3f}" if T1 is not None else "—",
+            f"{T2:.3f}" if T2 is not None else "—",
         )
         table.move_cursor(row=table.row_count - 1, scroll=True)
         self.query_one("#progress", ProgressBar).advance(1)
@@ -522,6 +553,7 @@ class RunScreen(Screen):
         daq = None
         magnet = None
         gaussmeter = None
+        temp_ctrl = None
         try:
             self._set_status_threadsafe("Connecting to LabOne data server …")
             daq = connect(plan.daq_host, plan.daq_port)
@@ -542,6 +574,10 @@ class RunScreen(Screen):
             self._set_status_threadsafe("Connecting gaussmeter …")
             gaussmeter = connect_gaussmeter(plan.gauss_cfg)
 
+            if plan.temp_cfg is not None:
+                self._set_status_threadsafe("Connecting to MercuryiTC (temperature) …")
+                temp_ctrl = connect_temperature_controller(plan.temp_cfg)
+
             report = run_phase_calibration(
                 daq, plan.leader, plan.follower, plan.out_cfg, plan.demod1_cfg, plan.demod2_cfg,
                 plan.sweep_cfg, magnet, plan.magnet_cfg,
@@ -557,6 +593,7 @@ class RunScreen(Screen):
                 stop_event=self._stop_event,
                 on_point=lambda record: self.app.call_from_thread(self._on_point, record),
                 on_status=self._set_status_threadsafe,
+                temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg,
             )
             for line in format_report(report).splitlines():
                 log.info(line)
@@ -576,6 +613,11 @@ class RunScreen(Screen):
                     shutdown_gaussmeter(gaussmeter)
                 except Exception:
                     log.exception("Error while shutting down gaussmeter")
+            if temp_ctrl is not None:
+                try:
+                    shutdown_temperature_controller(temp_ctrl)
+                except Exception:
+                    log.exception("Error while shutting down MercuryiTC")
             if daq is not None:
                 try:
                     shutdown_output(daq, plan.out_cfg)
@@ -760,6 +802,19 @@ class MFLIPhaseCalibrationApp(App):
                     yield field("freq_tol_deg", "Convergence tolerance per frequency (°)",
                                 DEFAULTS["freq_tol_deg"])
 
+                with Collapsible(title="Temperature (MercuryiTC)", collapsed=False):
+                    yield switch_field("enable_temperature",
+                                        "Log temperature (Oxford Instruments MercuryiTC)",
+                                        DEFAULTS["enable_temperature"])
+                    yield field("temperature_visa_resource", "MercuryiTC VISA resource",
+                                DEFAULTS["temperature_visa_resource"], kind="text",
+                                hint="e.g. TCPIP0::<ip>::7020::SOCKET (Ethernet) or an ASRL resource.")
+                    yield field("temperature_sensor_uids", "Sensor board UID(s)",
+                                DEFAULTS["temperature_sensor_uids"], kind="text",
+                                hint="1 or 2 board UIDs, comma-separated, e.g. 'DB6.T1, DB5.T1'. "
+                                     "Not connected, or only one probe wired up? Fine either way — "
+                                     "missing readings just leave the column empty.")
+
                 with Collapsible(title="Output", collapsed=False):
                     yield field("output_name", "Output file name (prefix)",
                                 DEFAULTS["output_name"], kind="text")
@@ -793,6 +848,7 @@ class MFLIPhaseCalibrationApp(App):
         raw["sinc_filter"] = self.query_one("#sinc_filter", Switch).value
         raw["enable_amplitude_check"] = self.query_one("#enable_amplitude_check", Switch).value
         raw["enable_frequency_check"] = self.query_one("#enable_frequency_check", Switch).value
+        raw["enable_temperature"] = self.query_one("#enable_temperature", Switch).value
         raw["order"] = self.query_one("#order", Select).value
         return raw
 
@@ -813,6 +869,8 @@ class MFLIPhaseCalibrationApp(App):
             self.query_one("#enable_amplitude_check", Switch).value = bool(saved["enable_amplitude_check"])
         if "enable_frequency_check" in saved:
             self.query_one("#enable_frequency_check", Switch).value = bool(saved["enable_frequency_check"])
+        if "enable_temperature" in saved:
+            self.query_one("#enable_temperature", Switch).value = bool(saved["enable_temperature"])
         if "order" in saved:
             try:
                 self.query_one("#order", Select).value = int(saved["order"])
@@ -853,6 +911,7 @@ class MFLIPhaseCalibrationApp(App):
         state["sinc_filter"] = self.query_one("#sinc_filter", Switch).value
         state["enable_amplitude_check"] = self.query_one("#enable_amplitude_check", Switch).value
         state["enable_frequency_check"] = self.query_one("#enable_frequency_check", Switch).value
+        state["enable_temperature"] = self.query_one("#enable_temperature", Switch).value
         state["order"] = int(self.query_one("#order", Select).value)
         return state, errors
 
@@ -959,6 +1018,15 @@ class MFLIPhaseCalibrationApp(App):
         )
         output_csv = str(_DATA_DIR / f"{state['output_name']}_{datetime.now():%Y%m%d_%H%M%S}.csv")
 
+        temp_cfg = None
+        if state["enable_temperature"]:
+            uids = parse_sensor_uids(state["temperature_sensor_uids"])
+            if uids:
+                temp_cfg = TemperatureControllerConfig(
+                    visa_resource=state["temperature_visa_resource"],
+                    sensor_uids=uids,
+                )
+
         return CalibrationPlan(
             daq_host=state["daq_host"], daq_port=state["daq_port"],
             leader=state["leader_device"], follower=state["follower_device"],
@@ -972,6 +1040,7 @@ class MFLIPhaseCalibrationApp(App):
             amplitude_check_cfg=amplitude_check_cfg,
             frequency_check_cfg=frequency_check_cfg,
             output_csv=output_csv,
+            temp_cfg=temp_cfg,
         )
 
 

@@ -64,15 +64,18 @@ from dc_iv_curve import (
     CurrentPoint,
     GateConfig,
     SourceConfig,
+    TemperatureControllerConfig,
     VoltmeterConfig,
     connect_gate,
     connect_source,
+    connect_temperature_controller,
     connect_voltmeter,
     ramp_current_to_zero,
     run_measurement,
     set_gate_voltage,
     shutdown_gate,
     shutdown_source,
+    shutdown_temperature_controller,
 )
 from dc_sweep_utils import build_output_path, linear_sweep, parse_value_list
 
@@ -120,6 +123,9 @@ DEFAULTS: dict = {
     "gate_voltage_limit_V": "20.0",
     "gate_compliance_current_A": "1e-6",
     "gate_voltage_values": "0.0",
+    "enable_temperature": True,
+    "temperature_visa_resource": "TCPIP0::192.168.1.5::7020::SOCKET",
+    "temperature_sensor_uids": "DB6.T1",
 }
 
 # id -> caster, for every free-text numeric field (Switch handled separately)
@@ -136,9 +142,17 @@ NUMERIC_FIELDS: dict = {
     "gate_compliance_current_A": float,
 }
 TEXT_FIELDS = ["source_visa_resource", "voltmeter_visa_resource", "output_name",
-               "output_subdir", "gate_visa_resource", "gate_voltage_values"]
+               "output_subdir", "gate_visa_resource", "gate_voltage_values",
+               "temperature_visa_resource", "temperature_sensor_uids"]
 GATE_FIELD_IDS = ["gate_visa_resource", "gate_voltage_limit_V",
                    "gate_compliance_current_A", "gate_voltage_values"]
+TEMPERATURE_FIELD_IDS = ["temperature_visa_resource", "temperature_sensor_uids"]
+
+
+def parse_sensor_uids(raw: str) -> tuple:
+    """Parse a comma-separated "DB6.T1, DB5.T1" field into a 1- or 2-tuple of UIDs."""
+    uids = [u.strip() for u in raw.split(",") if u.strip()]
+    return tuple(uids[:2])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -186,6 +200,7 @@ class MeasurementPlan:
     output_prefix: str
     gate_cfg: Optional[GateConfig] = None
     gate_voltages: Optional[List[float]] = None
+    temp_cfg: Optional[TemperatureControllerConfig] = None
 
     @property
     def series_values(self) -> List[Optional[float]]:
@@ -283,6 +298,18 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
             info.append(f"Estimated total run time ≈ {format_duration(total_points * per_point_s)}")
     else:
         info.append(f"Estimated total run time ≈ {format_duration(n_sweep_points * per_point_s)}")
+
+    # ── Temperature (MercuryiTC, optional) ──────────────────────────────────
+    if state["enable_temperature"]:
+        uids = parse_sensor_uids(state["temperature_sensor_uids"])
+        if not uids:
+            warnings.append("Temperature logging is on but no sensor UID is set — "
+                             "temperature columns will be empty.")
+        else:
+            info.append(f"Temperature logged via MercuryiTC ({', '.join(uids)}) — "
+                         "if unreachable, columns are simply left empty.")
+    else:
+        info.append("Temperature logging off.")
 
     return info, warnings, errors
 
@@ -449,7 +476,7 @@ class RunScreen(Screen):
 
     def on_mount(self) -> None:
         self.query_one("#results_table", DataTable).add_columns(
-            "#", "Vg (V)", "I (A)", "V (V)", "R (Ω)"
+            "#", "Vg (V)", "I (A)", "V (V)", "R (Ω)", "T1 (K)", "T2 (K)"
         )
         self._log_handler = _LogRelay(self)
         root = logging.getLogger()
@@ -493,12 +520,16 @@ class RunScreen(Screen):
                 pass
         table = self.query_one("#results_table", DataTable)
         gate_V = record.get("gate_voltage_V")
+        T1 = record.get("temperature_1_K")
+        T2 = record.get("temperature_2_K")
         table.add_row(
             str(record["point_index"] + 1),
             f"{gate_V:.4g}" if gate_V is not None else "—",
             f"{record['current_A']:.4e}",
             f"{record['voltage_V']:.4e}",
             f"{record['resistance_ohm']:.5g}",
+            f"{T1:.3f}" if T1 is not None else "—",
+            f"{T2:.3f}" if T2 is not None else "—",
         )
         table.move_cursor(row=table.row_count - 1, scroll=True)
         self.query_one("#progress", ProgressBar).advance(1)
@@ -546,10 +577,15 @@ class RunScreen(Screen):
         source = None
         voltmeter = None
         gate = None
+        temp_ctrl = None
         try:
             self._set_status_threadsafe("Connecting to Keithley 6221 & 2182 …")
             source = connect_source(plan.src_cfg)
             voltmeter = connect_voltmeter(plan.volt_cfg)
+
+            if plan.temp_cfg is not None:
+                self._set_status_threadsafe("Connecting to MercuryiTC (temperature) …")
+                temp_ctrl = connect_temperature_controller(plan.temp_cfg)
 
             if plan.gate_cfg is not None:
                 self._set_status_threadsafe("Connecting gate (Keithley 2400) …")
@@ -582,6 +618,7 @@ class RunScreen(Screen):
                     stop_event=self._stop_event,
                     on_point=self._make_on_point(series_idx, label),
                     gate_voltage_V=gate_V,
+                    temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg,
                 )
 
             final = "Measurement aborted." if self._stop_event.is_set() else "Measurement complete."
@@ -594,6 +631,11 @@ class RunScreen(Screen):
                     shutdown_gate(gate)
                 except Exception:
                     log.exception("Error while shutting down gate")
+            if temp_ctrl is not None:
+                try:
+                    shutdown_temperature_controller(temp_ctrl)
+                except Exception:
+                    log.exception("Error while shutting down MercuryiTC")
             if source is not None:
                 try:
                     ramp_current_to_zero(source)
@@ -703,6 +745,19 @@ class DCIVCurveApp(App):
                                      "current sweep runs per value, each saved to its own "
                                      "file and plotted together.")
 
+                with Collapsible(title="Temperature (MercuryiTC)", collapsed=False):
+                    yield switch_field("enable_temperature",
+                                        "Log temperature (Oxford Instruments MercuryiTC)",
+                                        DEFAULTS["enable_temperature"])
+                    yield field("temperature_visa_resource", "MercuryiTC VISA resource",
+                                DEFAULTS["temperature_visa_resource"], kind="text",
+                                hint="e.g. TCPIP0::<ip>::7020::SOCKET (Ethernet) or an ASRL resource.")
+                    yield field("temperature_sensor_uids", "Sensor board UID(s)",
+                                DEFAULTS["temperature_sensor_uids"], kind="text",
+                                hint="1 or 2 board UIDs, comma-separated, e.g. 'DB6.T1, DB5.T1'. "
+                                     "Not connected, or only one probe wired up? Fine either way — "
+                                     "missing readings just leave the column empty.")
+
             with Vertical(id="sidebar"):
                 yield Static("Description", classes="sidebar-title")
                 yield Static(DC_IV_DESCRIPTION, classes="card-desc")
@@ -723,6 +778,7 @@ class DCIVCurveApp(App):
         logging.getLogger().handlers.clear()
         self._load_settings()
         self._set_gate_fields_enabled(self.query_one("#enable_gate", Switch).value)
+        self._set_temperature_fields_enabled(self.query_one("#enable_temperature", Switch).value)
         self.refresh_summary()
 
     # ── Form state I/O ───────────────────────────────────────────────────────
@@ -735,6 +791,7 @@ class DCIVCurveApp(App):
         raw["auto_range"] = self.query_one("#auto_range", Switch).value
         raw["bidirectional_sweep"] = self.query_one("#bidirectional_sweep", Switch).value
         raw["enable_gate"] = self.query_one("#enable_gate", Switch).value
+        raw["enable_temperature"] = self.query_one("#enable_temperature", Switch).value
         return raw
 
     def _load_settings(self) -> None:
@@ -754,6 +811,8 @@ class DCIVCurveApp(App):
             self.query_one("#bidirectional_sweep", Switch).value = bool(saved["bidirectional_sweep"])
         if "enable_gate" in saved:
             self.query_one("#enable_gate", Switch).value = bool(saved["enable_gate"])
+        if "enable_temperature" in saved:
+            self.query_one("#enable_temperature", Switch).value = bool(saved["enable_temperature"])
 
     def _save_settings(self, raw: dict) -> None:
         try:
@@ -777,6 +836,7 @@ class DCIVCurveApp(App):
         state["auto_range"] = self.query_one("#auto_range", Switch).value
         state["bidirectional_sweep"] = self.query_one("#bidirectional_sweep", Switch).value
         state["enable_gate"] = self.query_one("#enable_gate", Switch).value
+        state["enable_temperature"] = self.query_one("#enable_temperature", Switch).value
 
         state["gate_voltage_list"] = []
         state["gate_parse_error"] = None
@@ -796,10 +856,16 @@ class DCIVCurveApp(App):
     def on_switch_changed(self, event: Switch.Changed) -> None:
         if event.switch.id == "enable_gate":
             self._set_gate_fields_enabled(event.value)
+        elif event.switch.id == "enable_temperature":
+            self._set_temperature_fields_enabled(event.value)
         self.refresh_summary()
 
     def _set_gate_fields_enabled(self, enabled: bool) -> None:
         for fid in GATE_FIELD_IDS:
+            self.query_one(f"#{fid}", Input).disabled = not enabled
+
+    def _set_temperature_fields_enabled(self, enabled: bool) -> None:
+        for fid in TEMPERATURE_FIELD_IDS:
             self.query_one(f"#{fid}", Input).disabled = not enabled
 
     def refresh_summary(self) -> None:
@@ -876,10 +942,20 @@ class DCIVCurveApp(App):
             )
             gate_voltages = state["gate_voltage_list"]
 
+        temp_cfg = None
+        if state["enable_temperature"]:
+            uids = parse_sensor_uids(state["temperature_sensor_uids"])
+            if uids:
+                temp_cfg = TemperatureControllerConfig(
+                    visa_resource=state["temperature_visa_resource"],
+                    sensor_uids=uids,
+                )
+
         return MeasurementPlan(
             src_cfg=src_cfg, volt_cfg=volt_cfg, acq_cfg=acq_cfg, currents_A=currents_A,
             output_subdir=state["output_subdir"], output_prefix=state["output_name"],
             gate_cfg=gate_cfg, gate_voltages=gate_voltages,
+            temp_cfg=temp_cfg,
         )
 
 

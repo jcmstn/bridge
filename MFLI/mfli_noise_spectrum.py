@@ -52,6 +52,7 @@ Requirements:
     pip install zhinst-core zhinst-utils numpy pandas scipy matplotlib
 """
 
+import sys
 import time
 import logging
 import numpy as np
@@ -63,6 +64,19 @@ from typing import Optional, List, Dict, Tuple
 import zhinst.core as zi
 from scipy import signal
 import matplotlib.pyplot as plt
+
+# The MercuryiTC driver lives in the shared bridge/instruments folder — add
+# it to sys.path directly (it's not installed as a normal package).
+_INSTRUMENTS_DIR = Path(__file__).resolve().parent.parent / "instruments"
+if str(_INSTRUMENTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_INSTRUMENTS_DIR))
+from mercury_itc import (  # noqa: E402
+    MercuryITC,
+    TemperatureControllerConfig,
+    connect_temperature_controller,
+    read_temperature,
+    shutdown_temperature_controller,
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Logging
@@ -366,8 +380,26 @@ def thermal_noise_asd(R_ohm: float, T_K: float) -> float:
 
 
 def measure_noise_spectrum(daq: zi.ziDAQServer, cfg: NoiseDemodConfig,
-                            acq_cfg: AcquisitionConfig) -> dict:
-    """Record (possibly repeated) time series for one channel/condition and return its spectrum + stats."""
+                            acq_cfg: AcquisitionConfig,
+                            temp_ctrl: Optional[MercuryITC] = None,
+                            temp_cfg: Optional[TemperatureControllerConfig] = None) -> dict:
+    """
+    Record (possibly repeated) time series for one channel/condition and
+    return its spectrum + stats.
+
+    `temp_ctrl`/`temp_cfg`, if given, take one live temperature reading
+    (temperature_1_K / temperature_2_K, via the shared MercuryiTC
+    controller — see mercury_itc.py) right before the recording starts, and
+    include it in the returned dict. A noise recording runs for tens of
+    seconds to minutes, far slower than the cryostat drifts, so a single
+    reading per condition/channel is enough — this is not a per-point
+    sweep. Passing `temp_ctrl=None` (e.g. because the MercuryiTC isn't
+    connected) simply leaves those fields empty; it's never a reason to
+    stop the measurement.
+    """
+    temp_1_K, temp_2_K = read_temperature(temp_ctrl, temp_cfg) \
+        if temp_cfg is not None else (None, None)
+
     psd_x_runs, psd_y_runs = [], []
     freq = None
     for rep in range(acq_cfg.n_repeats):
@@ -398,6 +430,8 @@ def measure_noise_spectrum(daq: zi.ziDAQServer, cfg: NoiseDemodConfig,
         "nyquist_Hz": float(freq[-1]),
         "rms_V": rms_V,
         "label": cfg.label,
+        "temperature_1_K": temp_1_K,
+        "temperature_2_K": temp_2_K,
         **stats,
     }
 
@@ -436,11 +470,17 @@ def _slug(s: str) -> str:
 def save_results_csv(results: Dict[Tuple[str, str], dict], out_dir: Path) -> None:
     for (cond, label), spec in results.items():
         fname = out_dir / f"psd_{_slug(cond)}__{_slug(label)}.csv"
+        n = len(spec["freq_Hz"])
         pd.DataFrame({
             "frequency_Hz":        spec["freq_Hz"],
             "asd_x_V_per_rtHz":    spec["asd_x_V_rthz"],
             "asd_y_V_per_rtHz":    spec["asd_y_V_rthz"],
             "asd_avg_V_per_rtHz":  spec["asd_avg_V_rthz"],
+            # Single reading taken before this condition/channel's recording
+            # started (see measure_noise_spectrum) — constant across the
+            # spectrum, not re-measured per frequency bin.
+            "temperature_1_K":    [spec.get("temperature_1_K")] * n,
+            "temperature_2_K":    [spec.get("temperature_2_K")] * n,
         }).to_csv(fname, index=False)
         log.info("Saved spectrum data: %s", fname)
 
@@ -572,6 +612,16 @@ def main() -> None:
     for cfg in demod_cfgs:
         configure_noise_demod(daq, cfg)
 
+    # ── Temperature (Oxford Instruments MercuryiTC, optional) ────────────────
+    # Not every rig has one, and not every MercuryiTC has two probes wired up
+    # — connect_temperature_controller() returns None rather than raising if
+    # it can't be reached, and the measurement runs fine either way.
+    temp_cfg = TemperatureControllerConfig(
+        visa_resource = "TCPIP0::192.168.1.5::7020::SOCKET",  # ← set to your iTC's address
+        sensor_uids   = ("DB6.T1",),   # ← 1 or 2 board UIDs, e.g. ("DB6.T1", "DB5.T1")
+    )
+    temp_ctrl = connect_temperature_controller(temp_cfg)
+
     # ── Acquisition / analysis settings ────────────────────────────────────
     acq_cfg = AcquisitionConfig(
         duration_s        = 60.0,
@@ -621,7 +671,8 @@ def main() -> None:
                 step += 1
                 log.info("[%d/%d] Recording noise spectrum: %s — %s",
                           step, total_steps, cond.label, cfg.label)
-                spec = measure_noise_spectrum(daq, cfg, acq_cfg)
+                spec = measure_noise_spectrum(daq, cfg, acq_cfg,
+                                               temp_ctrl=temp_ctrl, temp_cfg=temp_cfg)
                 results[(cond.label, cfg.label)] = spec
                 corner_str = f"{spec['corner_freq_Hz']:.2f} Hz" if spec["corner_freq_Hz"] == spec["corner_freq_Hz"] else "n/a"
                 log.info("   → white floor %.3e V/√Hz | 1/f corner %s | RMS(%.2f–%.0f Hz) %.3e V",
@@ -630,6 +681,7 @@ def main() -> None:
     finally:
         # Leave the excitation in its normal ON state regardless of how the loop ended.
         set_output_enabled(daq, out_cfg, True)
+        shutdown_temperature_controller(temp_ctrl)
 
     if not results:
         log.warning("No results collected — nothing to save or plot.")
