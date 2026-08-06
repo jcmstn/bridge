@@ -814,7 +814,7 @@ def main() -> None:
     # it can't be reached, and the measurement runs fine either way.
     temp_cfg = TemperatureControllerConfig(
         visa_resource = "TCPIP0::192.168.1.5::7020::SOCKET",  # ← set to your iTC's address
-        sensor_uids   = ("DB6.T1",),   # ← 1 or 2 board UIDs, e.g. ("DB6.T1", "DB5.T1")
+        sensor_uids   = ("MB1.T1",),   # ← 1 or 2 board UIDs, e.g. ("MB1.T1", "DB5.T1")
     )
     temp_ctrl = connect_temperature_controller(temp_cfg)
 

@@ -136,7 +136,7 @@ DEFAULTS: dict = {
     "gaussmeter_read_delay_s": "0.05",
     "enable_temperature": True,
     "temperature_visa_resource": "TCPIP0::192.168.1.5::7020::SOCKET",
-    "temperature_sensor_uids": "DB6.T1",
+    "temperature_sensor_uids": "MB1.T1",
 }
 
 NUMERIC_FIELDS: dict = {
@@ -166,7 +166,7 @@ TEMPERATURE_FIELD_IDS = ["temperature_visa_resource", "temperature_sensor_uids"]
 
 
 def parse_sensor_uids(raw: str) -> tuple:
-    """Parse a comma-separated "DB6.T1, DB5.T1" field into a 1- or 2-tuple of UIDs."""
+    """Parse a comma-separated "MB1.T1, DB5.T1" field into a 1- or 2-tuple of UIDs."""
     uids = [u.strip() for u in raw.split(",") if u.strip()]
     return tuple(uids[:2])
 
@@ -793,7 +793,7 @@ class DCSpinValveApp(App):
                                 hint="e.g. TCPIP0::<ip>::7020::SOCKET (Ethernet) or an ASRL resource.")
                     yield field("temperature_sensor_uids", "Sensor board UID(s)",
                                 DEFAULTS["temperature_sensor_uids"], kind="text",
-                                hint="1 or 2 board UIDs, comma-separated, e.g. 'DB6.T1, DB5.T1'. "
+                                hint="1 or 2 board UIDs, comma-separated, e.g. 'MB1.T1, DB5.T1'. "
                                      "Not connected, or only one probe wired up? Fine either way — "
                                      "missing readings just leave the column empty.")
 

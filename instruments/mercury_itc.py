@@ -8,11 +8,13 @@ but the MercuryiTC uses a completely different, newer ASCII command
 language (colon-separated, hierarchical "device" addressing rather than
 ITC 503's single-letter commands) — this fills that gap.
 
-Like lakeshore475.py, this is hand-built from the published Mercury
-Support command reference and has not been verified against real
-hardware yet — check the reply format against your own iTC before relying
-on it (the low-level MercuryITC.temperature() method is the only place
-that would need adjusting).
+Like lakeshore475.py, this was originally hand-built from the published
+Mercury Support command reference without hardware access. The
+temperature-read path (MercuryITC.temperature()) has since been verified
+against a real iTC and corrected to match its actual reply shape — see
+that method's docstring. Everything else in this driver (identification,
+close/context-manager handling) is still just the published reference,
+unverified.
 
 Interface: Ethernet (raw TCP socket, port 7020) or USB/RS-232 (same
 command set, different pyvisa resource string).
@@ -35,7 +37,7 @@ Usage example (low-level driver):
     from mercury_itc import MercuryITC
 
     mitc = MercuryITC("TCPIP0::192.168.1.5::7020::SOCKET")
-    print(mitc.temperature("DB6.T1"))   # single reading, Kelvin
+    print(mitc.temperature("MB1.T1"))   # single reading, Kelvin
     mitc.close()
 
 Usage example (shared controller, used by the DC/MFLI measurement scripts):
@@ -46,7 +48,7 @@ Usage example (shared controller, used by the DC/MFLI measurement scripts):
 
     temp_cfg = TemperatureControllerConfig(
         visa_resource="TCPIP0::192.168.1.5::7020::SOCKET",
-        sensor_uids=("DB6.T1", "DB5.T1"),   # 1 or 2 probes — set to your rig
+        sensor_uids=("MB1.T1", "DB5.T1"),   # 1 or 2 probes — set to your rig
     )
     mitc = connect_temperature_controller(temp_cfg)   # None if unreachable
 
@@ -72,14 +74,14 @@ class MercuryITC(Instrument):
     interface for reading temperature signals from its temperature boards.
 
     Each temperature sensor probe is wired to a separate board inside the
-    Mercury chassis, addressed by a UID such as "DB6.T1" (read off the
+    Mercury chassis, addressed by a UID such as "MB1.T1" (read off the
     iTC's front panel or via `catalog`). A given system may have one such
     board or several — `temperature()` reads whichever UID you ask for.
 
     .. code-block:: python
 
         mitc = MercuryITC("TCPIP0::192.168.1.5::7020::SOCKET")
-        print(mitc.temperature("DB6.T1"))   # Kelvin
+        print(mitc.temperature("MB1.T1"))   # Kelvin
     """
 
     def __init__(self, adapter, name="Oxford Instruments MercuryiTC", **kwargs):
@@ -111,10 +113,10 @@ class MercuryITC(Instrument):
     def temperature(self, uid: str) -> float:
         """
         Return the temperature reported by the sensor board `uid` (e.g.
-        "DB6.T1"), in Kelvin.
+        "MB1.T1"), in Kelvin.
 
         Raises ValueError if the reply doesn't have the expected
-        `STAT:DEV:<uid>:TEMP:SIG:TEMP:VALUE:<value>K` shape — e.g. because
+        `STAT:DEV:<uid>:TEMP:SIG:TEMP:<value>K` shape — e.g. because
         `uid` doesn't exist on this chassis, or the board reports an
         error (no probe plugged in, open circuit, etc.) rather than a
         temperature.
@@ -122,7 +124,7 @@ class MercuryITC(Instrument):
         command = f"READ:DEV:{uid}:TEMP:SIG:TEMP"
         reply = self.ask(command).strip()
 
-        expected_prefix = f"STAT:DEV:{uid}:TEMP:SIG:TEMP:VALUE:"
+        expected_prefix = f"STAT:DEV:{uid}:TEMP:SIG:TEMP:"
         if not reply.startswith(expected_prefix) or not reply.endswith("K"):
             raise ValueError(
                 f"Unexpected reply to {command!r}: {reply!r} "
@@ -160,12 +162,12 @@ class TemperatureControllerConfig:
     alongside a measurement — shared across DC and MFLI programs the same
     way the Kepco supply and Lake Shore 475 gaussmeter are.
 
-    sensor_uids lists 1 or 2 board UIDs, e.g. ("DB6.T1",) for a rig with a
-    single probe or ("DB6.T1", "DB5.T1") for one with two. Find the UIDs
+    sensor_uids lists 1 or 2 board UIDs, e.g. ("MB1.T1",) for a rig with a
+    single probe or ("MB1.T1", "DB5.T1") for one with two. Find the UIDs
     for your own rig via the iTC front panel or MercuryITC(...).catalog.
     """
     visa_resource: str = "TCPIP0::192.168.1.5::7020::SOCKET"
-    sensor_uids: Tuple[str, ...] = ("DB6.T1",)
+    sensor_uids: Tuple[str, ...] = ("MB1.T1",)
     timeout_ms: int = 3000
 
 
