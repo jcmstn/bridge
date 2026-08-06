@@ -65,11 +65,18 @@ import zhinst.core as zi
 from scipy import signal
 import matplotlib.pyplot as plt
 
-# The MercuryiTC driver lives in the shared bridge/instruments folder — add
-# it to sys.path directly (it's not installed as a normal package).
+# The MFLI DAQ-server helpers and MercuryiTC driver live in the shared
+# bridge/instruments folder — add it to sys.path directly (it's not
+# installed as a normal package).
 _INSTRUMENTS_DIR = Path(__file__).resolve().parent.parent / "instruments"
 if str(_INSTRUMENTS_DIR) not in sys.path:
     sys.path.insert(0, str(_INSTRUMENTS_DIR))
+from mfli_daq import (  # noqa: E402
+    connect,
+    connect_device,
+    setup_mds,
+    sync_follower_oscillator,
+)
 from mercury_itc import (  # noqa: E402
     MercuryITC,
     TemperatureControllerConfig,
@@ -173,51 +180,17 @@ class Condition:
 # ─────────────────────────────────────────────────────────────────────────────
 # Instrument setup helpers
 # ─────────────────────────────────────────────────────────────────────────────
-
-def connect(host: str = "localhost", port: int = 8004, api_level: int = 6) -> zi.ziDAQServer:
-    """Open a session to the LabOne data server."""
-    daq = zi.ziDAQServer(host, port, api_level)
-    log.info("Connected to ZI data server at %s:%d", host, port)
-    return daq
-
-
-def connect_device(daq: zi.ziDAQServer, device: str, interface: str = "1GbE") -> None:
-    """Connect a device to the data server (no-op if already connected)."""
-    try:
-        daq.connectDevice(device, interface)
-        log.info("Connected device %s via %s", device, interface)
-    except RuntimeError:
-        log.info("Device %s already connected", device)
-
-
-def setup_mds(daq: zi.ziDAQServer, leader: str, follower: str) -> None:
-    """
-    Configure Multi-Device Synchronization between two MFLIs (see
-    mfli_dual_harmonic.py for the full explanation). Kept here so the noise
-    measurement reflects the same clocking condition as the real experiment.
-    """
-    mds = daq.multiDeviceSyncModule()
-    mds.set("start", 0)
-    mds.set("group", 0)
-    mds.set("devices", f"{leader},{follower}")
-    mds.set("start", 1)
-
-    log.info("Waiting for MDS synchronization ...")
-    timeout = 30.0
-    t0 = time.monotonic()
-    while True:
-        status = mds.getInt("status")
-        if status == 2:
-            break
-        if status == -1:
-            raise RuntimeError("MDS synchronization failed (status=-1). "
-                               "Check physical clock connection and device order.")
-        if time.monotonic() - t0 > timeout:
-            raise RuntimeError(f"MDS sync timed out (status={status}). "
-                               "Check physical clock connection.")
-        time.sleep(0.2)
-    log.info("MDS synchronized: leader=%s, follower=%s", leader, follower)
-
+# connect, connect_device, setup_mds and sync_follower_oscillator are
+# imported from bridge/instruments/mfli_daq.py above unchanged — see
+# mfli_dual_harmonic.py for the full explanation. Only configure_output
+# (this program's excitation on/off topology) stays local.
+#
+# Note: the shared setup_mds() calls mds.execute() before mds.set("start", 1)
+# (per the LabOne MultiDeviceSync module reference, that starts the module's
+# worker thread — without it "start" is never actually processed and status
+# sits at 0 forever). This script's own former copy of setup_mds() was
+# missing that call, which would have made every MDS sync here time out
+# after 30 s; using the shared version fixes that as a side effect.
 
 def configure_output(daq: zi.ziDAQServer, cfg: OutputConfig) -> None:
     """Set up the voltage output that drives the current through the sample."""
@@ -234,22 +207,6 @@ def configure_output(daq: zi.ziDAQServer, cfg: OutputConfig) -> None:
         "Output configured: %s  f=%.4f Hz  Vpp=%.4f V  R=%.2e Ω  → I≈%.3f nA",
         d, cfg.frequency_Hz, cfg.amplitude_V, cfg.series_R_ohm, I_nA,
     )
-
-
-def sync_follower_oscillator(daq: zi.ziDAQServer, out_cfg: OutputConfig,
-                              follower: str, follower_osc_index: int = 0) -> None:
-    """
-    Explicitly copy the leader's excitation frequency onto the follower's
-    own local oscillator. Required because MDS (see setup_mds docstring)
-    does not do this for you — each device's oscillator is independently
-    set. Skipping this step is the single most common reason a two-MFLI
-    lock-in measurement silently returns garbage (a slowly beating phasor
-    instead of a stable one).
-    """
-    daq.setDouble(f"/{follower}/oscs/{follower_osc_index}/freq", out_cfg.frequency_Hz)
-    daq.sync()
-    log.info("Follower %s oscillator %d frequency set to %.4f Hz (matches leader)",
-             follower, follower_osc_index, out_cfg.frequency_Hz)
 
 
 def set_output_enabled(daq: zi.ziDAQServer, cfg: OutputConfig, enabled: bool) -> None:

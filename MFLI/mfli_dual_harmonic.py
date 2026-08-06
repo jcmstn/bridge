@@ -68,16 +68,33 @@ from typing import Optional, Callable, List
 import zhinst.core as zi
 import zhinst.utils as ziutils
 
-import pyvisa
-
-# The Kepco magnet and Lake Shore 475 drivers live in the shared
-# bridge/instruments folder — add it to sys.path directly (it's not
-# installed as a normal package).
+# The MFLI DAQ-server helpers, Kepco magnet and Lake Shore 475 drivers live
+# in the shared bridge/instruments folder — add it to sys.path directly
+# (it's not installed as a normal package).
 _INSTRUMENTS_DIR = Path(__file__).resolve().parent.parent / "instruments"
 if str(_INSTRUMENTS_DIR) not in sys.path:
     sys.path.insert(0, str(_INSTRUMENTS_DIR))
-from kepco_magnet import KepkoBOPGL  # noqa: E402
-from lakeshore475 import LakeShore475  # noqa: E402
+from mfli_daq import (  # noqa: E402
+    connect,
+    connect_device,
+    setup_mds,
+    sync_follower_oscillator,
+    acquire_averaged,
+)
+from kepco_magnet import (  # noqa: E402
+    KepkoBOPGL,
+    MagnetConfig,
+    connect_magnet,
+    set_magnet_current,
+    shutdown_magnet,
+)
+from lakeshore475 import (  # noqa: E402
+    LakeShore475,
+    GaussmeterConfig,
+    connect_gaussmeter,
+    read_field_mT,
+    shutdown_gaussmeter,
+)
 from mercury_itc import (  # noqa: E402
     MercuryITC,
     TemperatureControllerConfig,
@@ -104,6 +121,9 @@ log = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────────────────
 # Configuration dataclasses  ── change all your parameters here ──────────────
 # ─────────────────────────────────────────────────────────────────────────────
+# MagnetConfig and GaussmeterConfig are the same shape as bridge/DC's — they
+# live in bridge/instruments/ (see the kepco_magnet / lakeshore475 imports
+# above) instead of being redefined here.
 
 @dataclass
 class OutputConfig:
@@ -152,46 +172,6 @@ class AcquisitionConfig:
 
 
 @dataclass
-class MagnetConfig:
-    """
-    Kepco BOP-GL bipolar power supply, used as a current source for an
-    electromagnet (see kepco_magnet.KepkoBOPGL).
-
-    This only drives the magnet current — the resulting field is measured
-    directly with a Lake Shore 475 Gaussmeter (see GaussmeterConfig) rather
-    than inferred from a current->field calibration constant.
-
-    current_limit_A / voltage_compliance_V are *software* limits enforced by
-    this script — separate from the supply's own hardware range (±50 A /
-    ±20 V for a BOP 20-50GL) — and should reflect what your magnet can
-    safely handle continuously.
-
-    connect_magnet() also clears the instrument's own CURR:LIM/VOLT:LIM
-    setpoint ceilings back to the supply's full rating before applying
-    these, so a narrower limit left over from a previous session can't
-    silently cap the sweep below current_limit_A.
-    """
-    visa_resource:        str   = "GPIB0::6::INSTR"
-    current_limit_A:      float = 5.0     # Software current limit  [A]
-    voltage_compliance_V: float = 15.0    # CC-mode compliance / OVP limit  [V]
-    ramp_step_A:          float = 0.1     # Ramp step size  [A]
-    ramp_delay_s:         float = 0.05    # Delay between ramp steps  [s]
-
-
-@dataclass
-class GaussmeterConfig:
-    """
-    Lake Shore 475 DSP Gaussmeter (see lakeshore475.LakeShore475), used to
-    measure the field actually produced at the sample by the magnet —
-    shared across programs the same way the Kepco supply is.
-    """
-    visa_resource: str   = "GPIB0::12::INSTR"
-    unit:          str   = "T"     # 'T' or 'G' — read_field_mT() only knows these two
-    n_averages:    int   = 10      # Field readings averaged per measurement point
-    read_delay_s:  float = 0.05    # Delay between successive readings  [s]
-
-
-@dataclass
 class SampleGeometryConfig:
     """
     Sample and field geometry needed to turn raw 1f/2f voltages into
@@ -225,71 +205,13 @@ class PhaseCalibrationResult:
 # ─────────────────────────────────────────────────────────────────────────────
 # Instrument setup helpers
 # ─────────────────────────────────────────────────────────────────────────────
-
-def connect(host: str = "localhost", port: int = 8004, api_level: int = 6) -> zi.ziDAQServer:
-    """Open a session to the LabOne data server."""
-    daq = zi.ziDAQServer(host, port, api_level)
-    log.info("Connected to ZI data server at %s:%d", host, port)
-    return daq
-
-
-def connect_device(daq: zi.ziDAQServer, device: str, interface: str = "1GbE") -> None:
-    """Connect a device to the data server (no-op if already connected)."""
-    try:
-        daq.connectDevice(device, interface)
-        log.info("Connected device %s via %s", device, interface)
-    except RuntimeError:
-        log.info("Device %s already connected", device)
-
-
-def setup_mds(daq: zi.ziDAQServer, leader: str, follower: str) -> None:
-    """
-    Configure Multi-Device Synchronization between two MFLIs.
-
-    Per the LabOne MultiDeviceSync module reference, there is no separate
-    "leader" node — the role is inferred from *order* in the comma-separated
-    `devices` list (first entry = leader) and must match the physical
-    cabling. The MFLI requires BOTH of the following (ZSync is not an MFLI
-    feature — that's UHFQA/SHF-family hardware):
-      - Ref clock: BNC cable from the leader's Ref Out to the follower's
-        Ref In.
-      - Trigger: the leader's Trigger Out 1 fanned out (e.g. via a 1-to-N
-        power divider, equal cable lengths) to Trigger In 1 on *both* the
-        follower and the leader itself.
-    Module node paths are relative to the module itself (e.g. "devices",
-    not "multiDeviceSyncModule/devices").
-    """
-    mds = daq.multiDeviceSyncModule()
-
-    mds.set("start", 0)
-    mds.set("group", 0)
-    mds.execute()   # starts the module's worker thread — without this, "start"
-                     # is never actually processed and status sits at 0 forever
-    mds.set("devices", f"{leader},{follower}")
-    mds.set("start", 1)
-
-    # Poll until synchronization is confirmed (status == 2 → synced,
-    # -1 → failed, 0/1 → idle/in progress)
-    log.info("Waiting for MDS synchronization ...")
-    timeout = 60.0
-    t0 = time.monotonic()
-    while True:
-        status = mds.getInt("status")
-        if status == 2:
-            break
-        if status == -1:
-            raise RuntimeError(
-                f"MDS synchronization failed (status=-1): {mds.getString('message')}. "
-                "Check Ref clock cable, trigger fan-out cabling, and device order."
-            )
-        if time.monotonic() - t0 > timeout:
-            raise RuntimeError(
-                f"MDS sync timed out (status={status}): {mds.getString('message')}. "
-                "Check Ref clock cable and trigger fan-out cabling."
-            )
-        time.sleep(0.2)
-    log.info("MDS synchronized: leader=%s, follower=%s", leader, follower)
-
+# connect, connect_device, setup_mds and sync_follower_oscillator are
+# imported from bridge/instruments/mfli_daq.py above unchanged — every MFLI
+# program connects to the LabOne data server, MDS-syncs a leader/follower
+# pair, and re-syncs the follower's oscillator the same way. Only
+# configure_output (this program's pure-AC excitation topology, not shared
+# with e.g. mfli_diff_resistance_vs_bias.py's AC+DC-bias one) and
+# set_excitation_frequency (dual_harmonic-specific) stay local.
 
 def configure_output(daq: zi.ziDAQServer, cfg: OutputConfig) -> None:
     """Set up the voltage output that drives the current through the sample."""
@@ -317,22 +239,6 @@ def configure_output(daq: zi.ziDAQServer, cfg: OutputConfig) -> None:
         "Output: %s  f=%.4f Hz  Vpp=%.4f V  R=%.2e Ω  → I≈%.3f nA  (mixer_c=%d)",
         d, cfg.frequency_Hz, cfg.amplitude_V, cfg.series_R_ohm, I_nA, mixer_c,
     )
-
-
-def sync_follower_oscillator(daq: zi.ziDAQServer, out_cfg: OutputConfig,
-                              follower: str, follower_osc_index: int = 0) -> None:
-    """
-    Explicitly copy the leader's excitation frequency onto the follower's
-    own local oscillator. Required because MDS (see setup_mds docstring)
-    does not do this for you — each device's oscillator is independently
-    set. Skipping this step is the single most common reason a two-MFLI
-    lock-in measurement silently returns garbage (a slowly beating phasor
-    instead of a stable one).
-    """
-    daq.setDouble(f"/{follower}/oscs/{follower_osc_index}/freq", out_cfg.frequency_Hz)
-    daq.sync()
-    log.info("Follower %s oscillator %d frequency set to %.4f Hz (matches leader)",
-             follower, follower_osc_index, out_cfg.frequency_Hz)
 
 
 def set_excitation_frequency(
@@ -596,99 +502,12 @@ def auto_null_phase(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Magnet control (Kepco BOP-GL current source, via VISA/PyVISA)
+# Magnet / gaussmeter control
 # ─────────────────────────────────────────────────────────────────────────────
-
-def connect_magnet(cfg: MagnetConfig) -> KepkoBOPGL:
-    """
-    Open a VISA session to the Kepco BOP-GL and arm it as a current source.
-
-    Puts the supply in constant-current mode with the configured software
-    compliance voltage and current limit, sets the setpoint to 0 A, and
-    enables the output. Ramping to nonzero setpoints is done separately via
-    set_magnet_current() so every field change goes through the same
-    step/delay ramp — important for an inductive (magnet) load.
-
-    Before doing any of that, this also clears the instrument's CURR:LIM /
-    VOLT:LIM setpoint ceilings back to the supply's full rating. Those are
-    a *different* register from voltage_limit/current_limit (VOLT:PROT/
-    CURR:PROT, the compliance clamps set below) — an independent ceiling
-    on the setpoint itself that, once narrowed and saved with MEM:UPD LIM
-    in some earlier session (e.g. a lower-current test), survives *RST and
-    silently caps every future sweep well below cfg.current_limit_A with
-    no error. See kepco_magnet.KepkoBOPGL.raise_range_limits_to_max.
-    """
-    rm = pyvisa.ResourceManager()
-    psu = KepkoBOPGL(rm.open_resource(cfg.visa_resource))
-
-    psu.reset()
-    psu.clear_status()
-    psu.raise_range_limits_to_max()
-    psu.mode = "current"
-    psu.voltage_limit = cfg.voltage_compliance_V
-    psu.current_limit = cfg.current_limit_A
-    psu.current = 0.0
-    psu.enable_output()
-
-    log.info(
-        "Magnet connected: %s  mode=CC  compliance=%.2f V  I_limit=±%.2f A",
-        cfg.visa_resource, cfg.voltage_compliance_V, cfg.current_limit_A,
-    )
-    return psu
-
-
-def set_magnet_current(psu: KepkoBOPGL, cfg: MagnetConfig, current_A: float) -> None:
-    """
-    Ramp the magnet current to `current_A`, enforcing the software limit
-    in `cfg` (independent of the supply's own ±50 A hardware range).
-    """
-    if abs(current_A) > cfg.current_limit_A:
-        raise ValueError(
-            f"Requested current {current_A:.3f} A exceeds configured "
-            f"limit ±{cfg.current_limit_A:.3f} A"
-        )
-    psu.ramp_current(current_A, step=cfg.ramp_step_A, delay=cfg.ramp_delay_s)
-
-
-def shutdown_magnet(psu: KepkoBOPGL, cfg: MagnetConfig) -> None:
-    """Ramp the magnet current safely to zero, disable the output, and close the VISA session."""
-    log.info("Ramping magnet to zero and disabling output ...")
-    psu.zero_output(ramp=True, step=cfg.ramp_step_A, delay=cfg.ramp_delay_s)
-    psu.close()
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Gaussmeter (Lake Shore 475, via pymeasure/VISA)
-# ─────────────────────────────────────────────────────────────────────────────
-
-_FIELD_TO_MT = {"T": 1e3, "G": 1e-1}   # → mT, for GaussmeterConfig.unit
-
-
-def connect_gaussmeter(cfg: GaussmeterConfig) -> LakeShore475:
-    """Open a VISA session to the Lake Shore 475 and set its display unit."""
-    if cfg.unit not in _FIELD_TO_MT:
-        raise ValueError(f"Unsupported gaussmeter unit {cfg.unit!r}; use 'T' or 'G'.")
-    gm = LakeShore475(cfg.visa_resource)
-    gm.unit = cfg.unit
-    log.info("Gaussmeter connected: %s  unit=%s  id=%s",
-              cfg.visa_resource, cfg.unit, gm.identification)
-    return gm
-
-
-def read_field_mT(gm: LakeShore475, cfg: GaussmeterConfig) -> float:
-    """
-    Average `cfg.n_averages` field readings from the gaussmeter and return
-    the result in mT, regardless of the instrument's configured display unit.
-    """
-    mean, _std = gm.measure(cfg.n_averages, delay=cfg.read_delay_s)
-    return mean * _FIELD_TO_MT[cfg.unit]
-
-
-def shutdown_gaussmeter(gm: LakeShore475) -> None:
-    """Close the VISA session to the gaussmeter."""
-    gm.close()
-    log.info("Gaussmeter connection closed")
-
+# connect_magnet, set_magnet_current, shutdown_magnet, connect_gaussmeter,
+# read_field_mT and shutdown_gaussmeter are imported from bridge/instruments/
+# (kepco_magnet.py, lakeshore475.py) above unchanged — identical to
+# bridge/DC's field-sweep programs.
 
 def bidirectional_current_sweep(i_min: float, i_max: float, n_points: int) -> np.ndarray:
     """
@@ -708,64 +527,9 @@ def bidirectional_current_sweep(i_min: float, i_max: float, n_points: int) -> np
 # ─────────────────────────────────────────────────────────────────────────────
 # Data acquisition
 # ─────────────────────────────────────────────────────────────────────────────
-
-def _poll_demod(daq: zi.ziDAQServer, path: str,
-                duration_s: float, timeout_ms: int) -> dict:
-    """
-    Subscribe, flush, poll for `duration_s`, unsubscribe.
-    Returns a dict with arrays for x, y, r, theta_deg.
-    """
-    daq.subscribe(path)
-    daq.sync()
-    data = daq.poll(duration_s, timeout_ms, flat=True)
-    daq.unsubscribe(path)
-
-    if path not in data or len(data[path]) == 0:
-        raise RuntimeError(f"No data returned for {path}. "
-                           "Check demodulator is enabled and sample rate > 0.")
-
-    # With flat=True, data[path] is a single dict of field -> numpy array
-    # (all samples from the poll window concatenated), not a list of
-    # per-sample dicts.
-    samples = data[path]
-    x = np.atleast_1d(samples["x"])
-    y = np.atleast_1d(samples["y"])
-    r = np.hypot(x, y)
-    theta = np.degrees(np.arctan2(y, x))
-    return {"x": x, "y": y, "r": r, "theta_deg": theta}
-
-
-def acquire_averaged(
-    daq: zi.ziDAQServer,
-    cfg: DemodConfig,
-    n_averages: int,
-) -> dict:
-    """
-    Collect at least `n_averages` samples and return their mean ± std.
-    Poll duration is chosen to guarantee enough samples at the configured rate.
-    """
-    path = f"/{cfg.device}/demods/{cfg.demod_index}/sample".lower()
-    # Add a 50 % margin so we comfortably exceed n_averages
-    duration_s  = max(0.1, (n_averages * 1.5) / cfg.sample_rate_Hz)
-    timeout_ms  = int(duration_s * 1000) + 2000
-
-    raw = _poll_demod(daq, path, duration_s, timeout_ms)
-
-    # Trim to last n_averages samples (freshest data after settling)
-    for k in raw:
-        raw[k] = raw[k][-n_averages:]
-
-    return {
-        "x_mean":     float(np.mean(raw["x"])),
-        "y_mean":     float(np.mean(raw["y"])),
-        "r_mean":     float(np.mean(raw["r"])),
-        "theta_mean": float(np.mean(raw["theta_deg"])),
-        "r_std":      float(np.std(raw["r"])),
-        "x_std":      float(np.std(raw["x"])),
-        "y_std":      float(np.std(raw["y"])),
-        "n_samples":  len(raw["r"]),
-    }
-
+# acquire_averaged is imported from bridge/instruments/mfli_daq.py above
+# unchanged — it only needs cfg.device/.demod_index/.sample_rate_Hz, which
+# DemodConfig (above) already has.
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Measurement point  ── extend this for sweeping external parameters ──────────

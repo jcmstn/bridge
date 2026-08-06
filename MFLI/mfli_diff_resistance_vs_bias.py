@@ -100,11 +100,19 @@ from typing import Optional, Callable, List
 import zhinst.core as zi
 import zhinst.utils as ziutils
 
-# The MercuryiTC driver lives in the shared bridge/instruments folder — add
-# it to sys.path directly (it's not installed as a normal package).
+# The MFLI DAQ-server helpers and MercuryiTC driver live in the shared
+# bridge/instruments folder — add it to sys.path directly (it's not
+# installed as a normal package).
 _INSTRUMENTS_DIR = Path(__file__).resolve().parent.parent / "instruments"
 if str(_INSTRUMENTS_DIR) not in sys.path:
     sys.path.insert(0, str(_INSTRUMENTS_DIR))
+from mfli_daq import (  # noqa: E402
+    connect,
+    connect_device,
+    setup_mds,
+    sync_follower_oscillator,
+    acquire_averaged,
+)
 from mercury_itc import (  # noqa: E402
     MercuryITC,
     TemperatureControllerConfig,
@@ -211,70 +219,11 @@ class BiasPoint:
 # ─────────────────────────────────────────────────────────────────────────────
 # Instrument setup helpers
 # ─────────────────────────────────────────────────────────────────────────────
-
-def connect(host: str = "localhost", port: int = 8004, api_level: int = 6) -> zi.ziDAQServer:
-    """Open a session to the LabOne data server."""
-    daq = zi.ziDAQServer(host, port, api_level)
-    log.info("Connected to ZI data server at %s:%d", host, port)
-    return daq
-
-
-def connect_device(daq: zi.ziDAQServer, device: str, interface: str = "1GbE") -> None:
-    """Connect a device to the data server (no-op if already connected)."""
-    try:
-        daq.connectDevice(device, interface)
-        log.info("Connected device %s via %s", device, interface)
-    except RuntimeError:
-        log.info("Device %s already connected", device)
-
-
-def setup_mds(daq: zi.ziDAQServer, leader: str, follower: str) -> None:
-    """
-    Configure Multi-Device Synchronization between two MFLIs.
-
-    Per the LabOne MultiDeviceSync module reference, there is no separate
-    "leader" node — the role is inferred from *order* in the comma-separated
-    `devices` list (first entry = leader) and must match the physical
-    cabling. The MFLI requires BOTH of the following (ZSync is not an MFLI
-    feature — that's UHFQA/SHF-family hardware):
-      - Ref clock: BNC cable from the leader's Ref Out to the follower's
-        Ref In.
-      - Trigger: the leader's Trigger Out 1 fanned out (e.g. via a 1-to-N
-        power divider, equal cable lengths) to Trigger In 1 on *both* the
-        follower and the leader itself.
-
-    NOTE: this synchronizes clocks and the measurement start instant — it
-    does NOT copy oscillator frequency values between devices. See
-    sync_follower_oscillator() below.
-    """
-    mds = daq.multiDeviceSyncModule()
-
-    mds.set("start", 0)
-    mds.set("group", 0)
-    mds.execute()   # starts the module's worker thread — without this, "start"
-                     # is never actually processed and status sits at 0 forever
-    mds.set("devices", f"{leader},{follower}")
-    mds.set("start", 1)
-
-    log.info("Waiting for MDS synchronization ...")
-    timeout = 60.0
-    t0 = time.monotonic()
-    while True:
-        status = mds.getInt("status")
-        if status == 2:
-            break
-        if status == -1:
-            raise RuntimeError(
-                f"MDS synchronization failed (status=-1): {mds.getString('message')}. "
-                "Check Ref clock cable, trigger fan-out cabling, and device order."
-            )
-        if time.monotonic() - t0 > timeout:
-            raise RuntimeError(
-                f"MDS sync timed out (status={status}): {mds.getString('message')}. "
-                "Check Ref clock cable and trigger fan-out cabling."
-            )
-        time.sleep(0.2)
-    log.info("MDS synchronized: leader=%s, follower=%s", leader, follower)
+# connect, connect_device, setup_mds and sync_follower_oscillator are
+# imported from bridge/instruments/mfli_daq.py above unchanged — see
+# mfli_dual_harmonic.py for the full rationale. Only configure_output (this
+# program's AC-excitation + DC-bias topology) and set_bias/ramp_bias_to_zero
+# stay local.
 
 
 def configure_output(daq: zi.ziDAQServer, cfg: OutputConfig) -> None:
@@ -312,22 +261,6 @@ def configure_output(daq: zi.ziDAQServer, cfg: OutputConfig) -> None:
         d, cfg.frequency_Hz, cfg.ac_amplitude_V, cfg.series_R_ohm,
         cfg.bias_min_V, cfg.bias_max_V, output_range_V, mixer_c,
     )
-
-
-def sync_follower_oscillator(daq: zi.ziDAQServer, out_cfg: OutputConfig,
-                              follower: str, follower_osc_index: int = 0) -> None:
-    """
-    Explicitly copy the leader's excitation frequency onto the follower's
-    own local oscillator. Required because MDS (see setup_mds docstring)
-    does not do this for you — each device's oscillator is independently
-    set. Skipping this step is the single most common reason a two-MFLI
-    lock-in measurement silently returns garbage (a slowly beating phasor
-    instead of a stable one).
-    """
-    daq.setDouble(f"/{follower}/oscs/{follower_osc_index}/freq", out_cfg.frequency_Hz)
-    daq.sync()
-    log.info("Follower %s oscillator %d frequency set to %.4f Hz (matches leader)",
-             follower, follower_osc_index, out_cfg.frequency_Hz)
 
 
 def set_bias(daq: zi.ziDAQServer, cfg: OutputConfig, bias_V: float) -> None:
@@ -423,46 +356,10 @@ def bidirectional_bias_sweep(v_min: float, v_max: float, n_points: int) -> np.nd
 # ─────────────────────────────────────────────────────────────────────────────
 # Data acquisition
 # ─────────────────────────────────────────────────────────────────────────────
-
-def _poll_demod(daq: zi.ziDAQServer, path: str,
-                duration_s: float, timeout_ms: int) -> dict:
-    """Subscribe, flush, poll for `duration_s`, unsubscribe. Returns arrays for x, y, r, theta_deg."""
-    daq.subscribe(path)
-    daq.sync()
-    data = daq.poll(duration_s, timeout_ms, flat=True)
-    daq.unsubscribe(path)
-
-    if path not in data or len(data[path]) == 0:
-        raise RuntimeError(f"No data returned for {path}. "
-                           "Check demodulator is enabled and sample rate > 0.")
-
-    samples = data[path]
-    x = np.atleast_1d(samples["x"])
-    y = np.atleast_1d(samples["y"])
-    r = np.hypot(x, y)
-    theta = np.degrees(np.arctan2(y, x))
-    return {"x": x, "y": y, "r": r, "theta_deg": theta}
-
-
-def acquire_averaged(daq: zi.ziDAQServer, cfg: DemodConfig, n_averages: int) -> dict:
-    """Collect at least `n_averages` samples and return their mean ± std."""
-    path = f"/{cfg.device}/demods/{cfg.demod_index}/sample".lower()
-    duration_s  = max(0.1, (n_averages * 1.5) / cfg.sample_rate_Hz)
-    timeout_ms  = int(duration_s * 1000) + 2000
-
-    raw = _poll_demod(daq, path, duration_s, timeout_ms)
-    for k in raw:
-        raw[k] = raw[k][-n_averages:]
-
-    return {
-        "x_mean":     float(np.mean(raw["x"])),
-        "y_mean":     float(np.mean(raw["y"])),
-        "r_mean":     float(np.mean(raw["r"])),
-        "theta_mean": float(np.mean(raw["theta_deg"])),
-        "r_std":      float(np.std(raw["r"])),
-        "n_samples":  len(raw["r"]),
-    }
-
+# acquire_averaged is imported from bridge/instruments/mfli_daq.py above
+# unchanged — it only needs cfg.device/.demod_index/.sample_rate_Hz, which
+# DemodConfig (above) already has. Note the shared version's return dict
+# also includes x_std/y_std (unused here, consumed by mfli_phase_calibration.py).
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Main measurement loop
