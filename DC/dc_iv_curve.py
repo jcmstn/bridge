@@ -62,11 +62,27 @@ from typing import Optional, Callable, List
 
 from pymeasure.instruments.keithley import Keithley2182, Keithley2400, Keithley6221
 
-# The MercuryiTC driver lives in the shared bridge/instruments folder — add
-# it to sys.path directly (it's not installed as a normal package).
+# The instrument connect/shutdown helpers live in the shared bridge/instruments
+# folder — add it to sys.path directly (it's not installed as a normal package).
 _INSTRUMENTS_DIR = Path(__file__).resolve().parent.parent / "instruments"
 if str(_INSTRUMENTS_DIR) not in sys.path:
     sys.path.insert(0, str(_INSTRUMENTS_DIR))
+from keithley6221 import (  # noqa: E402
+    connect as connect_6221,
+    shutdown_source,
+    ramp_current_to_zero,
+)
+from keithley2182 import (  # noqa: E402
+    VoltmeterConfig,
+    connect_voltmeter,
+    acquire_averaged_voltage,
+)
+from keithley2400 import (  # noqa: E402
+    GateConfig,
+    connect_gate,
+    set_gate_voltage,
+    shutdown_gate,
+)
 from mercury_itc import (  # noqa: E402
     MercuryITC,
     TemperatureControllerConfig,
@@ -95,6 +111,11 @@ log = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────────────────
 # Configuration dataclasses  ── change all your parameters here ──────────────
 # ─────────────────────────────────────────────────────────────────────────────
+# VoltmeterConfig and GateConfig are the same shape as every other DC
+# program's — they live in bridge/instruments/ (see the keithley2182 /
+# keithley2400 imports above). SourceConfig stays local: unlike the other DC
+# programs (which source a fixed sense current), this one sweeps the current
+# itself, so it needs sweep bounds instead of a single sense_current_A.
 
 @dataclass
 class SourceConfig:
@@ -104,28 +125,6 @@ class SourceConfig:
     source_delay_s: float  = 0.05     # 6221's own settle time after each step [s]
     current_min_A: float   = -1e-3    # Sweep lower bound [A]
     current_max_A: float   =  1e-3    # Sweep upper bound [A]
-
-
-@dataclass
-class VoltmeterConfig:
-    """Keithley 2182 — voltage readout across the DUT (channel 1, differential)."""
-    visa_resource: str = "GPIB0::7::INSTR"
-    nplc: float        = 5      # Integration time [power line cycles]
-    auto_range: bool   = True
-
-
-@dataclass
-class GateConfig:
-    """
-    Keithley 2400 — optional gate voltage bias (see item 3, "IV curves vs
-    gate voltage"). Held fixed for the whole current sweep — set once
-    before run_measurement() starts, not per point. The program runs fine
-    with no 2400 connected at all as long as this stays unused (gate off).
-    """
-    visa_resource: str          = "GPIB0::25::INSTR"
-    gate_voltage_limit_V: float = 20.0    # Software safety ceiling on |gate voltage| [V]
-    compliance_current_A: float = 1e-6    # Gate leakage current compliance [A]
-    source_delay_s: float       = 0.05
 
 
 @dataclass
@@ -146,30 +145,18 @@ class CurrentPoint:
 # ─────────────────────────────────────────────────────────────────────────────
 # Instrument setup helpers
 # ─────────────────────────────────────────────────────────────────────────────
+# connect_voltmeter, connect_gate, set_gate_voltage, shutdown_gate,
+# shutdown_source and ramp_current_to_zero are imported from
+# bridge/instruments/ above unchanged. Only connect_source (this program's
+# SourceConfig has sweep bounds, not the shared fixed-sense-current shape)
+# and set_current (the sweep-range guard) are specific to this program.
 
 def connect_source(cfg: SourceConfig) -> Keithley6221:
-    """Open and configure the Keithley 6221 as a DC current source."""
-    source = Keithley6221(cfg.visa_resource)
-    source.reset()
-    source.source_auto_range = True
-    source.source_compliance = cfg.compliance_V
-    source.source_delay = cfg.source_delay_s
-    source.source_current = 0.0
-    source.enable_source()
-    log.info(
-        "Keithley 6221 connected: %s  sweep=[%.4g, %.4g] A  compliance=%.2f V",
-        cfg.visa_resource, cfg.current_min_A, cfg.current_max_A, cfg.compliance_V,
-    )
+    """Open and configure the Keithley 6221 as a DC current source, starting at 0 A."""
+    source = connect_6221(cfg.visa_resource, cfg.compliance_V, cfg.source_delay_s,
+                           initial_current_A=0.0)
+    log.info("Keithley 6221 sweep range: [%.4g, %.4g] A", cfg.current_min_A, cfg.current_max_A)
     return source
-
-
-def connect_voltmeter(cfg: VoltmeterConfig) -> Keithley2182:
-    """Open and configure the Keithley 2182 for a DUT voltage readout."""
-    voltmeter = Keithley2182(cfg.visa_resource)
-    voltmeter.reset()
-    voltmeter.ch_1.setup_voltage(auto_range=cfg.auto_range, nplc=cfg.nplc)
-    log.info("Keithley 2182 connected: %s  NPLC=%.1f", cfg.visa_resource, cfg.nplc)
-    return voltmeter
 
 
 def set_current(source: Keithley6221, cfg: SourceConfig, current_A: float) -> None:
@@ -180,69 +167,6 @@ def set_current(source: Keithley6221, cfg: SourceConfig, current_A: float) -> No
             f"range [{cfg.current_min_A}, {cfg.current_max_A}] A — refusing to set it."
         )
     source.source_current = current_A
-
-
-def ramp_current_to_zero(source: Keithley6221, step_A: float = 1e-4, delay_s: float = 0.02) -> None:
-    """Step the sourced current back to 0 A gradually rather than jumping — gentler on the DUT."""
-    current = source.source_current
-    log.info("Ramping current from %.4g A to 0 A ...", current)
-    n_steps = max(1, int(abs(current) / step_A))
-    for i in np.linspace(current, 0.0, n_steps + 1)[1:]:
-        source.source_current = float(i)
-        time.sleep(delay_s)
-
-
-def shutdown_source(source: Keithley6221) -> None:
-    """Disable the 6221's output. Call ramp_current_to_zero() first."""
-    source.shutdown()
-    log.info("Keithley 6221 output disabled")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Gate control (Keithley 2400, optional — see GateConfig)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def connect_gate(cfg: GateConfig) -> Keithley2400:
-    """Open and configure the Keithley 2400 as a fixed gate voltage source."""
-    gate = Keithley2400(cfg.visa_resource)
-    gate.reset()
-    gate.apply_voltage(compliance_current=cfg.compliance_current_A)
-    gate.source_voltage = 0.0
-    gate.enable_source()
-    log.info(
-        "Keithley 2400 gate connected: %s  V_limit=±%.2f V  I_compliance=%.3g A",
-        cfg.visa_resource, cfg.gate_voltage_limit_V, cfg.compliance_current_A,
-    )
-    return gate
-
-
-def set_gate_voltage(gate: Keithley2400, cfg: GateConfig, voltage_V: float) -> None:
-    """Set the gate voltage, refusing to exceed the configured software limit."""
-    if abs(voltage_V) > cfg.gate_voltage_limit_V:
-        raise ValueError(
-            f"Requested gate voltage {voltage_V:.3f} V exceeds configured "
-            f"limit ±{cfg.gate_voltage_limit_V:.3f} V — refusing to set it."
-        )
-    gate.source_voltage = voltage_V
-
-
-def shutdown_gate(gate: Keithley2400) -> None:
-    """Ramp the gate voltage to 0 V and disable the 2400's output."""
-    gate.ramp_to_voltage(0.0)
-    gate.shutdown()
-    log.info("Keithley 2400 gate output disabled")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Data acquisition
-# ─────────────────────────────────────────────────────────────────────────────
-
-def acquire_averaged_voltage(voltmeter: Keithley2182, n_averages: int) -> dict:
-    """Read `n_averages` voltage samples off the 2182 and return mean/std."""
-    samples = np.empty(n_averages)
-    for i in range(n_averages):
-        samples[i] = voltmeter.voltage
-    return {"mean": float(np.mean(samples)), "std": float(np.std(samples))}
 
 
 # ─────────────────────────────────────────────────────────────────────────────

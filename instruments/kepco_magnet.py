@@ -26,10 +26,24 @@ Usage example:
 
     psu.output_enabled = False
     psu.close()
+
+Usage example (shared controller, used by the DC measurement scripts):
+    from kepco_magnet import MagnetConfig, connect_magnet, set_magnet_current, shutdown_magnet
+
+    magnet_cfg = MagnetConfig(visa_resource="GPIB0::6::INSTR", current_limit_A=35.0)
+    magnet = connect_magnet(magnet_cfg)
+    set_magnet_current(magnet, magnet_cfg, 5.0)
+    ...
+    shutdown_magnet(magnet, magnet_cfg)
 """
 
+import logging
 import time
+from dataclasses import dataclass
+
 import pyvisa
+
+log = logging.getLogger(__name__)
 
 
 class KepkoBOPGL:
@@ -551,6 +565,74 @@ class KepkoBOPGL:
 
     def __exit__(self, *args):
         self.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Shared controller  ── used directly by the DC measurement scripts ───────────
+# ─────────────────────────────────────────────────────────────────────────────
+# Every DC program that drives the magnet (dc_hall_measurement.py,
+# dc_gate_sweep.py, dc_spin_valve.py) armed/rammed/shut it down with an
+# identical few lines — moved here once, the same way mercury_itc.py already
+# shares its connect/read/shutdown helpers, so a new program that only needs
+# the magnet can import this instead of re-typing the setup sequence.
+
+@dataclass
+class MagnetConfig:
+    """
+    Kepco BOP-GL bipolar power supply, used as a current source for an
+    electromagnet. Shared by every DC program that sweeps or parks a field.
+    """
+    visa_resource:        str   = "GPIB0::6::INSTR"
+    current_limit_A:      float = 50.0    # Software current limit  [A]
+    voltage_compliance_V: float = 20.0    # CC-mode compliance / OVP limit  [V]
+    ramp_step_A:          float = 0.1     # Ramp step size  [A]
+    ramp_delay_s:         float = 0.05    # Delay between ramp steps  [s]
+
+
+def connect_magnet(cfg: MagnetConfig) -> "KepkoBOPGL":
+    """
+    Open a VISA session to the Kepco BOP-GL and arm it as a current source.
+
+    Clears stale CURR:LIM/VOLT:LIM setpoint ceilings back to the supply's
+    full rating (independent of, and not restored by, *RST), then puts it
+    in constant-current mode with the configured software compliance
+    voltage and current limit.
+    """
+    rm = pyvisa.ResourceManager()
+    psu = KepkoBOPGL(rm.open_resource(cfg.visa_resource))
+
+    psu.reset()
+    psu.clear_status()
+    psu.raise_range_limits_to_max()
+    psu.mode = "current"
+    psu.voltage_limit = cfg.voltage_compliance_V
+    psu.current_limit = cfg.current_limit_A
+    psu.current = 0.0
+    psu.enable_output()
+
+    log.info(
+        "Magnet connected: %s  mode=CC  compliance=%.2f V  I_limit=±%.2f A",
+        cfg.visa_resource, cfg.voltage_compliance_V, cfg.current_limit_A,
+    )
+    return psu
+
+
+def set_magnet_current(psu: "KepkoBOPGL", cfg: MagnetConfig, current_A: float) -> None:
+    """Ramp the magnet current to `current_A`, enforcing the software limit in `cfg`."""
+    if abs(current_A) > cfg.current_limit_A:
+        raise ValueError(
+            f"Requested current {current_A:.3f} A exceeds configured "
+            f"limit ±{cfg.current_limit_A:.3f} A"
+        )
+    psu.ramp_current(current_A, step=cfg.ramp_step_A, delay=cfg.ramp_delay_s)
+
+
+def shutdown_magnet(psu: "KepkoBOPGL", cfg: MagnetConfig) -> None:
+    """Ramp the magnet current safely to zero, disable the output, and close the VISA session."""
+    log.info("Ramping magnet to zero and disabling output ...")
+    psu.zero_output(ramp=True, step=cfg.ramp_step_A, delay=cfg.ramp_delay_s)
+    psu.close()
+
 
 if __name__ == "__main__":
     import pyvisa

@@ -64,24 +64,39 @@ import sys
 import time
 import logging
 import threading
-import numpy as np
 import pandas as pd
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Callable, List
 
-import pyvisa
 from pymeasure.instruments.keithley import Keithley2182, Keithley6221
 
-# The Kepco magnet and Lake Shore 475 drivers live in the shared
-# bridge/instruments folder — add it to sys.path directly (it's not
-# installed as a normal package).
+# The instrument connect/shutdown helpers live in the shared bridge/instruments
+# folder — add it to sys.path directly (it's not installed as a normal package).
 _INSTRUMENTS_DIR = Path(__file__).resolve().parent.parent / "instruments"
 if str(_INSTRUMENTS_DIR) not in sys.path:
     sys.path.insert(0, str(_INSTRUMENTS_DIR))
-from kepco_magnet import KepkoBOPGL  # noqa: E402
-from lakeshore475 import LakeShore475  # noqa: E402
+from keithley6221 import (  # noqa: E402
+    SourceConfig,
+    connect_source,
+    shutdown_source,
+    acquire_reversal_averaged_voltage,
+)
+from keithley2182 import VoltmeterConfig, connect_voltmeter  # noqa: E402
+from kepco_magnet import (  # noqa: E402
+    MagnetConfig,
+    connect_magnet,
+    set_magnet_current,
+    shutdown_magnet,
+)
+from lakeshore475 import (  # noqa: E402
+    LakeShore475,
+    GaussmeterConfig,
+    connect_gaussmeter,
+    read_field_mT,
+    shutdown_gaussmeter,
+)
 from mercury_itc import (  # noqa: E402
     MercuryITC,
     TemperatureControllerConfig,
@@ -111,48 +126,11 @@ log = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────────────────
 # Configuration dataclasses  ── change all your parameters here ──────────────
 # ─────────────────────────────────────────────────────────────────────────────
-
-@dataclass
-class SourceConfig:
-    """Keithley 6221 — DC sense current source."""
-    visa_resource: str      = "GPIB0::20::INSTR"
-    sense_current_A: float  = 1e-3    # Sense current magnitude [A]
-    compliance_V: float     = 2.0     # Voltage compliance [V]
-    source_delay_s: float   = 0.05    # Settle time after each current step [s]
-
-
-@dataclass
-class VoltmeterConfig:
-    """Keithley 2182 — Hall voltage readout (channel 1, differential)."""
-    visa_resource: str = "GPIB0::7::INSTR"
-    nplc: float        = 5      # Integration time [power line cycles]
-    auto_range: bool   = True
-
-
-@dataclass
-class MagnetConfig:
-    """
-    Kepco BOP-GL bipolar power supply, used as a current source for an
-    electromagnet (see kepco_magnet.KepkoBOPGL). Identical role/shape to
-    MagnetConfig in mfli_dual_harmonic.py — the field is measured live via
-    the Gaussmeter (see GaussmeterConfig), never inferred from a
-    current->field calibration constant.
-    """
-    visa_resource:        str   = "GPIB0::6::INSTR"
-    current_limit_A:      float = 50.0    # Software current limit  [A]
-    voltage_compliance_V: float = 20.0    # CC-mode compliance / OVP limit  [V]
-    ramp_step_A:          float = 0.1     # Ramp step size  [A]
-    ramp_delay_s:         float = 0.05    # Delay between ramp steps  [s]
-
-
-@dataclass
-class GaussmeterConfig:
-    """Lake Shore 475 DSP Gaussmeter (see lakeshore475.LakeShore475)."""
-    visa_resource: str   = "GPIB0::12::INSTR"
-    unit:          str   = "T"     # 'T' or 'G' — read_field_mT() only knows these two
-    n_averages:    int   = 10      # Field readings averaged per measurement point
-    read_delay_s:  float = 0.05    # Delay between successive readings  [s]
-
+# SourceConfig, VoltmeterConfig, MagnetConfig and GaussmeterConfig are the same
+# shape as every other DC program's — they live in bridge/instruments/ (see
+# the keithley6221 / keithley2182 / kepco_magnet / lakeshore475 imports above)
+# instead of being redefined here. Only what's specific to this measurement
+# (the field-sweep points and acquisition timing) is defined below.
 
 @dataclass
 class AcquisitionConfig:
@@ -189,189 +167,6 @@ class FieldPoint:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Instrument setup helpers
-# ─────────────────────────────────────────────────────────────────────────────
-
-def connect_source(cfg: SourceConfig) -> Keithley6221:
-    """Open and configure the Keithley 6221 as a DC current source."""
-    source = Keithley6221(cfg.visa_resource)
-    source.reset()
-    source.source_auto_range = True
-    source.source_compliance = cfg.compliance_V
-    source.source_delay = cfg.source_delay_s
-    source.source_current = 0.0
-    source.enable_source()
-    log.info("Keithley 6221 connected: %s  I_sense=%.4g A  compliance=%.2f V",
-              cfg.visa_resource, cfg.sense_current_A, cfg.compliance_V)
-    return source
-
-
-def connect_voltmeter(cfg: VoltmeterConfig) -> Keithley2182:
-    """Open and configure the Keithley 2182 for a Hall voltage readout."""
-    voltmeter = Keithley2182(cfg.visa_resource)
-    voltmeter.reset()
-    voltmeter.ch_1.setup_voltage(auto_range=cfg.auto_range, nplc=cfg.nplc)
-    log.info("Keithley 2182 connected: %s  NPLC=%.1f", cfg.visa_resource, cfg.nplc)
-    return voltmeter
-
-
-def shutdown_source(source: Keithley6221) -> None:
-    """Disable the 6221's output. Call after ramping the sense current to 0."""
-    source.source_current = 0.0
-    source.shutdown()
-    log.info("Keithley 6221 output disabled")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Magnet control (Kepco BOP-GL current source, via VISA/PyVISA)
-# ─────────────────────────────────────────────────────────────────────────────
-# Identical to mfli_dual_harmonic.py's magnet helpers — duplicated here
-# (rather than imported across the MFLI/DC boundary) so this module stays
-# self-contained, matching the existing house convention.
-
-def connect_magnet(cfg: MagnetConfig) -> KepkoBOPGL:
-    """
-    Open a VISA session to the Kepco BOP-GL and arm it as a current source.
-
-    See mfli_dual_harmonic.connect_magnet for the full rationale — in
-    short: clears stale CURR:LIM/VOLT:LIM setpoint ceilings back to the
-    supply's full rating (independent of, and not restored by, *RST),
-    then puts it in constant-current mode with the configured software
-    compliance voltage and current limit.
-    """
-    rm = pyvisa.ResourceManager()
-    psu = KepkoBOPGL(rm.open_resource(cfg.visa_resource))
-
-    psu.reset()
-    psu.clear_status()
-    psu.raise_range_limits_to_max()
-    psu.mode = "current"
-    psu.voltage_limit = cfg.voltage_compliance_V
-    psu.current_limit = cfg.current_limit_A
-    psu.current = 0.0
-    psu.enable_output()
-
-    log.info(
-        "Magnet connected: %s  mode=CC  compliance=%.2f V  I_limit=±%.2f A",
-        cfg.visa_resource, cfg.voltage_compliance_V, cfg.current_limit_A,
-    )
-    return psu
-
-
-def set_magnet_current(psu: KepkoBOPGL, cfg: MagnetConfig, current_A: float) -> None:
-    """Ramp the magnet current to `current_A`, enforcing the software limit in `cfg`."""
-    if abs(current_A) > cfg.current_limit_A:
-        raise ValueError(
-            f"Requested current {current_A:.3f} A exceeds configured "
-            f"limit ±{cfg.current_limit_A:.3f} A"
-        )
-    psu.ramp_current(current_A, step=cfg.ramp_step_A, delay=cfg.ramp_delay_s)
-
-
-def shutdown_magnet(psu: KepkoBOPGL, cfg: MagnetConfig) -> None:
-    """Ramp the magnet current safely to zero, disable the output, and close the VISA session."""
-    log.info("Ramping magnet to zero and disabling output ...")
-    psu.zero_output(ramp=True, step=cfg.ramp_step_A, delay=cfg.ramp_delay_s)
-    psu.close()
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Gaussmeter (Lake Shore 475, via pymeasure/VISA)
-# ─────────────────────────────────────────────────────────────────────────────
-
-_FIELD_TO_MT = {"T": 1e3, "G": 1e-1}   # → mT, for GaussmeterConfig.unit
-
-
-def connect_gaussmeter(cfg: GaussmeterConfig) -> LakeShore475:
-    """Open a VISA session to the Lake Shore 475 and set its display unit."""
-    if cfg.unit not in _FIELD_TO_MT:
-        raise ValueError(f"Unsupported gaussmeter unit {cfg.unit!r}; use 'T' or 'G'.")
-    gm = LakeShore475(cfg.visa_resource)
-    gm.unit = cfg.unit
-    log.info("Gaussmeter connected: %s  unit=%s  id=%s",
-              cfg.visa_resource, cfg.unit, gm.identification)
-    return gm
-
-
-def read_field_mT(gm: LakeShore475, cfg: GaussmeterConfig) -> float:
-    """Average `cfg.n_averages` field readings and return the result in mT."""
-    mean, _std = gm.measure(cfg.n_averages, delay=cfg.read_delay_s)
-    return mean * _FIELD_TO_MT[cfg.unit]
-
-
-def shutdown_gaussmeter(gm: LakeShore475) -> None:
-    """Close the VISA session to the gaussmeter."""
-    gm.close()
-    log.info("Gaussmeter connection closed")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Data acquisition
-# ─────────────────────────────────────────────────────────────────────────────
-
-def acquire_hall_voltage(
-    source: Keithley6221,
-    voltmeter: Keithley2182,
-    src_cfg: SourceConfig,
-    n_reversals: int,
-    stop_event: Optional[threading.Event] = None,
-) -> dict:
-    """
-    Reverse the sense current n_reversals times and decompose the
-    resulting Hall voltage into its odd and even parts in I:
-
-        V_odd  = (V(+I) - V(-I)) / 2   — the Hall signal; cancels any
-                                          offset common to both polarities
-                                          (thermal EMFs, amplifier offset)
-                                          since a true offset doesn't flip
-                                          sign with the current
-        V_even = (V(+I) + V(-I)) / 2   — everything that DOES share the
-                                          offset's sign symmetry: a real
-                                          instrumental offset, but also any
-                                          genuine even-in-I physics (e.g.
-                                          unidirectional SMR, I^2 Joule
-                                          heating) that V_odd alone would
-                                          silently discard
-
-    Both are returned (and both get logged to the CSV by the caller) so
-    V_even can be checked after the fact instead of being thrown away.
-
-    Leaves the source at +sense_current_A on return. If `stop_event` fires
-    partway through, returns the mean/std of whatever pairs were already
-    collected (at least one).
-    """
-    samples_odd = np.empty(n_reversals)
-    samples_even = np.empty(n_reversals)
-    n_used = 0
-
-    for i in range(n_reversals):
-        source.source_current = src_cfg.sense_current_A
-        v_plus = voltmeter.voltage
-
-        source.source_current = -src_cfg.sense_current_A
-        v_minus = voltmeter.voltage
-
-        samples_odd[i] = (v_plus - v_minus) / 2.0
-        samples_even[i] = (v_plus + v_minus) / 2.0
-        n_used = i + 1
-
-        if stop_event is not None and stop_event.is_set():
-            break
-
-    source.source_current = src_cfg.sense_current_A
-
-    used_odd = samples_odd[:n_used]
-    used_even = samples_even[:n_used]
-    return {
-        "mean": float(np.mean(used_odd)),
-        "std": float(np.std(used_odd)),
-        "even_mean": float(np.mean(used_even)),
-        "even_std": float(np.std(used_even)),
-        "n_reversals": n_used,
-    }
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Main measurement loop
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -396,7 +191,7 @@ def run_measurement(
     every point so a crash never loses data.
 
     `stop_event`, if given, is checked before each point (and mid-reversal
-    inside acquire_hall_voltage) — set it to break out of the sweep early
+    inside acquire_reversal_averaged_voltage) — set it to break out of the sweep early
     while still returning the data collected so far, so callers can run
     their normal shutdown/cleanup path instead of killing the process
     outright.
@@ -445,7 +240,8 @@ def run_measurement(
             log.info("   B=%.4f mT (measured)", field_mT)
 
         # ── 4. Acquire reversal-averaged Hall voltage ───────────────────────
-        hv = acquire_hall_voltage(source, voltmeter, src_cfg, acq_cfg.n_reversals, stop_event)
+        hv = acquire_reversal_averaged_voltage(
+            source, voltmeter, src_cfg.sense_current_A, acq_cfg.n_reversals, stop_event)
         r_hall = hv["mean"] / src_cfg.sense_current_A
         log.info("   V_Hall=%.4e V  σ=%.2e V  R_Hall=%.5g Ω  V_even=%.4e V  (n=%d reversals)",
                   hv["mean"], hv["std"], r_hall, hv["even_mean"], hv["n_reversals"])

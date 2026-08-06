@@ -25,14 +25,27 @@ Usage example:
     print(gm.field)             # single reading, Tesla
     mean, std = gm.measure(10)  # average of 10 readings
     gm.close()
+
+Usage example (shared controller, used by the DC measurement scripts):
+    from lakeshore475 import GaussmeterConfig, connect_gaussmeter, read_field_mT, shutdown_gaussmeter
+
+    gauss_cfg = GaussmeterConfig(visa_resource="GPIB0::12::INSTR", unit="T")
+    gm = connect_gaussmeter(gauss_cfg)
+    field_mT = read_field_mT(gm, gauss_cfg)
+    ...
+    shutdown_gaussmeter(gm)
 """
 
+import logging
+from dataclasses import dataclass
 from time import sleep
 
 import numpy as np
 
 from pymeasure.instruments import Instrument
 from pymeasure.instruments.validators import strict_discrete_set, truncated_range
+
+log = logging.getLogger(__name__)
 
 
 class LakeShore475(Instrument):
@@ -148,3 +161,48 @@ class LakeShore475(Instrument):
 
     def __exit__(self, *args):
         self.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Shared controller  ── used directly by the DC measurement scripts ───────────
+# ─────────────────────────────────────────────────────────────────────────────
+# Every DC program that measures the field live (dc_hall_measurement.py,
+# dc_gate_sweep.py, dc_spin_valve.py) opened/read/closed the 475 with an
+# identical few lines — moved here once, the same way mercury_itc.py already
+# shares its connect/read/shutdown helpers, so a new program that only needs
+# the gaussmeter can import this instead of re-typing the setup sequence.
+
+_FIELD_TO_MT = {"T": 1e3, "G": 1e-1}   # → mT, for GaussmeterConfig.unit
+
+
+@dataclass
+class GaussmeterConfig:
+    """Lake Shore 475 DSP Gaussmeter — measures the actual field, shared by every
+    DC program that logs it (never inferred from a magnet-current calibration)."""
+    visa_resource: str   = "GPIB0::12::INSTR"
+    unit:          str   = "T"     # 'T' or 'G' — read_field_mT() only knows these two
+    n_averages:    int   = 10      # Field readings averaged per measurement point
+    read_delay_s:  float = 0.05    # Delay between successive readings  [s]
+
+
+def connect_gaussmeter(cfg: GaussmeterConfig) -> "LakeShore475":
+    """Open a VISA session to the Lake Shore 475 and set its display unit."""
+    if cfg.unit not in _FIELD_TO_MT:
+        raise ValueError(f"Unsupported gaussmeter unit {cfg.unit!r}; use 'T' or 'G'.")
+    gm = LakeShore475(cfg.visa_resource)
+    gm.unit = cfg.unit
+    log.info("Gaussmeter connected: %s  unit=%s  id=%s",
+              cfg.visa_resource, cfg.unit, gm.identification)
+    return gm
+
+
+def read_field_mT(gm: "LakeShore475", cfg: GaussmeterConfig) -> float:
+    """Average `cfg.n_averages` field readings and return the result in mT."""
+    mean, _std = gm.measure(cfg.n_averages, delay=cfg.read_delay_s)
+    return mean * _FIELD_TO_MT[cfg.unit]
+
+
+def shutdown_gaussmeter(gm: "LakeShore475") -> None:
+    """Close the VISA session to the gaussmeter."""
+    gm.close()
+    log.info("Gaussmeter connection closed")

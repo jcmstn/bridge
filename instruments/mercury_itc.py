@@ -146,12 +146,12 @@ class MercuryITC(Instrument):
 # ─────────────────────────────────────────────────────────────────────────────
 # Shared controller  ── used directly by the DC/MFLI measurement scripts ──────
 # ─────────────────────────────────────────────────────────────────────────────
-# Unlike the Kepco magnet / Lake Shore 475 wrapper functions (which are
-# small enough that each measurement script keeps its own copy — see
-# kepco_magnet.py's docstring), read_temperature()'s "1 or 2 sensors,
-# never let a missing/failed instrument stop the measurement" logic is
-# shared here so every DC/MFLI script gets the same graceful-degradation
-# behavior for free instead of re-implementing it.
+# read_temperature()'s "1 or 2 sensors, never let a missing/failed instrument
+# stop the measurement" logic is shared here so every DC/MFLI script gets the
+# same graceful-degradation behavior for free instead of re-implementing it —
+# the same convention kepco_magnet.py and lakeshore475.py now follow for
+# their own connect/set-or-read/shutdown helpers (used directly by every
+# bridge/DC program; bridge/MFLI keeps its own copies for now).
 
 @dataclass
 class TemperatureControllerConfig:
