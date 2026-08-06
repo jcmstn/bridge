@@ -66,6 +66,7 @@ from mfli_dual_harmonic import (
     MagnetConfig,
     MeasurementPoint,
     OutputConfig,
+    SampleGeometryConfig,
     TemperatureControllerConfig,
     acquire_averaged,
     auto_null_phase,
@@ -136,6 +137,10 @@ DEFAULTS: dict = {
     "phase_cal_current_A": "",
     "phase_cal_n_averages": "20",
     "phase_cal_max_iterations": "5",
+    "hall_bar_length_um": "",
+    "hall_bar_width_um": "",
+    "hall_bar_thickness_nm": "",
+    "field_angle_from_oop_deg": "",
 }
 
 # id -> caster, for every free-text numeric field (Select/Switch handled separately)
@@ -166,7 +171,11 @@ TEXT_FIELDS = ["leader_device", "follower_device", "daq_host", "output_name", "v
                "gaussmeter_visa_resource", "temperature_visa_resource", "temperature_sensor_uids"]
 # Free-text, blank-allowed: parsed to Optional[float] by hand in parse_state()
 # rather than going through NUMERIC_FIELDS' "blank is an error" casting.
-OPTIONAL_NUMERIC_FIELDS = ["phase_cal_current_A"]
+OPTIONAL_NUMERIC_FIELDS = [
+    "phase_cal_current_A",
+    "hall_bar_length_um", "hall_bar_width_um", "hall_bar_thickness_nm",
+    "field_angle_from_oop_deg",
+]
 MAGNET_FIELD_IDS = [
     "visa_resource", "current_limit_A", "voltage_compliance_V",
     "ramp_step_A", "ramp_delay_s", "i_min_A", "i_max_A", "n_points",
@@ -235,6 +244,7 @@ class MeasurementPlan:
     phase_cal_current_A: Optional[float]
     phase_cal_n_averages: int
     phase_cal_max_iterations: int
+    geometry_cfg: SampleGeometryConfig
 
     @property
     def total_points(self) -> int:
@@ -391,6 +401,28 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
                 )
         else:
             info.append("Phase cal: null 1f Y at the present field (no magnet ramp).")
+
+    # ── Sample geometry (optional — needed for quantitative analysis) ──────────
+    geom_fields = {
+        "Hall bar length": state["hall_bar_length_um"],
+        "Hall bar width": state["hall_bar_width_um"],
+        "Hall bar thickness": state["hall_bar_thickness_nm"],
+        "Field angle from out-of-plane": state["field_angle_from_oop_deg"],
+    }
+    set_geom = {k: v for k, v in geom_fields.items() if v is not None}
+    if not set_geom:
+        warnings.append(
+            "Sample geometry and field angle are unset — the run will still "
+            "record raw 1f/2f voltages, but converting them to a resistivity "
+            "or an absolute spin-Hall/damping-like field needs these (optional "
+            "fields below)."
+        )
+    elif len(set_geom) < len(geom_fields):
+        missing = ", ".join(k for k in geom_fields if geom_fields[k] is None)
+        warnings.append(f"Sample geometry partially set — still missing: {missing}.")
+        info.append("Sample geometry: " + ", ".join(f"{k}={v:g}" for k, v in set_geom.items()))
+    else:
+        info.append("Sample geometry: " + ", ".join(f"{k}={v:g}" for k, v in set_geom.items()))
 
     return info, warnings, errors
 
@@ -716,11 +748,12 @@ class RunScreen(Screen):
 
             self._set_status_threadsafe("Running measurement …")
             run_measurement(
-                daq, plan.demod1_cfg, plan.demod2_cfg, plan.acq_cfg, points,
+                daq, plan.out_cfg, plan.demod1_cfg, plan.demod2_cfg, plan.acq_cfg, points,
                 stop_event=self._stop_event,
                 on_point=lambda record: self.app.call_from_thread(self._on_point, record),
                 gaussmeter=gaussmeter, gauss_cfg=plan.gauss_cfg,
                 temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg,
+                geometry_cfg=plan.geometry_cfg,
             )
             final = "Measurement aborted." if self._stop_event.is_set() else "Measurement complete."
         except Exception as exc:
@@ -914,6 +947,28 @@ class MFLIDualHarmonicApp(App):
                         "separate real electrical delay from Joule-heating/ANE "
                         "contamination.",
                         classes="hint",
+                    )
+
+                with Collapsible(title="Sample geometry (optional — for quantitative analysis)",
+                                  collapsed=True):
+                    yield field(
+                        "hall_bar_length_um", "Hall bar length (µm)",
+                        DEFAULTS["hall_bar_length_um"], kind="text", valid_empty=True,
+                        hint="Current-path length between voltage probes. Leave blank if unknown "
+                             "— saved as an empty metadata column, doesn't block the run.",
+                    )
+                    yield field(
+                        "hall_bar_width_um", "Hall bar width (µm)",
+                        DEFAULTS["hall_bar_width_um"], kind="text", valid_empty=True,
+                    )
+                    yield field(
+                        "hall_bar_thickness_nm", "Film/channel thickness (nm)",
+                        DEFAULTS["hall_bar_thickness_nm"], kind="text", valid_empty=True,
+                    )
+                    yield field(
+                        "field_angle_from_oop_deg", "External field angle from out-of-plane (°)",
+                        DEFAULTS["field_angle_from_oop_deg"], kind="text", valid_empty=True,
+                        hint="0° = fully out-of-plane (film normal), 90° = in-plane.",
                     )
 
             with Vertical(id="sidebar"):
@@ -1130,6 +1185,13 @@ class MFLIDualHarmonicApp(App):
                     sensor_uids=uids,
                 )
 
+        geometry_cfg = SampleGeometryConfig(
+            hall_bar_length_um=state["hall_bar_length_um"],
+            hall_bar_width_um=state["hall_bar_width_um"],
+            hall_bar_thickness_nm=state["hall_bar_thickness_nm"],
+            field_angle_from_oop_deg=state["field_angle_from_oop_deg"],
+        )
+
         return MeasurementPlan(
             daq_host=state["daq_host"], daq_port=state["daq_port"],
             leader=state["leader_device"], follower=state["follower_device"],
@@ -1140,6 +1202,7 @@ class MFLIDualHarmonicApp(App):
             phase_cal_current_A=state["phase_cal_current_A"],
             phase_cal_n_averages=state["phase_cal_n_averages"],
             phase_cal_max_iterations=state["phase_cal_max_iterations"],
+            geometry_cfg=geometry_cfg,
         )
 
 

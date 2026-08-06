@@ -34,6 +34,21 @@ Extensibility:
   Add new sweep variables to MeasurementPoint and a corresponding
   set_action callable — the run_measurement loop handles the rest.
 
+Run metadata (see build_run_metadata()):
+  Every row of the output CSV also carries the run-level metadata a
+  harmonic-Hall analysis needs to go from raw voltages to an absolute
+  quantity: excitation frequency and current (both peak and RMS, with the
+  MFLI's peak-amplitude / RMS-demodulator conventions spelled out), each
+  demodulator's filter time-constant/order and its reference phase as
+  actually programmed (read live, since auto_null_phase() or
+  set_excitation_frequency() can change it mid-run), plus Hall bar
+  dimensions and the external-field angle from the out-of-plane axis if
+  supplied via SampleGeometryConfig (optional — None leaves those columns
+  blank rather than blocking a run; the TUI exposes them as optional
+  fields). set_excitation_frequency() lets a MeasurementPoint.set_action
+  drive a frequency sweep, e.g. to repeat the sweep at ≥3 frequencies and
+  separate instrumental phase from thermal quadrature.
+
 Requirements:
     pip install zhinst-core zhinst-utils numpy pandas pyvisa
 """
@@ -177,6 +192,24 @@ class GaussmeterConfig:
 
 
 @dataclass
+class SampleGeometryConfig:
+    """
+    Sample and field geometry needed to turn raw 1f/2f voltages into
+    absolute quantities (resistivity, spin Hall / damping-like field)
+    after the fact. None of this is readable from any instrument, so
+    every field defaults to None (left blank in the saved metadata)
+    rather than blocking a run — the TUI exposes these as optional
+    fields for exactly that reason.
+    """
+    hall_bar_length_um:       Optional[float] = None  # Current-path length between voltage probes
+    hall_bar_width_um:        Optional[float] = None  # Channel width
+    hall_bar_thickness_nm:    Optional[float] = None  # Film/channel thickness
+    field_angle_from_oop_deg: Optional[float] = None  # External field angle from the out-of-plane
+                                                        # (film normal) axis; 0° = fully out-of-plane,
+                                                        # 90° = in-plane
+
+
+@dataclass
 class PhaseCalibrationResult:
     """Outcome of auto_null_phase() — see that function's docstring."""
     phase_before_deg: float    # demod phaseshift node value before calibration
@@ -302,6 +335,33 @@ def sync_follower_oscillator(daq: zi.ziDAQServer, out_cfg: OutputConfig,
              follower, follower_osc_index, out_cfg.frequency_Hz)
 
 
+def set_excitation_frequency(
+    daq: zi.ziDAQServer,
+    out_cfg: OutputConfig,
+    frequency_Hz: float,
+    follower: Optional[str] = None,
+    follower_osc_index: int = 0,
+) -> None:
+    """
+    Change the excitation frequency mid-run and mutate `out_cfg` in place
+    so build_run_metadata() and every downstream log line see the value
+    actually in effect — use this from a MeasurementPoint.set_action to
+    run a frequency sweep (repeating the sweep at ≥3 frequencies is the
+    only way to separate instrumental phase from thermal quadrature; see
+    the module docstring).
+
+    If `follower` is given, re-syncs its oscillator too — see
+    sync_follower_oscillator()'s docstring for why that's required on
+    every frequency change, not just once at startup.
+    """
+    out_cfg.frequency_Hz = frequency_Hz
+    daq.setDouble(f"/{out_cfg.device}/oscs/{out_cfg.osc_index}/freq", frequency_Hz)
+    daq.sync()
+    if follower is not None:
+        sync_follower_oscillator(daq, out_cfg, follower, follower_osc_index)
+    log.info("Excitation frequency set to %.4f Hz", frequency_Hz)
+
+
 def shutdown_output(daq: zi.ziDAQServer, cfg: OutputConfig) -> None:
     """Turn off the MFLI signal output that configure_output() enabled."""
     daq.setInt(f"/{cfg.device}/sigouts/{cfg.out_ch}/on", 0)
@@ -380,6 +440,65 @@ def set_demod_phase_deg(daq: zi.ziDAQServer, cfg: DemodConfig, phase_deg: float)
     """
     daq.setDouble(f"/{cfg.device}/demods/{cfg.demod_index}/phaseshift", phase_deg)
     daq.sync()
+
+
+def build_run_metadata(
+    daq: zi.ziDAQServer,
+    out_cfg: OutputConfig,
+    demod1_cfg: DemodConfig,
+    demod2_cfg: DemodConfig,
+    geometry_cfg: Optional[SampleGeometryConfig] = None,
+) -> dict:
+    """
+    Assemble the run-level metadata a harmonic-Hall analysis needs to turn
+    raw 1f/2f voltages into an absolute quantity (e.g. a spin Hall angle)
+    and to separate real physics from instrumental phase offsets.
+
+    Excitation current is derived from `out_cfg` assuming the series
+    resistor dominates the load impedance (I ≈ V_out / R_series).
+    amplitude_V is the MFLI sigouts amplitude node, which LabOne defines
+    as the *peak* (0-to-peak) value of the drive sine wave — not RMS, not
+    peak-to-peak — so both _peak and _rms current are reported here
+    rather than leaving that conversion to whoever reads the CSV later.
+
+    Demodulator X/Y/R follow the opposite (ZI) convention: they report
+    the RMS amplitude of the input signal's component at the reference
+    frequency, not peak — see demod_output_convention below.
+
+    Reference phases are read live from the device (not copied from
+    DemodConfig) because auto_null_phase() can change them after
+    configure_demodulator() ran — this should reflect what was actually
+    programmed at acquisition time, not what was requested initially.
+
+    `geometry_cfg` (Hall bar dimensions, external-field angle from the
+    out-of-plane axis) is never available from an instrument — pass None
+    (the default) to leave those columns blank rather than blocking a run.
+    """
+    geometry_cfg = geometry_cfg or SampleGeometryConfig()
+    I_peak_A = out_cfg.amplitude_V / out_cfg.series_R_ohm
+    return {
+        "excitation_frequency_Hz":       out_cfg.frequency_Hz,
+        "excitation_current_A_peak":     I_peak_A,
+        "excitation_current_A_rms":      I_peak_A / math.sqrt(2.0),
+        "excitation_current_convention": (
+            "peak (0-to-peak); I = V_out/R_series assumes the series "
+            "resistor dominates the load impedance"
+        ),
+        "demod_output_convention": (
+            "RMS; ZI demodulator X/Y/R nodes report the RMS amplitude of "
+            "the input signal's component at the reference frequency"
+        ),
+        "demod1_time_constant_s":   demod1_cfg.filter.time_constant_s,
+        "demod1_filter_order":      demod1_cfg.filter.order,
+        "demod1_ref_phase_deg":     get_demod_phase_deg(daq, demod1_cfg),
+        "demod2_time_constant_s":   demod2_cfg.filter.time_constant_s,
+        "demod2_filter_order":      demod2_cfg.filter.order,
+        "demod2_ref_phase_deg":     get_demod_phase_deg(daq, demod2_cfg),
+        "hall_bar_length_um":       geometry_cfg.hall_bar_length_um,
+        "hall_bar_width_um":        geometry_cfg.hall_bar_width_um,
+        "hall_bar_thickness_nm":    geometry_cfg.hall_bar_thickness_nm,
+        "field_angle_from_oop_deg": geometry_cfg.field_angle_from_oop_deg,
+    }
 
 
 def auto_null_phase(
@@ -699,6 +818,7 @@ class MeasurementPoint:
 
 def run_measurement(
     daq:        zi.ziDAQServer,
+    out_cfg:    OutputConfig,         # Drive/excitation config — source of frequency & current metadata
     demod1_cfg: DemodConfig,          # 1f channel
     demod2_cfg: DemodConfig,          # 2f channel
     acq_cfg:    AcquisitionConfig,
@@ -709,6 +829,7 @@ def run_measurement(
     gauss_cfg:  Optional[GaussmeterConfig] = None,
     temp_ctrl: Optional[MercuryITC] = None,
     temp_cfg:  Optional[TemperatureControllerConfig] = None,
+    geometry_cfg: Optional[SampleGeometryConfig] = None,
 ) -> pd.DataFrame:
     """
     Iterate over `points`, acquire 1f and 2f at each, log to CSV.
@@ -734,6 +855,18 @@ def run_measurement(
     MercuryiTC controller (see mercury_itc.py). Passing `temp_ctrl=None`
     (e.g. because the MercuryiTC isn't connected) simply leaves those
     columns empty — it's never a reason to stop the measurement.
+
+    `out_cfg` and `geometry_cfg` feed build_run_metadata(), which is
+    called fresh at every point (not once before the loop) and merged
+    into `record`: excitation frequency/current (peak *and* RMS, with the
+    convention spelled out), demod filter time-constant/order, and the
+    reference phase actually programmed on each demodulator right then —
+    read live because a phase re-null or a frequency change via
+    set_excitation_frequency() can happen between points.  `geometry_cfg`
+    (Hall bar dimensions, field angle from the out-of-plane axis) is
+    never available from an instrument; pass None (the default) to leave
+    those columns blank rather than blocking the run — see
+    SampleGeometryConfig.
 
     ── Adding more measurements per point ─────────────────────────────────
     Just extend the `record` dict below with any quantity you want to log:
@@ -782,6 +915,11 @@ def run_measurement(
         temp_1_K, temp_2_K = read_temperature(temp_ctrl, temp_cfg) \
             if temp_cfg is not None else (None, None)
 
+        # ── 4d. Run metadata (excitation, filters, phases, geometry) ────────
+        # Built fresh each point — see build_run_metadata()'s docstring for
+        # why this isn't hoisted above the loop.
+        run_meta = build_run_metadata(daq, out_cfg, demod1_cfg, demod2_cfg, geometry_cfg)
+
         # ── 5. Build record ────────────────────────────────────────────────
         record: dict = {
             "point_index": idx,
@@ -806,6 +944,8 @@ def run_measurement(
             "2f_R_V":      d2["r_mean"],
             "2f_theta_deg":d2["theta_mean"],
             "2f_R_std_V":  d2["r_std"],
+            # ── Run metadata (excitation/demod/geometry — see build_run_metadata) ──
+            **run_meta,
             # ── Add further quantities here, e.g. from other instruments ───
         }
         records.append(record)
@@ -914,6 +1054,16 @@ def main() -> None:
     )
     temp_ctrl = connect_temperature_controller(temp_cfg)
 
+    # ── Sample geometry (optional — fill in whatever you know) ───────────────
+    # None of these are readable from any instrument, so they default to
+    # None and are simply saved as blank metadata columns if left unset.
+    geometry_cfg = SampleGeometryConfig(
+        hall_bar_length_um       = None,   # e.g. 20.0
+        hall_bar_width_um        = None,   # e.g. 5.0
+        hall_bar_thickness_nm    = None,   # e.g. 5.0
+        field_angle_from_oop_deg = None,   # e.g. 0.0 for a fully out-of-plane field
+    )
+
     # ── Measurement points ───────────────────────────────────────────────────
     #
     # ① Single acquisition (no sweep):
@@ -955,9 +1105,10 @@ def main() -> None:
     # Likewise, always disable the MFLI signal output so it doesn't keep
     # driving current through the sample after the script exits.
     try:
-        df = run_measurement(daq, demod1_cfg, demod2_cfg, acq_cfg, points,
+        df = run_measurement(daq, out_cfg, demod1_cfg, demod2_cfg, acq_cfg, points,
                               gaussmeter=gaussmeter, gauss_cfg=gauss_cfg,
-                              temp_ctrl=temp_ctrl, temp_cfg=temp_cfg)
+                              temp_ctrl=temp_ctrl, temp_cfg=temp_cfg,
+                              geometry_cfg=geometry_cfg)
         print("\n", df.to_string(index=False))
     finally:
         shutdown_output(daq, out_cfg)
