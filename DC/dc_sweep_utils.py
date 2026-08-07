@@ -4,17 +4,28 @@ Shared sweep/output-path helpers for the bridge/DC measurement programs
 ==========================================================================
 Small, pure-function utilities used by every DC measurement script
 (dc_hall_measurement.py, dc_iv_curve.py, dc_gate_sweep.py,
-dc_spin_valve.py) so the step-size/bidirectional sweep logic, the
-"single value or comma-separated list" parsing, and the
-data/sub-directory/prefix output path convention are each implemented
+dc_spin_valve.py) so the step-size/bidirectional sweep logic and the
+"single value or comma-separated list" parsing are each implemented
 exactly once.
+
+build_output_path() itself now lives in bridge/instruments/output_paths.py
+(promoted so bridge/MFLI and bridge/web can share it too, since it's pure
+pathlib logic with no DC-specific imports) and is re-exported below so
+every existing `from dc_sweep_utils import build_output_path, ...` keeps
+working unchanged.
 """
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import numpy as np
+
+_INSTRUMENTS_DIR = Path(__file__).resolve().parent.parent / "instruments"
+if str(_INSTRUMENTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_INSTRUMENTS_DIR))
+from output_paths import build_output_path  # noqa: E402,F401  (re-exported — canonical copy lives in instruments/)
 
 
 def linear_sweep(start: float, stop: float, step: float, bidirectional: bool = True) -> np.ndarray:
@@ -54,15 +65,3 @@ def parse_value_list(text: str) -> list[float]:
         except ValueError:
             raise ValueError(f"'{token}' is not a valid number.") from None
     return values
-
-
-def build_output_path(data_dir: Path, subdir: str, prefix: str, timestamp: str,
-                       suffix: str = "", ext: str = "csv") -> Path:
-    """
-    Build `data_dir / subdir / f"{prefix}_{timestamp}{suffix}.{ext}"`.
-
-    `subdir` may be empty, in which case the file is written directly
-    into `data_dir` (unchanged from the pre-sub-directory behavior).
-    """
-    out_dir = data_dir / subdir if subdir else data_dir
-    return out_dir / f"{prefix}_{timestamp}{suffix}.{ext}"

@@ -18,4 +18,5 @@ dependencies = [
     "zhinst-toolkit>=1.3.0",
     "zhinst-core>=26.7,<26.8",
     "scipy>=1.18.0",
+    "nicegui[plotly]>=3.15.0",
 ]
