@@ -62,16 +62,13 @@ from __future__ import annotations
 import json
 import sys
 import warnings
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, replace
 from pathlib import Path
 from typing import Optional, Sequence
 
 import numpy as np
 import pandas as pd
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
 from scipy.optimize import curve_fit
 
 warnings.filterwarnings("ignore", category=RuntimeWarning)
@@ -112,6 +109,12 @@ class Config:
     nm_thickness_nm: Optional[float] = None
     nm_material: Optional[str] = None
     hallbar_width_um: Optional[float] = None
+    hallbar_length_um: Optional[float] = None     # current-path length; not used by any
+                                                   # calc in this file yet, kept for the record
+    film_thickness_nm: Optional[float] = None     # generic single-layer thickness as recorded
+                                                   # by the run (mfli_dual_harmonic doesn't know
+                                                   # about a NM/NI split) -- use ni_thickness_nm /
+                                                   # nm_thickness_nm instead if you need that split
     ni_resistivity_uohm_cm: Optional[float] = None
     nm_resistivity_uohm_cm: Optional[float] = None
     Ms_kA_per_m: Optional[float] = None          # independent (VSM/SQUID) value
@@ -204,6 +207,16 @@ class Report:
 # =============================================================================
 #  3.  LOADING AND PRE-PROCESSING
 # =============================================================================
+def find_data_files(directory: Path, extensions=(".csv",)) -> list[Path]:
+    """Return measurement files directly inside `directory`, sorted by name.
+    Mirrors ahe_core.find_data_files() -- used by harmonic_hall_gui.py to
+    list the files a chosen directory offers for batch analysis."""
+    return sorted(
+        p for p in directory.iterdir()
+        if p.is_file() and p.suffix.lower() in extensions
+    )
+
+
 def load_data(cfg: Config, rep: Report) -> pd.DataFrame:
     path = Path(cfg.csv_path)
     if not path.exists():
@@ -255,6 +268,92 @@ def to_resistance(V, cfg: Config) -> tuple[np.ndarray, bool]:
     if (not cfg.current_is_rms) and cfg.lockin_reports_rms:
         I = I / np.sqrt(2.0)
     return np.asarray(V, float) / I, True
+
+
+# Maps a column mfli_dual_harmonic.py's build_run_metadata() writes into every
+# row of its output CSV to the Config field it fills in. See that function's
+# docstring (bridge/MFLI/mfli_dual_harmonic.py) for what each column means.
+# excitation_current_A_rms (not _peak) is used because the demod X/Y/R this
+# script reads are RMS -- see 'demod_output_convention' in the same file --
+# so current_A and the lock-in output are put on the same footing directly,
+# with no peak/RMS conversion left for apply_run_metadata() to get wrong.
+RUN_METADATA_COLUMNS = {
+    "excitation_frequency_Hz":       "excitation_frequency_Hz",
+    "excitation_current_A_rms":      "current_A",
+    "demod1_time_constant_s":        "time_constant_s",
+    "demod1_filter_order":           "filter_order",
+    "demod1_ref_phase_deg":          "ref_phase_1f_deg",
+    "demod2_ref_phase_deg":          "ref_phase_2f_deg",
+    "hall_bar_width_um":             "hallbar_width_um",
+    "hall_bar_length_um":            "hallbar_length_um",
+    "hall_bar_thickness_nm":         "film_thickness_nm",
+    "field_angle_from_oop_deg":      "field_polar_misalignment_deg",
+}
+
+
+def apply_run_metadata(df: pd.DataFrame, cfg: Config, rep: Report) -> Config:
+    """
+    mfli_dual_harmonic.py's run_measurement() (see build_run_metadata() there)
+    writes excitation/filter/phase/geometry metadata as columns on every row
+    of its output CSV rather than a separate sidecar file. Pull it in here so
+    a Config field only needs to be set by hand for files that predate that
+    metadata, were produced by something else, or need a value the file can't
+    supply (Ms, resistivities, nm_material, field_azimuth_deg -- none of
+    those are recorded by mfli_dual_harmonic.py either).
+
+    A Config field that is already set (not None) is left alone but
+    cross-checked against the file's value: silently trusting a stale
+    manually-set field over a mismatched file is a worse failure mode than a
+    loud warning, since it would look like the analysis ran clean.
+
+    Returns a new Config (the input is not mutated).
+    """
+    updates: dict = {}
+    for csv_col, cfg_field in RUN_METADATA_COLUMNS.items():
+        if csv_col not in df.columns:
+            continue
+        values = df[csv_col].dropna().unique()
+        if len(values) == 0:
+            continue
+        if len(values) > 1:
+            rep.warn(
+                f"metadata: {csv_col}",
+                f"not constant across the file ({len(values)} distinct values) -- "
+                "using the first point's value. This usually means "
+                "set_excitation_frequency() or update_filter() was called mid-run; "
+                "if so, split the file and analyze each segment separately.",
+            )
+        value = values[0]
+        if isinstance(value, (np.floating, np.integer)):
+            value = value.item()
+
+        current = getattr(cfg, cfg_field)
+        if current is None:
+            updates[cfg_field] = value
+            rep.info(f"metadata: {cfg_field}", f"{value}  (from '{csv_col}' in file)")
+        else:
+            mismatch = (
+                not np.isclose(current, value, rtol=1e-6, atol=1e-12)
+                if isinstance(value, float) else current != value
+            )
+            if mismatch:
+                rep.warn(
+                    f"metadata: {cfg_field}",
+                    f"Config has {current!r} but the file says {value!r} "
+                    f"(from '{csv_col}'). Keeping the manually-set Config value -- "
+                    "clear it to use the file's.",
+                )
+
+    if "current_A" in updates:
+        # excitation_current_A_rms is already RMS and demod output is already
+        # RMS (see the comment on RUN_METADATA_COLUMNS above) -- force these
+        # so to_resistance() doesn't apply a spurious sqrt(2) conversion.
+        updates["current_is_rms"] = True
+        updates["lockin_reports_rms"] = True
+
+    if not updates:
+        return cfg
+    return replace(cfg, **updates)
 
 
 # =============================================================================
@@ -810,13 +909,30 @@ def fit_second_harmonic(B, S2, fit1, rep: Report):
 # =============================================================================
 #  6.  PLOTTING
 # =============================================================================
-def make_plots(df, cfg, rep, branches, fit1, fit2, calibrated, outpath):
+def make_plots(df, cfg, rep, branches, fit1, fit2, calibrated, fig: Optional[Figure] = None) -> Figure:
+    """
+    Draw the 3x3 analysis grid onto `fig` (creating one if not given) and
+    return it -- caller decides what to do with it: run_analysis() saves it
+    to a PNG for the CLI/script path, harmonic_hall_gui.py instead embeds the
+    same Figure directly in a Qt canvas so the GUI and the saved PNG never
+    drift apart.
+
+    Always clears and rebuilds the whole figure rather than reusing existing
+    axes, even when `fig` is passed in from a previous call (e.g. the GUI
+    stepping to the next file): panel (2,1) below creates a twinx() axis,
+    which `Axes.clear()` does not remove, so reusing axes across calls would
+    leak a duplicate twin axis every time.
+    """
     B = df["B_T"].values * 1e3  # mT for display
     X1, Y1 = df["_X1"].values, df["_Y1"].values
     X2, Y2 = df["_X2"].values, df["_Y2"].values
     unit = r"$R$ ($\Omega$)" if calibrated else r"$V$ (V)"
 
-    fig, ax = plt.subplots(3, 3, figsize=(16.5, 13.5))
+    if fig is None:
+        fig = Figure(figsize=(16.5, 13.5))
+    else:
+        fig.clear()
+    ax = np.array([[fig.add_subplot(3, 3, i * 3 + j + 1) for j in range(3)] for i in range(3)])
     fig.suptitle("Harmonic Hall: in-plane magnet, out-of-plane field sweep",
                  fontsize=14, y=0.995)
 
@@ -929,16 +1045,45 @@ def make_plots(df, cfg, rep, branches, fit1, fit2, calibrated, outpath):
            va="top", ha="left", fontsize=8, family="monospace")
 
     fig.tight_layout()
-    fig.savefig(outpath, dpi=150)
-    plt.close(fig)
+    return fig
 
 
 # =============================================================================
 #  7.  MAIN
 # =============================================================================
-def run(cfg: Config):
+@dataclass
+class AnalysisResult:
+    """Everything run_analysis() produces: the Config actually used (after
+    apply_run_metadata() filled in whatever the file supplied), the sanity
+    report, both fits (None if a fit failed), the drawn Figure, and the few
+    extra flags run()'s JSON summary needs."""
+    cfg: Config
+    rep: Report
+    fit1: Optional[dict]
+    fit2: Optional[dict]
+    fig: Figure
+    phase: dict
+    calibrated: bool
+    signal_present: bool
+
+
+def run_analysis(cfg: Config, fig: Optional[Figure] = None) -> AnalysisResult:
+    """
+    The full analysis pipeline: load, apply file metadata, run every sanity
+    check, fit, and draw the plot grid -- but, unlike run() below, hand back
+    the Figure instead of unconditionally saving+closing it, and don't print
+    or write anything to disk. This is what run() and harmonic_hall_gui.py
+    both call; run() is the thin CLI wrapper that adds printing and the
+    sanity_report.txt/results.json/PNG writes, the GUI instead embeds the
+    returned Figure live and lets the user step to the next file.
+
+    Pass an existing `fig` (e.g. the GUI's persistent canvas figure) to draw
+    into it instead of creating a new one -- see make_plots()'s docstring for
+    why it's always cleared and rebuilt rather than updated in place.
+    """
     rep = Report()
     df = load_data(cfg, rep)
+    cfg = apply_run_metadata(df, cfg, rep)
 
     check_missing_metadata(cfg, rep)
     check_internal_consistency(df, cfg, rep)
@@ -971,25 +1116,54 @@ def run(cfg: Config):
     fit1 = fit_first_harmonic(B, X1[br], rep)
     fit2 = fit_second_harmonic(B, X2[br], fit1, rep) if fit1 else None
 
-    outdir = Path(cfg.outdir); outdir.mkdir(parents=True, exist_ok=True)
-    png = outdir / "harmonic_hall_analysis.png"
-    make_plots(df, cfg, rep, branches, fit1, fit2, cal, png)
+    fig = make_plots(df, cfg, rep, branches, fit1, fit2, cal, fig=fig)
 
-    txt = rep.render()
-    print(txt)
-    (outdir / "sanity_report.txt").write_text(txt)
-    (outdir / "results.json").write_text(json.dumps(
-        {"config": asdict(cfg), "phase": phase, "fit_1f": fit1, "fit_2f": fit2,
-         "calibrated_to_ohms": cal, "signal_present": signal_ok,
-         "checks": rep.items}, indent=2, default=str))
-    print(f"\nwrote: {png}\n       {outdir/'sanity_report.txt'}"
-          f"\n       {outdir/'results.json'}")
-    return rep, fit1, fit2
+    return AnalysisResult(
+        cfg=cfg, rep=rep, fit1=fit1, fit2=fit2, fig=fig,
+        phase=phase, calibrated=cal, signal_present=signal_ok,
+    )
+
+
+def write_outputs(result: AnalysisResult) -> dict[str, Path]:
+    """
+    Write the PNG, *_sanity_report.txt and *_results.json for one
+    run_analysis() result to result.cfg.outdir, prefixed with the input
+    CSV's stem so multiple files can share one outdir (as
+    harmonic_hall_gui.py's "analyzed" folder does) without each analysis
+    overwriting the last one's outputs. Shared by run() (CLI) and
+    harmonic_hall_gui.py's "Save && Next" so the two never drift apart.
+
+    Returns the three paths written, keyed 'png' / 'report' / 'results'.
+    """
+    cfg, rep = result.cfg, result.rep
+    outdir = Path(cfg.outdir); outdir.mkdir(parents=True, exist_ok=True)
+    stem = Path(cfg.csv_path).stem
+    png = outdir / f"{stem}_harmonic_hall_analysis.png"
+    report_path = outdir / f"{stem}_sanity_report.txt"
+    results_path = outdir / f"{stem}_results.json"
+
+    result.fig.savefig(png, dpi=150)
+    report_path.write_text(rep.render())
+    results_path.write_text(json.dumps(
+        {"config": asdict(cfg), "phase": result.phase, "fit_1f": result.fit1,
+         "fit_2f": result.fit2, "calibrated_to_ohms": result.calibrated,
+         "signal_present": result.signal_present, "checks": rep.items},
+        indent=2, default=str))
+    return {"png": png, "report": report_path, "results": results_path}
+
+
+def run(cfg: Config):
+    """CLI/script entry point: run_analysis() + write_outputs() + printing."""
+    result = run_analysis(cfg)
+    print(result.rep.render())
+    paths = write_outputs(result)
+    print(f"\nwrote: {paths['png']}\n       {paths['report']}\n       {paths['results']}")
+    return result.rep, result.fit1, result.fit2
 
 
 if __name__ == "__main__":
-    cfg = Config(csv_path="../../data/chipL_dev21_8-20-10-6_100uA_phase-calibrated_113p412_20260806_101901.csv",
-                 outdir="../../data/analysis/report",
+    cfg = Config(csv_path="/Volumes/Untitled/data/chipL_dev21_8-20-10-6_800uA_20260807_111011.csv",
+                 outdir="./report",
                  current_A=100e-6, excitation_frequency_Hz=67.33,
                  time_constant_s=0.3, filter_order=4)
     if len(sys.argv) > 1:
