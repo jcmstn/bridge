@@ -10,8 +10,9 @@ sub-folder name under a hardcoded data/ root.
 
 Runs alongside the TUI, not instead of it — both remain ongoing entry
 points into the same bridge/DC, bridge/MFLI and bridge/instruments code.
-Localhost-only (127.0.0.1), no authentication — the same trust boundary
-the terminal-based TUI already has.
+Localhost-only ("localhost", not 127.0.0.1 — some network/VPN setups block
+the loopback IP specifically while allowing the hostname), no
+authentication — the same trust boundary the terminal-based TUI already has.
 
 Run with:
     uv run python app.py     (from bridge/web/)
@@ -153,4 +154,4 @@ def landing() -> None:
 
 
 if __name__ in {"__main__", "__mp_main__"}:
-    ui.run(host="127.0.0.1", port=8080, title=APP_TITLE, reload=False)
+    ui.run(host="localhost", port=8080, title=APP_TITLE, reload=False)
