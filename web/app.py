@@ -17,6 +17,21 @@ authentication — the same trust boundary the terminal-based TUI already has.
 Run with:
     uv run python app.py     (from bridge/web/)
 
+Port defaults to 8080; override with the BRIDGE_WEB_PORT env var if that
+port is unavailable, e.g.:
+    set BRIDGE_WEB_PORT=8090 && uv run python app.py     (Windows cmd)
+
+On Windows, a bind failure surfaces as OSError WinError 10013
+("forbidden by its access protection") rather than the usual "address
+already in use" — this is almost always Hyper-V/WSL2 reserving 8080 in its
+dynamic port-exclusion range, not a conflicting process. Diagnose with
+(elevated cmd):
+    netsh interface ipv4 show excludedportrange protocol=tcp
+If 8080 falls inside a listed range, either set BRIDGE_WEB_PORT to a port
+outside all listed ranges, or free it with `net stop winnat` followed by
+`net start winnat` (regenerates the exclusion list; may reassign to a new
+range on restart, so re-check after).
+
 `reload=False` is deliberate, not an oversight: NiceGUI's default file-watch
 auto-reload would restart the server process — and with it, the run lock
 and any live instrument connections — if a .py file changed mid-measurement.
@@ -24,6 +39,7 @@ and any live instrument connections — if a .py file changed mid-measurement.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -154,4 +170,5 @@ def landing() -> None:
 
 
 if __name__ in {"__main__", "__mp_main__"}:
-    ui.run(host="localhost", port=8080, title=APP_TITLE, reload=False)
+    _port = int(os.environ.get("BRIDGE_WEB_PORT", 8080))
+    ui.run(host="localhost", port=_port, title=APP_TITLE, reload=False)
