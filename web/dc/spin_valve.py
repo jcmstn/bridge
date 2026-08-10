@@ -361,18 +361,45 @@ def page() -> None:
 
     series_state: dict = {}
 
-    def init_series(n_series: int, labels: list[str]) -> None:
+    _SWEEP_UP_COLOR = "#2E3192"
+    _SWEEP_DOWN_COLOR = "#e34948"
+    _SERIES_DASH = ["solid", "dash", "dot", "dashdot", "longdash", "longdashdot"]
+
+    def init_series(n_series: int, labels: list[str], bidirectional: bool) -> None:
         fig.data = []
         series_state["traces"] = {}
-        cmap = ["#2E3192", "#e34948", "#2ca02c", "#9467bd", "#8c564b", "#17becf", "#ff7f0e", "#7f7f7f"]
+        series_state["last_I"] = {}
+        series_state["direction"] = {}
         for i in range(n_series):
-            fig.add_trace(go.Scatter(x=[], y=[], mode="lines+markers", name=labels[i],
-                                      line=dict(color=cmap[i % len(cmap)])))
-            series_state["traces"][i] = i
+            dash = _SERIES_DASH[i % len(_SERIES_DASH)]
+            up_name = "Sweep up" if n_series == 1 else f"{labels[i]} (up)"
+            fig.add_trace(go.Scatter(x=[], y=[], mode="lines+markers", name=up_name,
+                                      line=dict(color=_SWEEP_UP_COLOR, dash=dash),
+                                      marker=dict(color=_SWEEP_UP_COLOR)))
+            up_ti = len(fig.data) - 1
+            down_ti = None
+            if bidirectional:
+                down_name = "Sweep down" if n_series == 1 else f"{labels[i]} (down)"
+                fig.add_trace(go.Scatter(x=[], y=[], mode="lines+markers", name=down_name,
+                                          line=dict(color=_SWEEP_DOWN_COLOR, dash=dash),
+                                          marker=dict(color=_SWEEP_DOWN_COLOR)))
+                down_ti = len(fig.data) - 1
+            series_state["traces"][i] = (up_ti, down_ti)
+            series_state["last_I"][i] = None
+            series_state["direction"][i] = "up"
 
     def on_record(record: dict) -> None:
         idx = record.get("series_index", 0)
-        ti = series_state["traces"][idx]
+        up_ti, down_ti = series_state["traces"][idx]
+
+        I = record.get("magnet_current_A")
+        last_I = series_state["last_I"][idx]
+        if I is not None and last_I is not None and I != last_I:
+            series_state["direction"][idx] = "up" if I > last_I else "down"
+        if I is not None:
+            series_state["last_I"][idx] = I
+        ti = up_ti if down_ti is None or series_state["direction"][idx] == "up" else down_ti
+
         has_field = record.get("magnet_field_mT") is not None
         x = record["magnet_field_mT"] if has_field else record["point_index"]
         fig.data[ti].x = fig.data[ti].x + (x,)
@@ -511,7 +538,7 @@ def page() -> None:
             return
         controller["c"] = rc
 
-        init_series(len(plan.series_values), labels)
+        init_series(len(plan.series_values), labels, state["bidirectional_sweep"])
         plot.update()
         table.rows.clear()
         table.update()
