@@ -110,6 +110,7 @@ from mfli_daq import (  # noqa: E402
     connect,
     connect_device,
     setup_mds,
+    check_mds_status,
     sync_follower_oscillator,
     acquire_averaged,
 )
@@ -149,8 +150,9 @@ class OutputConfig:
     device: str          = "dev1234"   # MFLI acting as leader + bias source
     out_ch: int          = 0           # Signal Output index (0-based)
     osc_index: int       = 0           # Oscillator index
-    frequency_Hz: float  = 137.0       # AC excitation frequency [Hz]
-                                       #   (avoid 50/60 Hz harmonics)
+    frequency_Hz: float  = 317.3       # AC excitation frequency [Hz]
+                                       #   Recommended ~300-1000 Hz (1/f noise
+                                       #   below that); avoid 50/60 Hz harmonics.
     ac_amplitude_V: float = 5e-3       # AC excitation amplitude [V, peak]
                                        #   keep small — see module docstring
     series_R_ohm: float  = 1e5         # Current-limiting/protection resistor
@@ -204,7 +206,8 @@ class DemodConfig:
 class AcquisitionConfig:
     """Timing and averaging parameters."""
     settling_time_s: float = 1.5      # Dead-time after a bias step  [s]
-                                       #   Rule of thumb: ≥ 5 × TC
+                                       #   Rule of thumb: ≥ 5 × TC (order 1),
+                                       #   ≥ 10 × TC (order 3-4, the default)
     n_averages: int        = 50       # Independent demod samples to average per point
     output_file: str       = "diff_resistance_vs_bias.csv"
 
@@ -326,6 +329,7 @@ def configure_demodulator(daq: zi.ziDAQServer, cfg: DemodConfig) -> None:
         daq.setInt(   f"/{d}/demods/{di}/adcselect",     cfg.input_ch)
         daq.setInt(   f"/{d}/sigins/{cfg.input_ch}/diff",  int(cfg.differential))
         daq.setInt(   f"/{d}/sigins/{cfg.input_ch}/ac",    int(cfg.ac_coupling))
+        daq.setInt(   f"/{d}/sigins/{cfg.input_ch}/imp50", 0)   # 10 MΩ, not 50 Ω
         daq.setDouble(f"/{d}/sigins/{cfg.input_ch}/range", cfg.input_range)
         daq.setInt(   f"/{d}/sigins/{cfg.input_ch}/on",    1)
 
@@ -376,6 +380,7 @@ def run_measurement(
     on_point:     Optional[Callable[[dict], None]] = None,
     temp_ctrl: Optional[MercuryITC] = None,
     temp_cfg:  Optional[TemperatureControllerConfig] = None,
+    mds=None,
 ) -> pd.DataFrame:
     """
     Iterate over `points`, set each DC bias, acquire the current-sense and
@@ -385,6 +390,11 @@ def run_measurement(
     out of the sweep early (e.g. from a UI abort button) while still
     returning the data collected so far, so callers can run their normal
     ramp-down/shutdown path instead of killing the process outright.
+
+    `mds`, if given (the module handle setup_mds() returns), is re-checked
+    at every point via check_mds_status() — see mfli_dual_harmonic.py's
+    run_measurement() docstring for why. A drop is logged and recorded
+    ("mds_synced" column), not treated as a reason to abort.
 
     `on_point`, if given, is called with each point's `record` dict right
     after it's appended — lets a caller (e.g. a live TUI) show progress
@@ -408,6 +418,13 @@ def run_measurement(
         # ── 1. Apply bias ───────────────────────────────────────────────────
         set_bias(daq, out_cfg, pt.bias_V)
 
+        # ── 1b. MDS sync re-check ────────────────────────────────────────────
+        mds_synced = check_mds_status(mds) if mds is not None else None
+        if mds_synced is False:
+            log.error("   MDS sync has dropped — the follower's phasor may be "
+                       "corrupted (garbage/beating) until it's re-established. "
+                       "Check Ref/Trigger cabling.")
+
         # ── 2. Settle ────────────────────────────────────────────────────────
         settle = pt.settling_override_s if pt.settling_override_s is not None \
                  else acq_cfg.settling_time_s
@@ -420,10 +437,14 @@ def run_measurement(
             I_phasor = complex(i_raw["x_mean"], i_raw["y_mean"])
         else:
             I_phasor = complex(i_raw["x_mean"], i_raw["y_mean"]) / out_cfg.series_R_ohm
+        if i_raw["overload"]:
+            log.warning("   Current-sense input is OVERLOADED — this reading is not trustworthy.")
 
         # ── 4. Acquire voltage-sense phasor (follower, across the DUT) ─────────
         v_raw = acquire_averaged(daq, voltage_cfg, acq_cfg.n_averages)
         V_phasor = complex(v_raw["x_mean"], v_raw["y_mean"])
+        if v_raw["overload"]:
+            log.warning("   Voltage-sense input is OVERLOADED — this reading is not trustworthy.")
 
         # ── 5. Differential impedance Z = dV/dI ─────────────────────────────
         if abs(I_phasor) == 0:
@@ -447,15 +468,18 @@ def run_measurement(
         record = {
             "point_index":    idx,
             "timestamp":      time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "mds_synced":     mds_synced,
             "bias_V":         pt.bias_V,
             "temperature_1_K": temp_1_K,
             "temperature_2_K": temp_2_K,
             "I_ac_A":         abs(I_phasor),
             "I_ac_X_A":       I_phasor.real,
             "I_ac_Y_A":       I_phasor.imag,
+            "I_overload":     i_raw["overload"],
             "V_dut_ac_V":     abs(V_phasor),
             "V_dut_ac_X_V":   V_phasor.real,
             "V_dut_ac_Y_V":   V_phasor.imag,
+            "V_overload":     v_raw["overload"],
             "R_diff_ohm":     R_diff,
             "X_reactive_ohm": X_react,
             "Z_mag_ohm":      Z_mag,
@@ -518,12 +542,13 @@ def main() -> None:
     connect_device(daq, FOLLOWER, interface="1GbE")
 
     # ── MDS ─────────────────────────────────────────────────────────────────
-    setup_mds(daq, leader=LEADER, follower=FOLLOWER)
+    mds = setup_mds(daq, leader=LEADER, follower=FOLLOWER)
 
     # ── Output: AC excitation + DC bias on the leader ───────────────────────
     out_cfg = OutputConfig(
         device         = LEADER,
-        frequency_Hz   = 137.0,      # Hz — away from 50/60 Hz harmonics
+        frequency_Hz   = 317.3,      # Hz — recommended ~300-1000 Hz band,
+                                      #   away from 1/f noise and 50/60 Hz harmonics
         ac_amplitude_V = 5e-3,       # V  — small-signal; see module docstring
         series_R_ohm   = 1e5,        # Ω
         bias_min_V     = -0.5,       # V
@@ -533,7 +558,7 @@ def main() -> None:
     sync_follower_oscillator(daq, out_cfg, FOLLOWER)   # do NOT skip — see docstring
 
     # ── Filters ─────────────────────────────────────────────────────────────
-    #   Settling rule: settling_time_s ≥ 5 × time_constant_s
+    #   Settling rule: settling_time_s ≥ 5×TC (order 1) or ≥ 10×TC (order 4, below)
     shared_filter = FilterConfig(
         time_constant_s = 0.3,
         order           = 4,
@@ -578,7 +603,7 @@ def main() -> None:
 
     # ── Acquisition settings ─────────────────────────────────────────────────
     acq_cfg = AcquisitionConfig(
-        settling_time_s = 1.5,       # ≥ 5 × TC = 5 × 0.3 = 1.5 s
+        settling_time_s = 3.0,       # ≥ 10 × TC = 10 × 0.3 = 3.0 s (order 4 filter, above)
         n_averages      = 50,
         output_file     = str(_DATA_DIR / f"diff_resistance_vs_bias_{datetime.now():%Y%m%d_%H%M%S}.csv"),
     )
@@ -601,7 +626,7 @@ def main() -> None:
     # the DUT.
     try:
         df = run_measurement(daq, out_cfg, current_cfg, voltage_cfg, acq_cfg, points,
-                              temp_ctrl=temp_ctrl, temp_cfg=temp_cfg)
+                              temp_ctrl=temp_ctrl, temp_cfg=temp_cfg, mds=mds)
         print("\n", df.to_string(index=False))
         plot_path = Path(acq_cfg.output_file).with_suffix(".png")
         plot_results(df, plot_path)

@@ -33,6 +33,7 @@ Usage example:
 
 import time
 import logging
+from typing import Optional
 
 import numpy as np
 import zhinst.core as zi
@@ -56,7 +57,7 @@ def connect_device(daq: zi.ziDAQServer, device: str, interface: str = "1GbE") ->
         log.info("Device %s already connected", device)
 
 
-def setup_mds(daq: zi.ziDAQServer, leader: str, follower: str, timeout_s: float = 60.0) -> None:
+def setup_mds(daq: zi.ziDAQServer, leader: str, follower: str, timeout_s: float = 60.0):
     """
     Configure Multi-Device Synchronization between two MFLIs.
 
@@ -74,6 +75,12 @@ def setup_mds(daq: zi.ziDAQServer, leader: str, follower: str, timeout_s: float 
     NOTE: this synchronizes clocks and the measurement start instant — it
     does NOT copy oscillator frequency values between devices. See
     sync_follower_oscillator() below.
+
+    Returns the MultiDeviceSync module handle so a caller can poll
+    check_mds_status() on it later, mid-measurement, without re-running the
+    sync handshake — MDS can silently drop out of sync (a loose Ref/Trigger
+    cable) and there is otherwise no way to notice that partway through a
+    long sweep.
     """
     mds = daq.multiDeviceSyncModule()
 
@@ -104,6 +111,23 @@ def setup_mds(daq: zi.ziDAQServer, leader: str, follower: str, timeout_s: float 
             )
         time.sleep(0.2)
     log.info("MDS synchronized: leader=%s, follower=%s", leader, follower)
+    return mds
+
+
+def check_mds_status(mds) -> bool:
+    """
+    Re-check, mid-measurement, that MDS is still synced (status == 2) on the
+    module handle setup_mds() returned. Cheap — just a getInt on an
+    already-running module, safe to call every point/chunk of a long sweep
+    or recording. Returns False (never raises) on any other status,
+    including a module that failed outright, so callers can log/flag it and
+    decide for themselves whether to keep going.
+    """
+    try:
+        return mds.getInt("status") == 2
+    except Exception:
+        log.exception("Could not read MDS status")
+        return False
 
 
 def sync_follower_oscillator(daq: zi.ziDAQServer, out_cfg, follower: str,
@@ -152,6 +176,30 @@ def _poll_demod(daq: zi.ziDAQServer, path: str,
     return {"x": x, "y": y, "r": r, "theta_deg": theta}
 
 
+_overload_node_warned: set = set()
+
+
+def _read_overload(daq: zi.ziDAQServer, device: str, input_ch: int) -> Optional[bool]:
+    """
+    Read the Signal Input overload flag — this is the single cheapest check
+    against a silently clipped/garbage lock-in reading (front-end overload
+    produces bad output regardless of how good the demodulation settings
+    are). Returns None (rather than raising) if the node can't be read, so
+    a firmware/node-name mismatch degrades a run instead of crashing it;
+    logs that failure once per device/channel rather than once per point.
+    """
+    path = f"/{device}/sigins/{input_ch}/overload"
+    try:
+        return bool(daq.getInt(path))
+    except Exception:
+        key = (device, input_ch)
+        if key not in _overload_node_warned:
+            _overload_node_warned.add(key)
+            log.warning("Could not read overload flag at %s — overload "
+                        "will be reported as unknown for this channel.", path)
+        return None
+
+
 def acquire_averaged(daq: zi.ziDAQServer, cfg, n_averages: int) -> dict:
     """
     Collect at least `n_averages` samples from `cfg`'s demodulator and
@@ -161,7 +209,13 @@ def acquire_averaged(daq: zi.ziDAQServer, cfg, n_averages: int) -> dict:
     `cfg` only needs `.device`, `.demod_index` and `.sample_rate_Hz`
     attributes — every program's own DemodConfig shape already has these,
     so this works unchanged for any of them without a shared DemodConfig
-    type.
+    type. If `cfg` also has an `.input_ch` attribute (i.e. it's reading a
+    Signal Input, not a Current Input — checked via `.use_current_input`
+    where that attribute exists, e.g. mfli_diff_resistance_vs_bias.py's
+    current-sense channel), the returned dict includes an "overload" flag
+    read right after the poll. Current Inputs (`currins/N`) have no
+    `overload` node the same way `sigins/N` does, so that case reports
+    `None` rather than reading the wrong (unused) Signal Input's flag.
     """
     path = f"/{cfg.device}/demods/{cfg.demod_index}/sample".lower()
     # Add a 50 % margin so we comfortably exceed n_averages
@@ -174,6 +228,11 @@ def acquire_averaged(daq: zi.ziDAQServer, cfg, n_averages: int) -> dict:
     for k in raw:
         raw[k] = raw[k][-n_averages:]
 
+    input_ch = getattr(cfg, "input_ch", None)
+    uses_current_input = getattr(cfg, "use_current_input", False)
+    overload = (_read_overload(daq, cfg.device, input_ch)
+                if input_ch is not None and not uses_current_input else None)
+
     return {
         "x_mean":     float(np.mean(raw["x"])),
         "y_mean":     float(np.mean(raw["y"])),
@@ -183,4 +242,5 @@ def acquire_averaged(daq: zi.ziDAQServer, cfg, n_averages: int) -> dict:
         "x_std":      float(np.std(raw["x"])),
         "y_std":      float(np.std(raw["y"])),
         "n_samples":  len(raw["r"]),
+        "overload":   overload,
     }

@@ -78,6 +78,7 @@ from mfli_daq import (  # noqa: E402
     connect,
     connect_device,
     setup_mds,
+    check_mds_status,
     sync_follower_oscillator,
     acquire_averaged,
 )
@@ -131,8 +132,11 @@ class OutputConfig:
     device: str         = "dev1234"   # MFLI acting as leader + current source
     out_ch: int         = 0           # Signal Output index (0-based)
     osc_index: int      = 0           # Oscillator index
-    frequency_Hz: float = 17.777      # Excitation frequency  [Hz]
-                                      #   (avoid 50/60 Hz harmonics)
+    frequency_Hz: float = 317.3       # Excitation frequency  [Hz]
+                                      #   Recommended ~300-1000 Hz: below that
+                                      #   you're in the 1/f noise region of
+                                      #   contacts/amplifier/thermal drift.
+                                      #   Also avoid exact multiples of 50/60 Hz.
     amplitude_V: float  = 0.1         # Output amplitude      [V, peak)
     series_R_ohm: float = 1e6         # Series resistor       [Ω]
                                       #   → I_exc ≈ amplitude_V / series_R_ohm
@@ -166,7 +170,10 @@ class DemodConfig:
 class AcquisitionConfig:
     """Timing and averaging parameters."""
     settling_time_s: float = 1.5      # Dead-time after parameter change  [s]
-                                      #   Rule of thumb: ≥ 5 × TC  (filter settles to >99%)
+                                      #   Rule of thumb: ≥ 5 × TC for a 1st-order
+                                      #   filter, ≥ 10 × TC for 4th-order (the
+                                      #   default here) — a higher-order filter
+                                      #   settles more slowly per time constant.
     n_averages: int        = 50       # Number of independent demod samples to average
     output_file: str       = "lockin_data.csv"
 
@@ -300,13 +307,16 @@ def configure_demodulator(daq: zi.ziDAQServer, cfg: DemodConfig) -> None:
     # Signal Input configuration
     daq.setInt(   f"/{d}/sigins/{cfg.input_ch}/diff",  int(cfg.differential))
     daq.setInt(   f"/{d}/sigins/{cfg.input_ch}/ac",    int(cfg.ac_coupling))
+    daq.setInt(   f"/{d}/sigins/{cfg.input_ch}/imp50", 0)   # 10 MΩ, not 50 Ω
     daq.setDouble(f"/{d}/sigins/{cfg.input_ch}/range", cfg.input_range_V)
     daq.setInt(   f"/{d}/sigins/{cfg.input_ch}/on",    1)
 
     daq.sync()
     log.info(
-        "Demod %s/demod%d  harmonic=%df  TC=%.3f s  order=%d  rate=%.1f Sa/s",
+        "Demod %s/demod%d  harmonic=%df  TC=%.3f s  order=%d  rate=%.1f Sa/s  "
+        "diff=%s  ac=%s  imp=10MΩ",
         d, di, cfg.harmonic, flt.time_constant_s, flt.order, cfg.sample_rate_Hz,
+        cfg.differential, cfg.ac_coupling,
     )
 
 
@@ -594,6 +604,7 @@ def run_measurement(
     temp_ctrl: Optional[MercuryITC] = None,
     temp_cfg:  Optional[TemperatureControllerConfig] = None,
     geometry_cfg: Optional[SampleGeometryConfig] = None,
+    mds=None,
 ) -> pd.DataFrame:
     """
     Iterate over `points`, acquire 1f and 2f at each, log to CSV.
@@ -605,6 +616,14 @@ def run_measurement(
     out of the sweep early (e.g. from a UI abort button) while still
     returning the data collected so far, so callers can run their normal
     shutdown/cleanup path instead of killing the process outright.
+
+    `mds`, if given (the module handle setup_mds() returns), is re-checked
+    at every point via check_mds_status() — MDS can silently drop out of
+    sync mid-sweep (a loose Ref/Trigger cable), which would otherwise
+    corrupt the 2f data with no indication. A drop is logged as an error
+    and recorded per-point ("mds_synced" column) rather than aborting the
+    run, since a transient read glitch shouldn't kill an otherwise-good
+    sweep — but it means the affected rows are identifiable afterward.
 
     `on_point`, if given, is called with each point's `record` dict right
     after it's appended — lets a caller (e.g. a live TUI) show progress
@@ -653,6 +672,13 @@ def run_measurement(
         if pt.set_action is not None:
             pt.set_action(daq)
 
+        # ── 1b. MDS sync re-check ────────────────────────────────────────────
+        mds_synced = check_mds_status(mds) if mds is not None else None
+        if mds_synced is False:
+            log.error("   MDS sync has dropped — 2f data from this point on "
+                       "may be corrupted (garbage/beating phasor) until it's "
+                       "re-established. Check Ref/Trigger cabling.")
+
         # ── 2. Settle ──────────────────────────────────────────────────────
         settle = pt.settling_override_s if pt.settling_override_s is not None \
                  else acq_cfg.settling_time_s
@@ -663,11 +689,15 @@ def run_measurement(
         d1 = acquire_averaged(daq, demod1_cfg, acq_cfg.n_averages)
         log.info("   1f  R=%.4e V  θ=%.2f°  σ_R=%.2e V  (n=%d)",
                  d1["r_mean"], d1["theta_mean"], d1["r_std"], d1["n_samples"])
+        if d1["overload"]:
+            log.warning("   1f input is OVERLOADED — this reading is not trustworthy.")
 
         # ── 4. Acquire 2f ──────────────────────────────────────────────────
         d2 = acquire_averaged(daq, demod2_cfg, acq_cfg.n_averages)
         log.info("   2f  R=%.4e V  θ=%.2f°  σ_R=%.2e V  (n=%d)",
                  d2["r_mean"], d2["theta_mean"], d2["r_std"], d2["n_samples"])
+        if d2["overload"]:
+            log.warning("   2f input is OVERLOADED — this reading is not trustworthy.")
 
         # ── 4b. Measure field (Lake Shore 475 Gaussmeter) ───────────────────
         field_mT = None
@@ -688,6 +718,7 @@ def run_measurement(
         record: dict = {
             "point_index": idx,
             "timestamp":   time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "mds_synced":  mds_synced,
             # ── Magnet sweep ─────────────────────────────────────────────────
             "magnet_current_A": pt.magnet_current_A,
             "magnet_field_mT":  field_mT,
@@ -702,12 +733,14 @@ def run_measurement(
             "1f_R_V":      d1["r_mean"],
             "1f_theta_deg":d1["theta_mean"],
             "1f_R_std_V":  d1["r_std"],
+            "1f_overload": d1["overload"],
             # ── 2f ─────────────────────────────────────────────────────────
             "2f_X_V":      d2["x_mean"],
             "2f_Y_V":      d2["y_mean"],
             "2f_R_V":      d2["r_mean"],
             "2f_theta_deg":d2["theta_mean"],
             "2f_R_std_V":  d2["r_std"],
+            "2f_overload": d2["overload"],
             # ── Run metadata (excitation/demod/geometry — see build_run_metadata) ──
             **run_meta,
             # ── Add further quantities here, e.g. from other instruments ───
@@ -740,12 +773,13 @@ def main() -> None:
     connect_device(daq, FOLLOWER, interface="1GbE")
 
     # ── MDS ─────────────────────────────────────────────────────────────────
-    setup_mds(daq, leader=LEADER, follower=FOLLOWER)
+    mds = setup_mds(daq, leader=LEADER, follower=FOLLOWER)
 
     # ── Output (V → I via series resistor) ──────────────────────────────────
     out_cfg = OutputConfig(
         device        = LEADER,
-        frequency_Hz  = 17.777,      # Hz  — well away from 50 Hz harmonics
+        frequency_Hz  = 317.3,       # Hz — recommended ~300-1000 Hz band, away
+                                      #   from 1/f noise and 50 Hz harmonics
         amplitude_V   = 0.1,         # V
         series_R_ohm  = 10000,         # Ω  → I_exc ≈ 100 nA
     )
@@ -753,7 +787,7 @@ def main() -> None:
     sync_follower_oscillator(daq, out_cfg, FOLLOWER)   # do NOT skip — see module docstring
 
     # ── Filters ─────────────────────────────────────────────────────────────
-    #   Settling rule: settling_time_s  ≥  5 × time_constant_s
+    #   Settling rule: settling_time_s ≥ 5×TC (order 1) or ≥ 10×TC (order 4, below)
     shared_filter = FilterConfig(
         time_constant_s = 0.3,       # s
         order           = 4,
@@ -784,7 +818,8 @@ def main() -> None:
 
     # ── Acquisition settings ─────────────────────────────────────────────────
     acq_cfg = AcquisitionConfig(
-        settling_time_s = 15,       # ≥ 5 × TC = 5 × 0.3 = 1.5 s (wait for magnet to settle too)
+        settling_time_s = 15,       # ≥ 10 × TC = 10 × 0.3 = 3 s (magnet settling
+                                     #   dominates here, not the filter)
         n_averages      = 50,
         output_file     = str(_DATA_DIR / f"harmonic_hall_{datetime.now():%Y%m%d_%H%M%S}.csv"),
     )
@@ -872,7 +907,7 @@ def main() -> None:
         df = run_measurement(daq, out_cfg, demod1_cfg, demod2_cfg, acq_cfg, points,
                               gaussmeter=gaussmeter, gauss_cfg=gauss_cfg,
                               temp_ctrl=temp_ctrl, temp_cfg=temp_cfg,
-                              geometry_cfg=geometry_cfg)
+                              geometry_cfg=geometry_cfg, mds=mds)
         print("\n", df.to_string(index=False))
     finally:
         shutdown_output(daq, out_cfg)

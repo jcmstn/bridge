@@ -75,6 +75,7 @@ from mfli_daq import (  # noqa: E402
     connect,
     connect_device,
     setup_mds,
+    check_mds_status,
     sync_follower_oscillator,
 )
 from mercury_itc import (  # noqa: E402
@@ -107,7 +108,10 @@ class OutputConfig:
     out_ch: int         = 0           # Signal Output index (0-based)
     demod_out: int      = 0           # Demodulator that drives the output
     osc_index: int      = 0           # Oscillator index
-    frequency_Hz: float = 17.777      # Excitation frequency  [Hz]
+    frequency_Hz: float = 317.3       # Excitation frequency  [Hz]
+                                      #   Track mfli_dual_harmonic.py's real
+                                      #   operating point (recommended
+                                      #   ~300-1000 Hz band, above 1/f noise).
     amplitude_V: float  = 0.1         # Output amplitude      [V, peak]
     series_R_ohm: float = 1e6         # Series resistor       [Ω]
 
@@ -232,6 +236,7 @@ def configure_noise_demod(daq: zi.ziDAQServer, cfg: NoiseDemodConfig) -> None:
 
     daq.setInt(   f"/{d}/sigins/{cfg.input_ch}/diff",  int(cfg.differential))
     daq.setInt(   f"/{d}/sigins/{cfg.input_ch}/ac",    int(cfg.ac_coupling))
+    daq.setInt(   f"/{d}/sigins/{cfg.input_ch}/imp50", 0)   # 10 MΩ, not 50 Ω
     daq.setDouble(f"/{d}/sigins/{cfg.input_ch}/range", cfg.input_range_V)
     daq.setInt(   f"/{d}/sigins/{cfg.input_ch}/on",    1)
     daq.sync()
@@ -256,10 +261,20 @@ def configure_noise_demod(daq: zi.ziDAQServer, cfg: NoiseDemodConfig) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def acquire_time_series(daq: zi.ziDAQServer, cfg: NoiseDemodConfig,
-                         duration_s: float, chunk_s: float) -> dict:
+                         duration_s: float, chunk_s: float, mds=None) -> dict:
     """
     Stream the full raw demodulator sample record (not just averaged points)
     for `duration_s`, polling in `chunk_s` chunks so progress can be logged.
+
+    Also checked once per chunk (cheap, and this recording can run tens of
+    seconds to minutes):
+      - the Signal Input overload flag — an overloaded input makes the
+        whole noise floor meaningless, so this is worth catching before
+        trusting a spectrum;
+      - `mds` (the module handle setup_mds() returns), if given, via
+        check_mds_status() — a mid-recording sync drop would corrupt
+        the follower channel's spectrum with no other indication.
+    Both are summarized (not spammed per-chunk) in the returned dict.
     """
     d, di = cfg.device, cfg.demod_index
     path = f"/{d}/demods/{di}/sample".lower()
@@ -271,6 +286,8 @@ def acquire_time_series(daq: zi.ziDAQServer, cfg: NoiseDemodConfig,
     y_parts: List[np.ndarray] = []
     collected_s = 0.0
     t_start = time.monotonic()
+    overload_detected = False
+    mds_dropped = False
     try:
         while collected_s < duration_s - 1e-9:
             this_chunk = min(chunk_s, duration_s - collected_s)
@@ -284,8 +301,24 @@ def acquire_time_series(daq: zi.ziDAQServer, cfg: NoiseDemodConfig,
             pct = 100.0 * collected_s / duration_s
             log.info("   %-32s %5.1f%%   (%.1f / %.1f s)",
                       cfg.label + " recording:", pct, collected_s, duration_s)
+
+            try:
+                if daq.getInt(f"/{d}/sigins/{cfg.input_ch}/overload"):
+                    overload_detected = True
+            except Exception:
+                pass  # node unavailable — reported as overload_detected=False, not a crash
+
+            if mds is not None and not check_mds_status(mds):
+                mds_dropped = True
     finally:
         daq.unsubscribe(path)
+
+    if overload_detected:
+        log.warning("   %s: input was OVERLOADED at some point during this "
+                     "recording — this spectrum is not trustworthy.", cfg.label)
+    if mds_dropped:
+        log.error("   %s: MDS sync dropped during this recording — check "
+                   "Ref/Trigger cabling before trusting this spectrum.", cfg.label)
 
     if not x_parts:
         raise RuntimeError(f"No demodulator data received for {path}. "
@@ -296,7 +329,11 @@ def acquire_time_series(daq: zi.ziDAQServer, cfg: NoiseDemodConfig,
     n_expected = int(duration_s * fs)
     log.info("   %s: collected %d samples (~%d expected at %.1f Sa/s), %.1fs wall time",
               cfg.label, len(x), n_expected, fs, time.monotonic() - t_start)
-    return {"x": x, "y": y, "fs": fs}
+    return {
+        "x": x, "y": y, "fs": fs,
+        "overload_detected": overload_detected,
+        "mds_synced": (not mds_dropped) if mds is not None else None,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -339,10 +376,15 @@ def thermal_noise_asd(R_ohm: float, T_K: float) -> float:
 def measure_noise_spectrum(daq: zi.ziDAQServer, cfg: NoiseDemodConfig,
                             acq_cfg: AcquisitionConfig,
                             temp_ctrl: Optional[MercuryITC] = None,
-                            temp_cfg: Optional[TemperatureControllerConfig] = None) -> dict:
+                            temp_cfg: Optional[TemperatureControllerConfig] = None,
+                            mds=None) -> dict:
     """
     Record (possibly repeated) time series for one channel/condition and
     return its spectrum + stats.
+
+    `mds`, if given (the module handle setup_mds() returns), is passed down
+    to acquire_time_series() so a sync drop during any repeat is caught and
+    flagged (`mds_synced` in the returned dict).
 
     `temp_ctrl`/`temp_cfg`, if given, take one live temperature reading
     (temperature_1_K / temperature_2_K, via the shared MercuryiTC
@@ -359,10 +401,15 @@ def measure_noise_spectrum(daq: zi.ziDAQServer, cfg: NoiseDemodConfig,
 
     psd_x_runs, psd_y_runs = [], []
     freq = None
+    overload_detected = False
+    mds_synced = True if mds is not None else None
     for rep in range(acq_cfg.n_repeats):
         if acq_cfg.n_repeats > 1:
             log.info("   Repeat %d/%d", rep + 1, acq_cfg.n_repeats)
-        ts = acquire_time_series(daq, cfg, acq_cfg.duration_s, acq_cfg.poll_chunk_s)
+        ts = acquire_time_series(daq, cfg, acq_cfg.duration_s, acq_cfg.poll_chunk_s, mds=mds)
+        overload_detected = overload_detected or ts["overload_detected"]
+        if mds is not None and not ts["mds_synced"]:
+            mds_synced = False
         f, psd_x = compute_psd(ts["x"], ts["fs"], acq_cfg.welch_seg_s, acq_cfg.welch_overlap_frac)
         _, psd_y = compute_psd(ts["y"], ts["fs"], acq_cfg.welch_seg_s, acq_cfg.welch_overlap_frac)
         freq = f
@@ -389,6 +436,8 @@ def measure_noise_spectrum(daq: zi.ziDAQServer, cfg: NoiseDemodConfig,
         "label": cfg.label,
         "temperature_1_K": temp_1_K,
         "temperature_2_K": temp_2_K,
+        "overload_detected": overload_detected,
+        "mds_synced": mds_synced,
         **stats,
     }
 
@@ -438,6 +487,8 @@ def save_results_csv(results: Dict[Tuple[str, str], dict], out_dir: Path) -> Non
             # spectrum, not re-measured per frequency bin.
             "temperature_1_K":    [spec.get("temperature_1_K")] * n,
             "temperature_2_K":    [spec.get("temperature_2_K")] * n,
+            "overload_detected":  [spec.get("overload_detected")] * n,
+            "mds_synced":         [spec.get("mds_synced")] * n,
         }).to_csv(fname, index=False)
         log.info("Saved spectrum data: %s", fname)
 
@@ -529,13 +580,12 @@ def main() -> None:
     daq = connect("localhost", 8004)
     connect_device(daq, LEADER,   interface="1GbE")
     connect_device(daq, FOLLOWER, interface="1GbE")
-    if USE_MDS:
-        setup_mds(daq, leader=LEADER, follower=FOLLOWER)
+    mds = setup_mds(daq, leader=LEADER, follower=FOLLOWER) if USE_MDS else None
 
     # ── Output (the excitation we'll toggle on/off between conditions) ───────
     out_cfg = OutputConfig(
         device        = LEADER,
-        frequency_Hz  = 17.777,
+        frequency_Hz  = 317.3,
         amplitude_V   = 0.1,
         series_R_ohm  = 10000,
     )
@@ -629,7 +679,8 @@ def main() -> None:
                 log.info("[%d/%d] Recording noise spectrum: %s — %s",
                           step, total_steps, cond.label, cfg.label)
                 spec = measure_noise_spectrum(daq, cfg, acq_cfg,
-                                               temp_ctrl=temp_ctrl, temp_cfg=temp_cfg)
+                                               temp_ctrl=temp_ctrl, temp_cfg=temp_cfg,
+                                               mds=mds)
                 results[(cond.label, cfg.label)] = spec
                 corner_str = f"{spec['corner_freq_Hz']:.2f} Hz" if spec["corner_freq_Hz"] == spec["corner_freq_Hz"] else "n/a"
                 log.info("   → white floor %.3e V/√Hz | 1/f corner %s | RMS(%.2f–%.0f Hz) %.3e V",

@@ -106,12 +106,14 @@ DEFAULTS: dict = {
     "follower_device": "dev7886",
     "daq_host": "localhost",
     "daq_port": "8004",
-    "frequency_Hz": "17.777",
+    "frequency_Hz": "317.3",
     "amplitude_V": "0.1",
     "series_R_ohm": "10000",
     "time_constant_s": "0.3",
     "order": "4",
     "sinc_filter": True,
+    "differential": True,
+    "ac_coupling": True,
     "input_range_1f_V": "1.0",
     "input_range_2f_V": "1.0",
     "sample_rate_Hz": "857.0",
@@ -302,25 +304,29 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         errors.append("Series resistor must be > 0 Ω.")
 
     f = state["frequency_Hz"]
-    for mains in (50, 60):
-        nearest = round(f / mains) * mains
-        if nearest > 0 and abs(f - nearest) < 0.5:
-            warnings.append(
-                f"{f:g} Hz is within 0.5 Hz of a {mains} Hz harmonic ({nearest} Hz) "
-                "— mains pickup risk."
-            )
+    for label, check_f in (("1f", f), ("2f", 2 * f)):
+        for mains in (50, 60):
+            nearest = round(check_f / mains) * mains
+            if nearest > 0 and abs(check_f - nearest) < 0.5:
+                warnings.append(
+                    f"{label} ({check_f:g} Hz) is within 0.5 Hz of a {mains} Hz "
+                    f"harmonic ({nearest} Hz) — mains pickup risk."
+                )
 
     # ── Filter / timing ─────────────────────────────────────────────────────
     tc = state["time_constant_s"]
     if tc > 0:
-        recommended_settle = 5 * tc
+        # Rule of thumb: ≥5×TC for a 1st-order filter, ≥10×TC for 3rd/4th
+        # order (settles more slowly per time constant at higher order).
+        settle_multiple = 10 if state["order"] >= 3 else 5
+        recommended_settle = settle_multiple * tc
         if state["settling_time_s"] < recommended_settle:
             warnings.append(
-                f"Settling time {state['settling_time_s']:g} s < 5×TC "
-                f"({recommended_settle:g} s) — filter may not have settled."
+                f"Settling time {state['settling_time_s']:g} s < {settle_multiple}×TC "
+                f"({recommended_settle:g} s, order {state['order']}) — filter may not have settled."
             )
         else:
-            info.append(f"Settling ≥ 5×TC ({recommended_settle:g} s) ✓")
+            info.append(f"Settling ≥ {settle_multiple}×TC ({recommended_settle:g} s) ✓")
 
         bw = 1.0 / (2 * math.pi * tc)
         min_rate = 4 * bw
@@ -685,7 +691,7 @@ class RunScreen(Screen):
             connect_device(daq, plan.follower, interface="1GbE")
 
             self._set_status_threadsafe("Synchronizing MDS …")
-            setup_mds(daq, leader=plan.leader, follower=plan.follower)
+            mds = setup_mds(daq, leader=plan.leader, follower=plan.follower)
 
             self._set_status_threadsafe("Configuring output & demodulators …")
             configure_output(daq, plan.out_cfg)
@@ -753,7 +759,7 @@ class RunScreen(Screen):
                 on_point=lambda record: self.app.call_from_thread(self._on_point, record),
                 gaussmeter=gaussmeter, gauss_cfg=plan.gauss_cfg,
                 temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg,
-                geometry_cfg=plan.geometry_cfg,
+                geometry_cfg=plan.geometry_cfg, mds=mds,
             )
             final = "Measurement aborted." if self._stop_event.is_set() else "Measurement complete."
         except Exception as exc:
@@ -830,7 +836,9 @@ class MFLIDualHarmonicApp(App):
                 with Collapsible(title="Excitation (current source)", collapsed=False):
                     yield field("frequency_Hz", "Excitation frequency (Hz)",
                                 DEFAULTS["frequency_Hz"],
-                                hint="Avoid exact multiples of 50/60 Hz (mains pickup).",
+                                hint="Recommended ~300-1000 Hz — lower frequencies sit in the "
+                                     "1/f noise region of contacts/amplifier/thermal drift. "
+                                     "Avoid exact multiples of 50/60 Hz (mains pickup).",
                                 validators=[Number(minimum=1e-3, failure_description="must be > 0")])
                     yield field("amplitude_V", "Output amplitude (V, peak)",
                                 DEFAULTS["amplitude_V"],
@@ -849,6 +857,10 @@ class MFLIDualHarmonicApp(App):
                                        int(DEFAULTS["order"]))
                     yield switch_field("sinc_filter", "Sinc filter (extra harmonic rejection)",
                                        DEFAULTS["sinc_filter"])
+                    yield switch_field("differential", "Differential input (IN+/IN-)",
+                                       DEFAULTS["differential"])
+                    yield switch_field("ac_coupling", "AC-couple the input",
+                                       DEFAULTS["ac_coupling"])
                     yield field("input_range_1f_V", "1f input range (V)",
                                 DEFAULTS["input_range_1f_V"],
                                 hint="Match expected 1f signal size — avoid clipping/poor resolution.",
@@ -864,7 +876,8 @@ class MFLIDualHarmonicApp(App):
                 with Collapsible(title="Acquisition timing", collapsed=False):
                     yield field("settling_time_s", "Settling time per point (s)",
                                 DEFAULTS["settling_time_s"],
-                                hint="Rule of thumb: ≥ 5 × time constant.",
+                                hint="Rule of thumb: ≥ 5 × time constant (order 1), "
+                                     "≥ 10 × time constant (order 3-4, the default).",
                                 validators=[Number(minimum=0.0, failure_description="must be ≥ 0")])
                     yield field("n_averages", "Samples to average per point",
                                 DEFAULTS["n_averages"], kind="integer",
@@ -998,6 +1011,8 @@ class MFLIDualHarmonicApp(App):
     def collect_raw(self) -> dict:
         raw: dict = {fid: self.query_one(f"#{fid}", Input).value for fid in self._all_field_ids()}
         raw["sinc_filter"] = self.query_one("#sinc_filter", Switch).value
+        raw["differential"] = self.query_one("#differential", Switch).value
+        raw["ac_coupling"] = self.query_one("#ac_coupling", Switch).value
         raw["enable_sweep"] = self.query_one("#enable_sweep", Switch).value
         raw["enable_temperature"] = self.query_one("#enable_temperature", Switch).value
         raw["enable_phase_cal"] = self.query_one("#enable_phase_cal", Switch).value
@@ -1017,6 +1032,10 @@ class MFLIDualHarmonicApp(App):
                     pass
         if "sinc_filter" in saved:
             self.query_one("#sinc_filter", Switch).value = bool(saved["sinc_filter"])
+        if "differential" in saved:
+            self.query_one("#differential", Switch).value = bool(saved["differential"])
+        if "ac_coupling" in saved:
+            self.query_one("#ac_coupling", Switch).value = bool(saved["ac_coupling"])
         if "enable_sweep" in saved:
             self.query_one("#enable_sweep", Switch).value = bool(saved["enable_sweep"])
         if "enable_temperature" in saved:
@@ -1059,6 +1078,8 @@ class MFLIDualHarmonicApp(App):
             else:
                 state[fid] = None
         state["sinc_filter"] = self.query_one("#sinc_filter", Switch).value
+        state["differential"] = self.query_one("#differential", Switch).value
+        state["ac_coupling"] = self.query_one("#ac_coupling", Switch).value
         state["enable_sweep"] = self.query_one("#enable_sweep", Switch).value
         state["enable_temperature"] = self.query_one("#enable_temperature", Switch).value
         state["enable_phase_cal"] = self.query_one("#enable_phase_cal", Switch).value
@@ -1142,11 +1163,13 @@ class MFLIDualHarmonicApp(App):
         )
         demod1_cfg = DemodConfig(
             device=state["leader_device"], demod_index=0, harmonic=1,
+            differential=state["differential"], ac_coupling=state["ac_coupling"],
             input_range_V=state["input_range_1f_V"],
             sample_rate_Hz=state["sample_rate_Hz"], filter=filt,
         )
         demod2_cfg = DemodConfig(
             device=state["follower_device"], demod_index=0, harmonic=2,
+            differential=state["differential"], ac_coupling=state["ac_coupling"],
             input_range_V=state["input_range_2f_V"],
             sample_rate_Hz=state["sample_rate_Hz"], filter=filt,
         )
