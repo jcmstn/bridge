@@ -2,9 +2,8 @@
 """
 DC Hall Voltage Measurement — Keithley 6221 + 2182, with field sweep
 =====================================================================
-Companion to bridge/MFLI/mfli_dual_harmonic.py — same house style
-(dataclass configs, incremental CSV, stop_event/on_point hooks for a
-live UI), different (DC rather than lock-in) measurement technique.
+Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
+Created: 2026-08-04
 
 Wiring
 ------
@@ -18,38 +17,20 @@ Wiring
 Method
 ------
 Sources a fixed DC sense current with the 6221 and reads the transverse
-(Hall) voltage with the 2182. At each field point the sense current is
-reversed (+I / -I) and the voltage decomposed into an odd and even part
-over repeated +/- pairs:
-
-    V_odd  = (V(+I) - V(-I)) / 2   <- reported as "the" Hall voltage
-    V_even = (V(+I) + V(-I)) / 2   <- recorded, not discarded
-
-V_odd cancels any DC offset common to both polarities — thermal EMFs at
-the contacts, amplifier offset, etc. — that a single-polarity reading
-would fold straight into the Hall signal. But "even in current" is not
-the same thing as "boring instrumental offset": expanding V(I) =
-V_offset + R*I + beta*I^2 + gamma*I^3 + ... shows that V_odd keeps only
-odd powers of I and V_even keeps only even powers, including physics
-that genuinely lives there in spin-orbit-coupled stacks (unidirectional
-spin Hall magnetoresistance, Joule-heating-driven Delta-R(T),
-rectification-type effects) — an offset-cancelling average that only
-ever reports V_odd would silently zero all of that out. V_even is
-therefore recorded alongside V_odd on every point (columns
-hall_voltage_even_V / hall_voltage_even_std_V) rather than thrown away:
-if it's flat noise, nothing was lost; if it shows structure vs. field,
-that's a real signal current-reversal averaging alone would otherwise
-hide.
+(Hall) voltage with the 2182, reversing the current (+I / -I) at each field
+point and decomposing the voltage into odd (the reported Hall voltage) and
+even parts — see docs/current-reversal.md for why both are recorded
+(columns hall_voltage_even_V / hall_voltage_even_std_V).
 
 Magnetic field sweep
 --------------------
 A Kepco BOP-GL bipolar power supply (see kepco_magnet.KepkoBOPGL) drives
-current through an electromagnet to provide the field axis, exactly as
-in mfli_dual_harmonic.py: bidirectional_current_sweep() builds an
-up-then-down magnet-current list so hysteresis is visible, and the
-actual field at the sample is measured directly with a Lake Shore 475
-DSP Gaussmeter (see lakeshore475.LakeShore475) at each point rather than
-inferred from the magnet current via a calibration constant.
+current through an electromagnet to provide the field axis:
+bidirectional_current_sweep() builds an up-then-down magnet-current list so
+hysteresis is visible, and the actual field at the sample is measured
+directly with a Lake Shore 475 DSP Gaussmeter (see lakeshore475.LakeShore475)
+at each point rather than inferred from the magnet current via a
+calibration constant.
 
 Extensibility
 -------------
@@ -60,7 +41,6 @@ Requirements:
     pip install pymeasure pyvisa numpy pandas
 """
 
-import sys
 import time
 import logging
 import threading
@@ -72,32 +52,27 @@ from typing import Optional, Callable, List
 
 from pymeasure.instruments.keithley import Keithley2182, Keithley6221
 
-# The instrument connect/shutdown helpers live in the shared bridge/instruments
-# folder — add it to sys.path directly (it's not installed as a normal package).
-_INSTRUMENTS_DIR = Path(__file__).resolve().parent.parent / "instruments"
-if str(_INSTRUMENTS_DIR) not in sys.path:
-    sys.path.insert(0, str(_INSTRUMENTS_DIR))
-from keithley6221 import (  # noqa: E402
+from instruments.keithley6221 import (
     SourceConfig,
     connect_source,
     shutdown_source,
     acquire_reversal_averaged_voltage,
 )
-from keithley2182 import VoltmeterConfig, connect_voltmeter  # noqa: E402
-from kepco_magnet import (  # noqa: E402
+from instruments.keithley2182 import VoltmeterConfig, connect_voltmeter
+from instruments.kepco_magnet import (
     MagnetConfig,
     connect_magnet,
     set_magnet_current,
     shutdown_magnet,
 )
-from lakeshore475 import (  # noqa: E402
+from instruments.lakeshore475 import (
     LakeShore475,
     GaussmeterConfig,
     connect_gaussmeter,
     read_field_mT,
     shutdown_gaussmeter,
 )
-from mercury_itc import (  # noqa: E402
+from instruments.mercury_itc import (
     MercuryITC,
     TemperatureControllerConfig,
     connect_temperature_controller,
@@ -105,11 +80,10 @@ from mercury_itc import (  # noqa: E402
     shutdown_temperature_controller,
 )
 
-from dc_sweep_utils import linear_sweep  # noqa: E402
+from dc.dc_sweep_utils import linear_sweep
 
 # Data lives outside "bridge" (a sibling of it) so measurement output never
-# ends up inside the git-tracked source tree. Same location as the MFLI
-# programs' _DATA_DIR (bridge/DC/foo.py -> DC -> bridge -> repo root).
+# ends up inside the git-tracked source tree.
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -126,11 +100,9 @@ log = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────────────────
 # Configuration dataclasses  ── change all your parameters here ──────────────
 # ─────────────────────────────────────────────────────────────────────────────
-# SourceConfig, VoltmeterConfig, MagnetConfig and GaussmeterConfig are the same
-# shape as every other DC program's — they live in bridge/instruments/ (see
-# the keithley6221 / keithley2182 / kepco_magnet / lakeshore475 imports above)
-# instead of being redefined here. Only what's specific to this measurement
-# (the field-sweep points and acquisition timing) is defined below.
+# SourceConfig, VoltmeterConfig, MagnetConfig and GaussmeterConfig live in
+# instruments/ (see the imports above). Only what's specific to this
+# measurement (the field-sweep points and acquisition timing) is below.
 
 @dataclass
 class AcquisitionConfig:
@@ -146,8 +118,7 @@ class FieldPoint:
     One point in the measurement sequence.
 
     The magnetic field sweep (magnet_current_A below) is a worked example
-    of the general pattern for sweeping any external parameter — mirrors
-    MeasurementPoint in mfli_dual_harmonic.py:
+    of the general pattern for sweeping any external parameter:
 
         1.  Add a plain field here, e.g. temperature_K: float = 300.0
         2.  Supply a set_action that applies it.

@@ -1,8 +1,10 @@
 """
 Lake Shore Model 475 DSP Gaussmeter Driver
 ===========================================
-Built on pymeasure's Instrument architecture, the same way KEPCO
-magnet/kepco_magnet.py wraps the Kepco BOP-GL. pymeasure ships drivers for
+Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
+Created: 2026-08-03
+
+Built on pymeasure's Instrument architecture. pymeasure ships drivers for
 the 421 and 425 Gaussmeters (pymeasure.instruments.lakeshore) but not the
 475 — this fills that gap using the same proprietary command language
 that whole DSP Gaussmeter family shares (RDGFIELD?, UNIT, RANGE, AUTO,
@@ -10,15 +12,11 @@ RDGMODE, ZPROBE), modeled closely on pymeasure's own LakeShore425 driver,
 plus the IEEE-488.2 common commands (*IDN? etc.) the 475 adds courtesy of
 its full GPIB implementation.
 
-This instrument is shared by several lab programs (see kepco_magnet.py's
-docstring for the same philosophy) — add this folder to sys.path rather
-than duplicating the driver.
-
 Interface: GPIB (IEEE 488.2) or RS-232C
 Firmware command reference: Lake Shore 475 DSP Gaussmeter user's manual.
 
 Usage example:
-    from lakeshore475 import LakeShore475
+    from instruments.lakeshore475 import LakeShore475
 
     gm = LakeShore475("GPIB0::12::INSTR")
     gm.unit = "T"
@@ -27,7 +25,7 @@ Usage example:
     gm.close()
 
 Usage example (shared controller, used by the DC measurement scripts):
-    from lakeshore475 import GaussmeterConfig, connect_gaussmeter, read_field_mT, shutdown_gaussmeter
+    from instruments.lakeshore475 import GaussmeterConfig, connect_gaussmeter, read_field_mT, shutdown_gaussmeter
 
     gauss_cfg = GaussmeterConfig(visa_resource="GPIB0::12::INSTR", unit="T")
     gm = connect_gaussmeter(gauss_cfg)

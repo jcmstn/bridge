@@ -1,24 +1,23 @@
 """
 Shared page-execution engine for bridge/web
 ===============================================
+Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
+Created: 2026-08-07
+
 Every one of the 7 measurement pages follows the same shape: form -> parsed
 state -> config dataclasses -> a background thread that connects
 instruments, calls the module's existing run_measurement()-style function
 with stop_event/on_point hooks it already supports, then shuts everything
 down -> live updates streamed back to the page. This module implements that
-shape ONCE; each page supplies only what's genuinely page-specific (which
+shape once; each page supplies only what's genuinely page-specific (which
 instruments to connect, which Plotly traces a record feeds, what a final
 report looks like) via a handful of callables passed to RunController.
 
-Unlike every *_tui.py, there is no multiprocessing/OS-process isolation for
-the live plot here. That dance exists in the TUI purely because a GUI
-matplotlib backend and Textual's terminal control both fight for the main
-thread -- a browser renders its own Plotly figure in its own process, so
-the web server only needs to push data over the websocket it already has.
-One thread-safe queue.Queue carries everything (point/status/log/finished),
-drained once per ui.timer tick -- replacing the TUI's three separate
-mechanisms (multiprocessing.Queue for the plot, call_from_thread for
-status, a logging.Handler relay for the log) with one.
+There is no multiprocessing/OS-process isolation for the live plot here — a
+browser renders its own Plotly figure in its own process, so the web server
+only needs to push data over the websocket it already has. One thread-safe
+queue.Queue carries everything (point/status/log/finished), drained once
+per ui.timer tick.
 """
 
 from __future__ import annotations
@@ -32,8 +31,7 @@ from typing import Any, Callable, Optional
 
 from nicegui import ui
 
-import run_index
-import run_manager
+from web import run_index, run_manager
 
 log = logging.getLogger(__name__)
 

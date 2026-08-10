@@ -2,16 +2,18 @@
 """
 Textual TUI front-end for dc_gate_sweep.py
 =============================================
-Same house style as dc_iv_curve_tui.py / dc_hall_measurement_tui.py: lets
-you edit the parameters that decide whether a gate-voltage transfer curve
-is good or bad — sense current, gate range/step, voltmeter integration
-time, timing — without touching the dataclasses in the script itself.
+Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
+Created: 2026-07-31
 
-An optional magnet current (single value, or a comma-separated list — see
-item 1 of the gate program spec, "Field: single value or list of values")
-parks the Kepco magnet once before each gate sweep; the actual field is
-measured live via the Lake Shore 475 and logged on every row. A list runs
-one complete gate sweep per value, each saved to its own file and plotted
+Lets you edit the parameters that decide whether a gate-voltage transfer
+curve is good or bad — sense current, gate range/step, voltmeter
+integration time, timing — without touching the dataclasses in the script
+itself.
+
+An optional magnet current (single value, or a comma-separated list) parks
+the Kepco magnet once before each gate sweep; the actual field is measured
+live via the Lake Shore 475 and logged on every row. A list runs one
+complete gate sweep per value, each saved to its own file and plotted
 together in the same window with a different color.
 
 Run with:
@@ -56,7 +58,7 @@ from textual.widgets import (
     Switch,
 )
 
-from dc_gate_sweep import (
+from dc.dc_gate_sweep import (
     AcquisitionConfig,
     GateConfig,
     GatePoint,
@@ -80,12 +82,11 @@ from dc_gate_sweep import (
     shutdown_source,
     shutdown_temperature_controller,
 )
-from dc_sweep_utils import build_output_path, linear_sweep, parse_value_list
+from dc.dc_sweep_utils import build_output_path, linear_sweep, parse_value_list
 
 log = logging.getLogger("dc_gate_sweep_tui")
 
-# Data/settings live outside "bridge" (a sibling of it), same convention as
-# dc_gate_sweep.py.
+# Data/settings live outside "bridge" (a sibling of it).
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 SETTINGS_PATH = _DATA_DIR / "dc_gate_sweep_tui_settings.json"
 

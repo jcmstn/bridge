@@ -2,10 +2,12 @@
 """
 Textual TUI front-end for mfli_diff_resistance_vs_bias.py
 ===========================================================
-Same house style as mfli_dual_harmonic_tui.py: lets you edit the parameters
-that decide whether a differential-resistance (dV/dI vs. DC bias) sweep is
-good or bad — excitation, bias range, filters, timing — without touching
-the dataclasses in the script itself.
+Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
+Created: 2026-07-31
+
+Lets you edit the parameters that decide whether a differential-resistance
+(dV/dI vs. DC bias) sweep is good or bad — excitation, bias range, filters,
+timing — without touching the dataclasses in the script itself.
 
 The sidebar recomputes derived values (excitation current, output headroom
 needed, filter bandwidth, estimated sweep duration) and flags anything
@@ -56,7 +58,7 @@ from textual.widgets import (
     Switch,
 )
 
-from mfli_diff_resistance_vs_bias import (
+from mfli.mfli_diff_resistance_vs_bias import (
     AcquisitionConfig,
     BiasPoint,
     DemodConfig,

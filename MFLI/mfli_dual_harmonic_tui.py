@@ -2,6 +2,9 @@
 """
 Textual TUI front-end for mfli_dual_harmonic.py
 ================================================
+Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
+Created: 2026-07-31
+
 Lets you edit the parameters that actually decide whether a dual-harmonic
 lock-in measurement is good or bad — excitation, filters, timing, and the
 magnet sweep — without having to touch the dataclasses in the script
@@ -58,7 +61,7 @@ from textual.widgets import (
     Switch,
 )
 
-from mfli_dual_harmonic import (
+from mfli.mfli_dual_harmonic import (
     AcquisitionConfig,
     DemodConfig,
     FilterConfig,

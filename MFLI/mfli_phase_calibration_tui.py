@@ -2,6 +2,9 @@
 """
 Textual TUI front-end for mfli_phase_calibration.py
 =====================================================
+Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
+Created: 2026-07-31
+
 Lets you run the harmonic-Hall phase-calibration procedure — null the
 leader's 1f Y quadrature against the sample's own resistive Hall response,
 verify the null holds across a full field sweep, and empirically identify
@@ -49,7 +52,7 @@ from textual.widgets import (
     Switch,
 )
 
-from mfli_dual_harmonic import (
+from mfli.mfli_dual_harmonic import (
     DemodConfig,
     FilterConfig,
     GaussmeterConfig,
@@ -71,7 +74,7 @@ from mfli_dual_harmonic import (
     shutdown_temperature_controller,
     sync_follower_oscillator,
 )
-from mfli_dual_harmonic_tui import (
+from mfli.mfli_dual_harmonic_tui import (
     _LogRelay,
     _acquire_duration_s,
     field,
@@ -80,7 +83,7 @@ from mfli_dual_harmonic_tui import (
     select_field,
     switch_field,
 )
-from mfli_phase_calibration import (
+from mfli.mfli_phase_calibration import (
     AmplitudeCheckConfig,
     FrequencyCheckConfig,
     SweepConfig,

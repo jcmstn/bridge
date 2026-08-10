@@ -2,9 +2,10 @@
 """
 Differential Resistance (dV/dI) vs. DC Bias — Dual MFLI (Leader + Follower)
 =============================================================================
-Companion script to mfli_dual_harmonic.py / mfli_noise_spectrum.py — same
-house style, different measurement. Instead of harmonics or noise, this
-script superimposes a small AC excitation on top of a DC bias applied to
+Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
+Created: 2026-07-31
+
+Superimposes a small AC excitation on top of a DC bias applied to
 the DUT, sweeps that DC bias, and records the complex ratio dV/dI at each
 point (i.e. the differential/AC resistance, NOT the total V/I). This is
 the standard way to get an "I-V-curve-equivalent" characterization out of
@@ -85,7 +86,6 @@ Requirements:
     pip install zhinst-core zhinst-utils numpy pandas matplotlib
 """
 
-import sys
 import time
 import logging
 import threading
@@ -100,13 +100,7 @@ from typing import Optional, Callable, List
 import zhinst.core as zi
 import zhinst.utils as ziutils
 
-# The MFLI DAQ-server helpers and MercuryiTC driver live in the shared
-# bridge/instruments folder — add it to sys.path directly (it's not
-# installed as a normal package).
-_INSTRUMENTS_DIR = Path(__file__).resolve().parent.parent / "instruments"
-if str(_INSTRUMENTS_DIR) not in sys.path:
-    sys.path.insert(0, str(_INSTRUMENTS_DIR))
-from mfli_daq import (  # noqa: E402
+from instruments.mfli_daq import (
     connect,
     connect_device,
     setup_mds,
@@ -114,7 +108,7 @@ from mfli_daq import (  # noqa: E402
     sync_follower_oscillator,
     acquire_averaged,
 )
-from mercury_itc import (  # noqa: E402
+from instruments.mercury_itc import (
     MercuryITC,
     TemperatureControllerConfig,
     connect_temperature_controller,
@@ -223,10 +217,9 @@ class BiasPoint:
 # Instrument setup helpers
 # ─────────────────────────────────────────────────────────────────────────────
 # connect, connect_device, setup_mds and sync_follower_oscillator are
-# imported from bridge/instruments/mfli_daq.py above unchanged — see
-# mfli_dual_harmonic.py for the full rationale. Only configure_output (this
-# program's AC-excitation + DC-bias topology) and set_bias/ramp_bias_to_zero
-# stay local.
+# imported from instruments/mfli_daq.py above unchanged. configure_output
+# (this program's AC-excitation + DC-bias topology) and
+# set_bias/ramp_bias_to_zero stay local.
 
 
 def configure_output(daq: zi.ziDAQServer, cfg: OutputConfig) -> None:
@@ -360,10 +353,9 @@ def bidirectional_bias_sweep(v_min: float, v_max: float, n_points: int) -> np.nd
 # ─────────────────────────────────────────────────────────────────────────────
 # Data acquisition
 # ─────────────────────────────────────────────────────────────────────────────
-# acquire_averaged is imported from bridge/instruments/mfli_daq.py above
-# unchanged — it only needs cfg.device/.demod_index/.sample_rate_Hz, which
-# DemodConfig (above) already has. Note the shared version's return dict
-# also includes x_std/y_std (unused here, consumed by mfli_phase_calibration.py).
+# acquire_averaged is imported from instruments/mfli_daq.py above unchanged
+# — it only needs cfg.device/.demod_index/.sample_rate_Hz, which DemodConfig
+# (above) already has.
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Main measurement loop

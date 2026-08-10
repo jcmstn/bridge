@@ -2,9 +2,11 @@
 """
 Textual TUI front-end for dc_iv_curve.py
 ==========================================
-Same house style as dc_hall_measurement_tui.py / mfli_diff_resistance_tui.py:
-lets you edit the parameters that decide whether a DC I-V sweep is good
-or bad — current range, compliance, voltmeter integration time, timing —
+Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
+Created: 2026-07-31
+
+Lets you edit the parameters that decide whether a DC I-V sweep is good or
+bad — current range, compliance, voltmeter integration time, timing —
 without touching the dataclasses in the script itself.
 
 The sidebar recomputes derived values (estimated per-point acquisition
@@ -59,7 +61,7 @@ from textual.widgets import (
     Switch,
 )
 
-from dc_iv_curve import (
+from dc.dc_iv_curve import (
     AcquisitionConfig,
     CurrentPoint,
     GateConfig,
@@ -77,12 +79,11 @@ from dc_iv_curve import (
     shutdown_source,
     shutdown_temperature_controller,
 )
-from dc_sweep_utils import build_output_path, linear_sweep, parse_value_list
+from dc.dc_sweep_utils import build_output_path, linear_sweep, parse_value_list
 
 log = logging.getLogger("dc_iv_curve_tui")
 
-# Data/settings live outside "bridge" (a sibling of it), same convention as
-# dc_iv_curve.py.
+# Data/settings live outside "bridge" (a sibling of it).
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 SETTINGS_PATH = _DATA_DIR / "dc_iv_curve_tui_settings.json"
 

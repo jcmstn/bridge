@@ -2,12 +2,11 @@
 """
 NiceGUI page for mfli_phase_calibration.py
 ================================================
+Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
+Created: 2026-08-07
+
 Web equivalent of mfli_phase_calibration_tui.py. Reuses that TUI module's
-own DEFAULTS/NUMERIC_FIELDS/TEXT_FIELDS/LIST_FIELDS/build_summary() (which
-itself references format_si/format_duration/_acquire_duration_s imported
-from mfli_dual_harmonic_tui inside that module's own globals — reusing the
-function object picks those up automatically, no need to re-import them
-here).
+own DEFAULTS/NUMERIC_FIELDS/TEXT_FIELDS/LIST_FIELDS/build_summary().
 
 This is the one page that doesn't fit the plain run_measurement()->DataFrame
 pattern every other page follows: the orchestrator is
@@ -20,7 +19,6 @@ dedicated Report panel in addition to the log.
 from __future__ import annotations
 
 import json
-import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -29,33 +27,26 @@ from typing import Optional
 from plotly.subplots import make_subplots
 from nicegui import ui
 
-_INSTRUMENTS_DIR = Path(__file__).resolve().parent.parent.parent / "instruments"
-_MFLI_DIR = Path(__file__).resolve().parent.parent.parent / "MFLI"
-_WEB_DIR = Path(__file__).resolve().parent.parent
-for _p in (_INSTRUMENTS_DIR, _MFLI_DIR, _WEB_DIR):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
-
-from mfli_dual_harmonic import (  # noqa: E402
+from mfli.mfli_dual_harmonic import (
     DemodConfig, FilterConfig, GaussmeterConfig, MagnetConfig, OutputConfig,
     TemperatureControllerConfig, configure_demodulator, configure_output, connect,
     connect_device, connect_gaussmeter, connect_magnet, connect_temperature_controller,
     setup_mds, shutdown_gaussmeter, shutdown_magnet, shutdown_output,
     shutdown_temperature_controller, sync_follower_oscillator,
 )
-from mfli_phase_calibration import (  # noqa: E402
+from mfli.mfli_phase_calibration import (
     AmplitudeCheckConfig, FrequencyCheckConfig, PhaseCalibrationReport, SweepConfig,
     format_report, run_phase_calibration,
 )
-from output_paths import build_output_path  # noqa: E402
-from mfli_phase_calibration_tui import (  # noqa: E402
+from instruments.output_paths import build_output_path
+from mfli.mfli_phase_calibration_tui import (
     DEFAULTS, NUMERIC_FIELDS, TEXT_FIELDS, LIST_FIELDS, build_summary, parse_sensor_uids,
 )
-from run_controller import (  # noqa: E402
+from web.run_controller import (
     RunController, RunCallbacks, FinalStatus, num_field, text_field, bool_switch,
     render_summary, busy_banner, is_busy,
 )
-from directory_picker import directory_field, validate_directory  # noqa: E402
+from web.directory_picker import directory_field, validate_directory
 
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data"
 _SETTINGS_PATH = _DATA_DIR / "web_settings" / "mfli_phase_calibration_web_settings.json"

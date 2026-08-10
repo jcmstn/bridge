@@ -1,5 +1,8 @@
 """PySide6 GUI for batch anomalous Hall effect (AHE) analysis.
 
+Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
+Created: 2026-07-30
+
 Point it at a directory of raw Hall-sweep files; it steps through them one at
 a time. For each file, drag across a single high-field tail of the plot
 (e.g. the saturated region on the positive side) to fit the ordinary Hall
@@ -23,7 +26,7 @@ from matplotlib.figure import Figure
 from matplotlib.widgets import SpanSelector
 from PySide6 import QtWidgets
 
-import ahe_core
+from analysis import ahe_core
 
 OUTPUT_SUBDIR_NAME = "analyzed"
 

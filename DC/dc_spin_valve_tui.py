@@ -2,17 +2,18 @@
 """
 Textual TUI front-end for dc_spin_valve.py
 =============================================
-Same house style as dc_hall_measurement_tui.py / dc_gate_sweep_tui.py: lets
-you edit the parameters that decide whether a spin-valve/field-sweep
+Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
+Created: 2026-07-31
+
+Lets you edit the parameters that decide whether a spin-valve/field-sweep
 measurement is good or bad — sense current, compliance, reversal
 averaging, the magnet sweep, and the gate voltage — without touching the
 dataclasses in the script itself.
 
-The gate voltage (single value, or a comma-separated list — see item 2 of
-the gate program spec, "Gate: single value or list of values") is held
-fixed for each complete field sweep; a list runs one complete field sweep
-per gate value, each saved to its own file and plotted together in the
-same window with a different color.
+The gate voltage (single value, or a comma-separated list) is held fixed
+for each complete field sweep; a list runs one complete field sweep per
+gate value, each saved to its own file and plotted together in the same
+window with a different color.
 
 Run with:
     python dc_spin_valve_tui.py
@@ -55,7 +56,7 @@ from textual.widgets import (
     Switch,
 )
 
-from dc_spin_valve import (
+from dc.dc_spin_valve import (
     AcquisitionConfig,
     FieldPoint,
     GateConfig,
@@ -79,12 +80,11 @@ from dc_spin_valve import (
     shutdown_source,
     shutdown_temperature_controller,
 )
-from dc_sweep_utils import build_output_path, linear_sweep, parse_value_list
+from dc.dc_sweep_utils import build_output_path, linear_sweep, parse_value_list
 
 log = logging.getLogger("dc_spin_valve_tui")
 
-# Data/settings live outside "bridge" (a sibling of it), same convention as
-# dc_spin_valve.py.
+# Data/settings live outside "bridge" (a sibling of it).
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 SETTINGS_PATH = _DATA_DIR / "dc_spin_valve_tui_settings.json"
 

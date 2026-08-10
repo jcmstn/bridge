@@ -1,9 +1,12 @@
 """PySide6 GUI for batch harmonic-Hall analysis.
 
+Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
+Created: 2026-08-07
+
 Point it at a directory of mfli_dual_harmonic.py output CSVs; it steps
 through them one at a time. Each file's excitation, filter, phase and Hall
 bar metadata is read straight out of the CSV -- see build_run_metadata() in
-bridge/MFLI/mfli_dual_harmonic.py for what it writes, and
+bridge/mfli/mfli_dual_harmonic.py for what it writes, and
 harmonic_hall.apply_run_metadata() for how it's picked up here -- so nothing
 needs to be typed in for those. The panel on the right covers only the
 handful of sample properties no instrument in that script measures (Ms,
@@ -30,7 +33,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolb
 from matplotlib.figure import Figure
 from PySide6 import QtWidgets
 
-import harmonic_hall as hh
+from analysis import harmonic_hall as hh
 
 OUTPUT_SUBDIR_NAME = "analyzed"
 

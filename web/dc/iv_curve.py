@@ -2,26 +2,23 @@
 """
 NiceGUI page for dc_iv_curve.py
 ====================================
+Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
+Created: 2026-08-07
+
 Web equivalent of dc_iv_curve_tui.py. Reuses that TUI module's pure
 DEFAULTS/NUMERIC_FIELDS/TEXT_FIELDS/build_summary()/parse_sensor_uids() so
 validation stays identical to the TUI.
 
 Optional gate-voltage list means multiple complete current sweeps run per
-Start click (plan.series_values), one CSV per value plus one combined
-overlay PNG -- ported from RunScreen.do_run()'s per-series loop, just
-targeting a user-chosen data_dir instead of the fixed _DATA_DIR.
+Start click, one CSV per value plus one combined overlay PNG.
 
 Live view adds a second panel (dV/dI via np.gradient, recomputed on each
-drain tick) that the TUI's live plot doesn't show -- the TUI only computes
-that in the headless module's plot_results(), used by main(), not by the
-TUI. Showing it live here matches an artifact that already exists
-elsewhere, not a new invention.
+drain tick) alongside the raw I-V trace.
 """
 
 from __future__ import annotations
 
 import json
-import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -32,30 +29,23 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from nicegui import ui
 
-_INSTRUMENTS_DIR = Path(__file__).resolve().parent.parent.parent / "instruments"
-_DC_DIR = Path(__file__).resolve().parent.parent.parent / "DC"
-_WEB_DIR = Path(__file__).resolve().parent.parent
-for _p in (_INSTRUMENTS_DIR, _DC_DIR, _WEB_DIR):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
-
-from dc_iv_curve import (  # noqa: E402
+from dc.dc_iv_curve import (
     AcquisitionConfig, CurrentPoint, GateConfig, SourceConfig,
     TemperatureControllerConfig, VoltmeterConfig,
     connect_gate, connect_source, connect_temperature_controller, connect_voltmeter,
     ramp_current_to_zero, run_measurement, set_gate_voltage, shutdown_gate,
     shutdown_source, shutdown_temperature_controller,
 )
-from dc_sweep_utils import build_output_path, linear_sweep, parse_value_list  # noqa: E402
-from dc_iv_curve_tui import (  # noqa: E402
+from dc.dc_sweep_utils import build_output_path, linear_sweep, parse_value_list
+from dc.dc_iv_curve_tui import (
     DEFAULTS, NUMERIC_FIELDS, TEXT_FIELDS, DC_IV_DESCRIPTION,
     build_summary, parse_sensor_uids,
 )
-from run_controller import (  # noqa: E402
+from web.run_controller import (
     RunController, RunCallbacks, FinalStatus, num_field, text_field, bool_switch,
     render_summary, busy_banner, is_busy,
 )
-from directory_picker import directory_field, validate_directory  # noqa: E402
+from web.directory_picker import directory_field, validate_directory
 
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data"
 _SETTINGS_PATH = _DATA_DIR / "web_settings" / "dc_iv_curve_web_settings.json"

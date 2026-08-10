@@ -1,5 +1,8 @@
 """Core (GUI-free) analysis routines for anomalous Hall effect (AHE) measurements.
 
+Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
+Created: 2026-07-30
+
 Loads pymeasure-style measurement files, antisymmetrizes the Hall signal to
 remove even-in-field (longitudinal mixing) contamination, fits the ordinary
 Hall (linear) term over a user-chosen high-field range, and writes the

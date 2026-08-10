@@ -1,13 +1,15 @@
 """
 Keithley 2400 Gate Voltage Source — shared connect/set/shutdown helpers
 ==========================================================================
+Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
+Created: 2026-08-06
+
 The 2400 driver itself ships with pymeasure (pymeasure.instruments.keithley.
 Keithley2400) — this module holds the connect/set/shutdown wrapper functions
-that dc_gate_sweep.py, dc_iv_curve.py and dc_spin_valve.py each used to
-define an identical copy of.
+shared by the DC measurement programs.
 
 Usage example:
-    from keithley2400 import GateConfig, connect_gate, set_gate_voltage, shutdown_gate
+    from instruments.keithley2400 import GateConfig, connect_gate, set_gate_voltage, shutdown_gate
 
     gate_cfg = GateConfig(visa_resource="GPIB0::24::INSTR", gate_voltage_limit_V=20.0)
     gate = connect_gate(gate_cfg)

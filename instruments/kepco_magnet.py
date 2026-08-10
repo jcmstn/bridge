@@ -2,11 +2,14 @@
 Kepco BOP 20-50GL Bipolar Power Supply Driver
 Compatible with pymeasure's Instrument architecture.
 
+Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
+Created: 2026-07-29
+
 Interface: GPIB or RS-232C (9600 baud, 8N1)
 Firmware: 3.05+
 
 Usage example:
-    from kepco_bop_gl import KepkoBOPGL
+    from instruments.kepco_magnet import KepkoBOPGL
     import pyvisa
 
     rm = pyvisa.ResourceManager()
@@ -28,7 +31,7 @@ Usage example:
     psu.close()
 
 Usage example (shared controller, used by the DC measurement scripts):
-    from kepco_magnet import MagnetConfig, connect_magnet, set_magnet_current, shutdown_magnet
+    from instruments.kepco_magnet import MagnetConfig, connect_magnet, set_magnet_current, shutdown_magnet
 
     magnet_cfg = MagnetConfig(visa_resource="GPIB0::6::INSTR", current_limit_A=35.0)
     magnet = connect_magnet(magnet_cfg)
@@ -570,11 +573,6 @@ class KepkoBOPGL:
 # ─────────────────────────────────────────────────────────────────────────────
 # Shared controller  ── used directly by the DC measurement scripts ───────────
 # ─────────────────────────────────────────────────────────────────────────────
-# Every DC program that drives the magnet (dc_hall_measurement.py,
-# dc_gate_sweep.py, dc_spin_valve.py) armed/rammed/shut it down with an
-# identical few lines — moved here once, the same way mercury_itc.py already
-# shares its connect/read/shutdown helpers, so a new program that only needs
-# the magnet can import this instead of re-typing the setup sequence.
 
 @dataclass
 class MagnetConfig:

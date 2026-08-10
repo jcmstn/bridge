@@ -2,6 +2,9 @@
 """
 NiceGUI page for dc_spin_valve.py
 ======================================
+Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
+Created: 2026-08-07
+
 Web equivalent of dc_spin_valve_tui.py. Reuses that TUI module's pure
 DEFAULTS/NUMERIC_FIELDS/TEXT_FIELDS/build_summary()/parse_sensor_uids().
 Unlike I-V Curve / Gate Sweep, the magnet+gaussmeter are always required
@@ -13,7 +16,6 @@ gate value.
 from __future__ import annotations
 
 import json
-import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -23,14 +25,7 @@ import numpy as np
 import plotly.graph_objects as go
 from nicegui import ui
 
-_INSTRUMENTS_DIR = Path(__file__).resolve().parent.parent.parent / "instruments"
-_DC_DIR = Path(__file__).resolve().parent.parent.parent / "DC"
-_WEB_DIR = Path(__file__).resolve().parent.parent
-for _p in (_INSTRUMENTS_DIR, _DC_DIR, _WEB_DIR):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
-
-from dc_spin_valve import (  # noqa: E402
+from dc.dc_spin_valve import (
     AcquisitionConfig, FieldPoint, GateConfig, GaussmeterConfig, MagnetConfig,
     SourceConfig, TemperatureControllerConfig, VoltmeterConfig,
     connect_gate, connect_gaussmeter, connect_magnet, connect_source,
@@ -38,16 +33,16 @@ from dc_spin_valve import (  # noqa: E402
     set_gate_voltage, set_magnet_current, shutdown_gate, shutdown_gaussmeter,
     shutdown_magnet, shutdown_source, shutdown_temperature_controller,
 )
-from dc_sweep_utils import build_output_path, linear_sweep, parse_value_list  # noqa: E402
-from dc_spin_valve_tui import (  # noqa: E402
+from dc.dc_sweep_utils import build_output_path, linear_sweep, parse_value_list
+from dc.dc_spin_valve_tui import (
     DEFAULTS, NUMERIC_FIELDS, TEXT_FIELDS, DC_SPIN_VALVE_DESCRIPTION,
     build_summary, parse_sensor_uids,
 )
-from run_controller import (  # noqa: E402
+from web.run_controller import (
     RunController, RunCallbacks, FinalStatus, num_field, text_field, bool_switch,
     render_summary, busy_banner, is_busy,
 )
-from directory_picker import directory_field, validate_directory  # noqa: E402
+from web.directory_picker import directory_field, validate_directory
 
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data"
 _SETTINGS_PATH = _DATA_DIR / "web_settings" / "dc_spin_valve_web_settings.json"

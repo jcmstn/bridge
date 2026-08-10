@@ -1,31 +1,24 @@
 #!/usr/bin/env python3
 """
-Shared sweep/output-path helpers for the bridge/DC measurement programs
+Shared sweep/output-path helpers for the DC measurement programs
 ==========================================================================
-Small, pure-function utilities used by every DC measurement script
-(dc_hall_measurement.py, dc_iv_curve.py, dc_gate_sweep.py,
-dc_spin_valve.py) so the step-size/bidirectional sweep logic and the
-"single value or comma-separated list" parsing are each implemented
-exactly once.
+Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
+Created: 2026-08-05
 
-build_output_path() itself now lives in bridge/instruments/output_paths.py
-(promoted so bridge/MFLI and bridge/web can share it too, since it's pure
-pathlib logic with no DC-specific imports) and is re-exported below so
-every existing `from dc_sweep_utils import build_output_path, ...` keeps
+Small, pure-function utilities used by every DC measurement script so the
+step-size/bidirectional sweep logic and the "single value or
+comma-separated list" parsing are each implemented exactly once.
+
+build_output_path() is re-exported from instruments.output_paths so every
+existing `from dc.dc_sweep_utils import build_output_path, ...` keeps
 working unchanged.
 """
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import numpy as np
 
-_INSTRUMENTS_DIR = Path(__file__).resolve().parent.parent / "instruments"
-if str(_INSTRUMENTS_DIR) not in sys.path:
-    sys.path.insert(0, str(_INSTRUMENTS_DIR))
-from output_paths import build_output_path  # noqa: E402,F401  (re-exported — canonical copy lives in instruments/)
+from instruments.output_paths import build_output_path  # noqa: F401  (re-exported)
 
 
 def linear_sweep(start: float, stop: float, step: float, bidirectional: bool = True) -> np.ndarray:

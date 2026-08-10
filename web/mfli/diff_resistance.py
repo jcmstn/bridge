@@ -2,25 +2,21 @@
 """
 NiceGUI page for mfli_diff_resistance_vs_bias.py
 ======================================================
+Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
+Created: 2026-08-07
+
 Web equivalent of mfli_diff_resistance_tui.py. Reuses that TUI module's
 pure DEFAULTS/NUMERIC_FIELDS/TEXT_FIELDS/build_summary()/parse_sensor_uids().
 
 No magnet/gaussmeter here (this measurement has no field axis — the DC
-bias sweep is the whole measurement), so the plan/run_fn are simpler than
-dual_harmonic's. Shutdown order matters: ramp_bias_to_zero() before
-shutdown_output(), gentler on the DUT than a hard jump to 0 V — preserved
-exactly as RunScreen.do_run() already does it.
-
-Note: mfli_diff_resistance_vs_bias.py's own _DATA_DIR has a pre-existing
-off-by-one (2 parents instead of 3, landing inside bridge/ instead of the
-sibling data/ dir) -- this page never imports that constant, computing its
-own the standard way, so the bug doesn't affect it.
+bias sweep is the whole measurement). Shutdown order matters:
+ramp_bias_to_zero() before shutdown_output(), gentler on the DUT than a
+hard jump to 0 V.
 """
 
 from __future__ import annotations
 
 import json
-import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -30,29 +26,22 @@ import numpy as np
 from plotly.subplots import make_subplots
 from nicegui import ui
 
-_INSTRUMENTS_DIR = Path(__file__).resolve().parent.parent.parent / "instruments"
-_MFLI_DIR = Path(__file__).resolve().parent.parent.parent / "MFLI"
-_WEB_DIR = Path(__file__).resolve().parent.parent
-for _p in (_INSTRUMENTS_DIR, _MFLI_DIR, _WEB_DIR):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
-
-from mfli_diff_resistance_vs_bias import (  # noqa: E402
+from mfli.mfli_diff_resistance_vs_bias import (
     AcquisitionConfig, BiasPoint, DemodConfig, FilterConfig, OutputConfig,
     TemperatureControllerConfig, bidirectional_bias_sweep, configure_demodulator,
     configure_output, connect, connect_device, connect_temperature_controller,
     ramp_bias_to_zero, run_measurement, setup_mds, shutdown_output,
     shutdown_temperature_controller, sync_follower_oscillator,
 )
-from output_paths import build_output_path  # noqa: E402
-from mfli_diff_resistance_tui import (  # noqa: E402
+from instruments.output_paths import build_output_path
+from mfli.mfli_diff_resistance_tui import (
     DEFAULTS, NUMERIC_FIELDS, TEXT_FIELDS, build_summary, parse_sensor_uids,
 )
-from run_controller import (  # noqa: E402
+from web.run_controller import (
     RunController, RunCallbacks, FinalStatus, num_field, text_field, bool_switch,
     render_summary, busy_banner, is_busy,
 )
-from directory_picker import directory_field, validate_directory  # noqa: E402
+from web.directory_picker import directory_field, validate_directory
 
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data"
 _SETTINGS_PATH = _DATA_DIR / "web_settings" / "mfli_diff_resistance_web_settings.json"

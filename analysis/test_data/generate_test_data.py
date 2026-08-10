@@ -1,5 +1,8 @@
 """Generate synthetic Hall-sweep files for exercising ahe_gui.py / ahe_core.py.
 
+Author: Joacim Stenlund <joacim@stenlund.net>
+Created: 2026-07-30
+
 Writes a handful of pymeasure-style CSVs into this directory, each with a
 different combination of ordinary Hall slope (R0), anomalous Hall resistance
 (R_AHE), even-in-field contamination (simulating contact misalignment), and

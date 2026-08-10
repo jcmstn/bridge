@@ -2,10 +2,12 @@
 """
 Textual TUI front-end for dc_hall_measurement.py
 ==================================================
-Same house style as mfli_dual_harmonic_tui.py: lets you edit the
-parameters that decide whether a DC Hall measurement is good or bad —
-sense current, compliance, reversal averaging, and the magnet sweep —
-without touching the dataclasses in the script itself.
+Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
+Created: 2026-07-31
+
+Lets you edit the parameters that decide whether a DC Hall measurement is
+good or bad — sense current, compliance, reversal averaging, and the
+magnet sweep — without touching the dataclasses in the script itself.
 
 The sidebar recomputes derived values (estimated per-point acquisition
 time, estimated sweep duration) and flags anything that risks a bad
@@ -54,7 +56,7 @@ from textual.widgets import (
     Switch,
 )
 
-from dc_hall_measurement import (
+from dc.dc_hall_measurement import (
     AcquisitionConfig,
     FieldPoint,
     GaussmeterConfig,
@@ -74,7 +76,7 @@ from dc_hall_measurement import (
     shutdown_source,
     shutdown_temperature_controller,
 )
-from dc_sweep_utils import build_output_path, linear_sweep
+from dc.dc_sweep_utils import build_output_path, linear_sweep
 
 DC_HALL_DESCRIPTION = (
     "Sources a fixed DC sense current with a Keithley 6221 and reads the "

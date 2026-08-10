@@ -2,13 +2,13 @@
 """
 DC I-V Curve — Keithley 6221 (current source) + Keithley 2182 (nanovoltmeter)
 ================================================================================
-Companion to dc_hall_measurement.py / bridge/MFLI/mfli_diff_resistance_vs_bias.py
-— same house style (dataclass configs, incremental CSV, stop_event/on_point
-hooks for a live UI), but a plain DC current sweep instead of a lock-in
-bias sweep. Sweeps a DC current with the 6221 and records the DC voltage
-response with the 2182 at each point — the direct, single-frequency-free
-way to see whether a device is ohmic (straight line through the origin)
-or not (contacts, tunnel junctions, diodes, gated 2D systems, self-heating).
+Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
+Created: 2026-08-04
+
+Sweeps a DC current with the 6221 and records the DC voltage response with
+the 2182 at each point — the direct, single-frequency-free way to see
+whether a device is ohmic (straight line through the origin) or not
+(contacts, tunnel junctions, diodes, gated 2D systems, self-heating).
 
 Wiring
 ------
@@ -48,7 +48,6 @@ Requirements:
     pip install pymeasure pyvisa numpy pandas matplotlib
 """
 
-import sys
 import time
 import logging
 import threading
@@ -62,28 +61,23 @@ from typing import Optional, Callable, List
 
 from pymeasure.instruments.keithley import Keithley2182, Keithley2400, Keithley6221
 
-# The instrument connect/shutdown helpers live in the shared bridge/instruments
-# folder — add it to sys.path directly (it's not installed as a normal package).
-_INSTRUMENTS_DIR = Path(__file__).resolve().parent.parent / "instruments"
-if str(_INSTRUMENTS_DIR) not in sys.path:
-    sys.path.insert(0, str(_INSTRUMENTS_DIR))
-from keithley6221 import (  # noqa: E402
+from instruments.keithley6221 import (
     connect as connect_6221,
     shutdown_source,
     ramp_current_to_zero,
 )
-from keithley2182 import (  # noqa: E402
+from instruments.keithley2182 import (
     VoltmeterConfig,
     connect_voltmeter,
     acquire_averaged_voltage,
 )
-from keithley2400 import (  # noqa: E402
+from instruments.keithley2400 import (
     GateConfig,
     connect_gate,
     set_gate_voltage,
     shutdown_gate,
 )
-from mercury_itc import (  # noqa: E402
+from instruments.mercury_itc import (
     MercuryITC,
     TemperatureControllerConfig,
     connect_temperature_controller,
@@ -91,10 +85,9 @@ from mercury_itc import (  # noqa: E402
     shutdown_temperature_controller,
 )
 
-from dc_sweep_utils import linear_sweep  # noqa: E402
+from dc.dc_sweep_utils import linear_sweep
 
-# Data lives outside "bridge" (a sibling of it), same convention as
-# dc_hall_measurement.py / the MFLI programs.
+# Data lives outside "bridge" (a sibling of it).
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -111,11 +104,10 @@ log = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────────────────
 # Configuration dataclasses  ── change all your parameters here ──────────────
 # ─────────────────────────────────────────────────────────────────────────────
-# VoltmeterConfig and GateConfig are the same shape as every other DC
-# program's — they live in bridge/instruments/ (see the keithley2182 /
-# keithley2400 imports above). SourceConfig stays local: unlike the other DC
-# programs (which source a fixed sense current), this one sweeps the current
-# itself, so it needs sweep bounds instead of a single sense_current_A.
+# VoltmeterConfig and GateConfig live in instruments/ (see the imports
+# above). SourceConfig stays local: unlike the other DC programs (which
+# source a fixed sense current), this one sweeps the current itself, so it
+# needs sweep bounds instead of a single sense_current_A.
 
 @dataclass
 class SourceConfig:
@@ -146,10 +138,9 @@ class CurrentPoint:
 # Instrument setup helpers
 # ─────────────────────────────────────────────────────────────────────────────
 # connect_voltmeter, connect_gate, set_gate_voltage, shutdown_gate,
-# shutdown_source and ramp_current_to_zero are imported from
-# bridge/instruments/ above unchanged. Only connect_source (this program's
-# SourceConfig has sweep bounds, not the shared fixed-sense-current shape)
-# and set_current (the sweep-range guard) are specific to this program.
+# shutdown_source and ramp_current_to_zero come from instruments/ unchanged.
+# Only connect_source (sweep bounds, not the shared fixed-sense-current
+# shape) and set_current (the sweep-range guard) are specific here.
 
 def connect_source(cfg: SourceConfig) -> Keithley6221:
     """Open and configure the Keithley 6221 as a DC current source, starting at 0 A."""

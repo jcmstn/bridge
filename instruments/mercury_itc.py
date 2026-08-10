@@ -1,29 +1,26 @@
 """
 Oxford Instruments MercuryiTC Temperature Controller Driver + Controller
 =========================================================================
-Built on pymeasure's Instrument architecture, the same way
-lakeshore475.LakeShore475 wraps the Lake Shore 475 Gaussmeter. pymeasure
-ships a driver for the older ITC 503 (pymeasure.instruments.oxfordinstruments)
-but the MercuryiTC uses a completely different, newer ASCII command
-language (colon-separated, hierarchical "device" addressing rather than
-ITC 503's single-letter commands) — this fills that gap.
+Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
+Created: 2026-08-06
 
-Like lakeshore475.py, this was originally hand-built from the published
-Mercury Support command reference without hardware access. The
-temperature-read path (MercuryITC.temperature()) has since been verified
-against a real iTC and corrected to match its actual reply shape — see
-that method's docstring. Everything else in this driver (identification,
-close/context-manager handling) is still just the published reference,
-unverified.
+Built on pymeasure's Instrument architecture. pymeasure ships a driver for
+the older ITC 503 (pymeasure.instruments.oxfordinstruments) but the
+MercuryiTC uses a completely different, newer ASCII command language
+(colon-separated, hierarchical "device" addressing rather than ITC 503's
+single-letter commands) — this fills that gap.
+
+This was originally hand-built from the published Mercury Support command
+reference without hardware access. The temperature-read path
+(MercuryITC.temperature()) has since been verified against a real iTC and
+corrected to match its actual reply shape — see that method's docstring.
+Everything else in this driver (identification, close/context-manager
+handling) is still just the published reference, unverified.
 
 Interface: Ethernet (raw TCP socket, port 7020) or USB/RS-232 (same
 command set, different pyvisa resource string).
 Firmware command reference: Mercury Support Handbook, "REMOTE COMMUNICATION"
 chapter — commands of the form READ:DEV:<uid>:TEMP:SIG:TEMP.
-
-This instrument is shared by several lab programs (see kepco_magnet.py's
-docstring for the same philosophy) — add this folder to sys.path rather
-than duplicating the driver.
 
 Unlike the Kepco magnet or Lake Shore 475 (which are load-bearing parts
 of a specific measurement, so a connection failure is a real error), the
@@ -34,14 +31,14 @@ written so neither of those is ever an error: a measurement that doesn't
 otherwise need the iTC should never be interrupted by it.
 
 Usage example (low-level driver):
-    from mercury_itc import MercuryITC
+    from instruments.mercury_itc import MercuryITC
 
     mitc = MercuryITC("TCPIP0::192.168.1.5::7020::SOCKET")
     print(mitc.temperature("MB1.T1"))   # single reading, Kelvin
     mitc.close()
 
 Usage example (shared controller, used by the DC/MFLI measurement scripts):
-    from mercury_itc import (
+    from instruments.mercury_itc import (
         TemperatureControllerConfig, connect_temperature_controller,
         read_temperature, shutdown_temperature_controller,
     )
@@ -59,7 +56,7 @@ Usage example (shared controller, used by the DC/MFLI measurement scripts):
     shutdown_temperature_controller(mitc)
 
 Usage example (setpoint control, for a temperature-dependence sweep):
-    from mercury_itc import set_temperature, wait_for_temperature_stable
+    from instruments.mercury_itc import set_temperature, wait_for_temperature_stable
 
     set_temperature(mitc, temp_cfg, 4.2)                        # never blocks
     wait_for_temperature_stable(mitc, temp_cfg, 4.2,             # optional —

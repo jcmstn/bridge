@@ -30,7 +30,7 @@ import numpy as np
 
 from pymeasure.instruments import Instrument, SCPIMixin
 from pymeasure.instruments.validators import truncated_range, strict_discrete_set
-from keithley2450Buffer import Keithley2450Buffer
+from instruments.keithley2450Buffer import Keithley2450Buffer
 
 log = logging.getLogger(__name__)
 log.addHandler(logging.NullHandler())

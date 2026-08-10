@@ -2,11 +2,12 @@
 """
 DC Measurement Suite  ── single entry point for the Keithley 6221/2182/2400 TUIs
 ==================================================================================
-Same idea as bridge/MFLI/mfli_tui.py, one folder over: picks between the
-available DC (Keithley 6221 current source + 2182 nanovoltmeter, plus an
-optional/required Keithley 2400 gate depending on the program) measurement
-programs and shows a quick wiring schematic for each, so you don't have to
-remember which lead goes where before launching the full parameter form.
+Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
+Created: 2026-08-03
+
+Picks between the available DC measurement programs and shows a quick
+wiring schematic for each, so you don't have to remember which lead goes
+where before launching the full parameter form.
 
 Run with:
     python dc_tui.py
@@ -24,10 +25,10 @@ from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
 from textual.widgets import Button, Footer, Header, Static
 
-from dc_hall_measurement_tui import DC_HALL_DESCRIPTION, DCHallMeasurementApp
-from dc_iv_curve_tui import DC_IV_DESCRIPTION, DCIVCurveApp
-from dc_gate_sweep_tui import DC_GATE_SWEEP_DESCRIPTION, DCGateSweepApp
-from dc_spin_valve_tui import DC_SPIN_VALVE_DESCRIPTION, DCSpinValveApp
+from dc.dc_hall_measurement_tui import DC_HALL_DESCRIPTION, DCHallMeasurementApp
+from dc.dc_iv_curve_tui import DC_IV_DESCRIPTION, DCIVCurveApp
+from dc.dc_gate_sweep_tui import DC_GATE_SWEEP_DESCRIPTION, DCGateSweepApp
+from dc.dc_spin_valve_tui import DC_SPIN_VALVE_DESCRIPTION, DCSpinValveApp
 
 
 # ─────────────────────────────────────────────────────────────────────────────

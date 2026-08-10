@@ -2,6 +2,9 @@
 """
 Dual-MFLI Harmonic-Hall Phase Calibration
 ==========================================
+Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
+Created: 2026-08-05
+
 Calibrates the leader MFLI's 1f reference phase against the sample's own
 resistive Hall response, rather than a separate standard resistor, then
 verifies the result is trustworthy before you rely on it for a real
@@ -52,7 +55,7 @@ import numpy as np
 import pandas as pd
 import zhinst.core as zi
 
-from mfli_dual_harmonic import (
+from mfli.mfli_dual_harmonic import (
     AcquisitionConfig,  # noqa: F401  (re-exported for callers that want it)
     DemodConfig,
     FilterConfig,

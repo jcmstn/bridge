@@ -1,60 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-================================================================================
- harmonic_hall.py  --  Harmonic Hall analysis for an IN-PLANE magnetised film
-                       measured with an OUT-OF-PLANE external field.
-================================================================================
+Harmonic Hall analysis for an in-plane magnetised film measured with an
+out-of-plane external field.
 
- Geometry assumed (change SIGN CONVENTIONS below if yours differs):
+Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
+Created: 2026-08-06
 
-      z  (film normal, external field H applied along +z)
-      ^
-      |        NM / Ni bilayer, Ni easy plane = film plane
-      |
-      +-----> x   (charge current I along +x)
-     /
-    y            (spin polarisation of the SHE spin current, sigma = +y for
-                  a positive spin Hall angle with I along +x)
-
- Physics this script assumes
- ---------------------------
- R_xy = R_AHE * m_z  +  R_PHE * m_x * m_y
-
- With H along z and an easy-plane magnet, m tilts out of plane in the x-z plane:
-
-     m_z = H_z / H_K_eff        for |H_z| < H_K_eff
-     m_z = sign(H_z)            for |H_z| > H_K_eff       (hard-axis loop)
-
- The damping-like (DL) effective field is  H_DL_vec ~ H_DL * (m x sigma).
- For m = (cos(t), 0, sin(t)) and sigma = y:  m x y = (-sin(t), 0, cos(t)),
- so the z-component of the DL field is  H_DL * sqrt(1 - m_z^2).
-
-     -> The DL torque modulates m_z  ->  shows up in the AHE  ->  2f signal.
-     -> It VANISHES at out-of-plane saturation (m || z), which is a very
-        useful built-in null: whatever 2f signal survives above H_K_eff is
-        background (thermal / ANE / offset / pickup), NOT torque.
-
- The field-like (FL) effective field and the Oersted field are both || y.
- To first order they tilt m *in-plane* and therefore appear in the PHE term,
- not in the AHE term. So this measurement geometry is DL-selective. That is a
- feature, but it also means you CANNOT get H_FL from this dataset alone.
-
- Second-harmonic amplitude (see derivation in the docstring of fit_second_harmonic):
-
-     R_2f = 0.5 * H_DL * (dR_1f/dH_z) * sqrt(1 - m_z^2)   +   R_background
-
- so a plot of R_2f against  0.5 * (dR_1f/dH_z) * sqrt(1-m_z^2)  is a straight
- line whose SLOPE is H_DL and whose INTERCEPT is the non-torque background.
-
- Philosophy
- ----------
- Nothing here is trusted until it has been checked. Every quantity that gets
- reported is accompanied by a sanity check that could have failed. The script
- will happily tell you that your data is not analysable; that is the point.
- A fit that converges is not evidence that the model is right.
-
-================================================================================
+Fits the hard-axis 1f loop (H_K_eff) and the 2f damping-like torque slope
+(H_DL) from a dual-harmonic Hall sweep, with a sanity check at every step —
+nothing here is trusted until it's been checked, and a fit that converges is
+not itself evidence the model is right. See docs/harmonic-hall-theory.md for
+the geometry, sign conventions, and the full R_2f derivation this relies on
+(change the sign conventions in the code below if your setup differs).
 """
 
 from __future__ import annotations
@@ -272,7 +230,7 @@ def to_resistance(V, cfg: Config) -> tuple[np.ndarray, bool]:
 
 # Maps a column mfli_dual_harmonic.py's build_run_metadata() writes into every
 # row of its output CSV to the Config field it fills in. See that function's
-# docstring (bridge/MFLI/mfli_dual_harmonic.py) for what each column means.
+# docstring (bridge/mfli/mfli_dual_harmonic.py) for what each column means.
 # excitation_current_A_rms (not _peak) is used because the demod X/Y/R this
 # script reads are RMS -- see 'demod_output_convention' in the same file --
 # so current_A and the lock-in output are put on the same footing directly,
@@ -825,20 +783,11 @@ def fit_first_harmonic(B, S, rep: Report):
 
 def fit_second_harmonic(B, S2, fit1, rep: Report):
     """
-    Derivation of the model used here
-    ---------------------------------
-    I(t) = I0 sin(wt) generates H_DL(t) = H_DL sin(wt) along (m x sigma).
-    Its z-component is H_DL sin(wt) sqrt(1 - m_z^2), so
+    Least-squares fit of R_2f to the torque basis 0.5 * (dR_1f/dH_z) *
+    sqrt(1 - m_z^2), giving H_DL (slope) and the non-torque background
+    (intercept). See docs/harmonic-hall-theory.md for the full derivation.
 
-        dm_z(t) = (dm_z/dH_z) H_DL sqrt(1-m_z^2) sin(wt)
-        dR_xy   = R_AHE dm_z
-        V_xy(t) = I0 sin(wt) [ R_1f + R_AHE (H_DL/H_K) sqrt(1-m_z^2) sin(wt) ]
-
-    and sin^2(wt) = (1 - cos 2wt)/2, hence
-
-        R_2f = 0.5 * H_DL * (dR_1f/dH_z) * sqrt(1 - m_z^2)  +  background.
-
-    Two things worth noticing, because they are the checks that matter:
+    Two things the checks below verify:
 
     * The torque term VANISHES at out-of-plane saturation (sqrt(1-m_z^2) -> 0).
       Whatever 2f signal remains above H_K_eff is background, and it should be

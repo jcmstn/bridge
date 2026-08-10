@@ -1,27 +1,24 @@
 """
 Zhinst MFLI Lock-in DAQ Server — shared connect/MDS/acquisition helpers
 ==========================================================================
-The zhinst-core/zhinst-utils APIs (zi.ziDAQServer, the MultiDeviceSync
-module, node-tree get/set) are used directly by every bridge/MFLI program —
-this module holds the connect/MDS-sync/polling/averaging wrapper functions
-that mfli_dual_harmonic.py, mfli_diff_resistance_vs_bias.py and
-mfli_noise_spectrum.py each used to define an identical (or near-identical)
-copy of, the same way keithley6221.py etc. now share the DC programs'
-Keithley setup code.
+Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
+Created: 2026-08-06
+
+This module holds the connect/MDS-sync/polling/averaging wrapper functions
+shared by the MFLI measurement programs, built on the zhinst-core/zhinst-utils
+APIs (zi.ziDAQServer, the MultiDeviceSync module, node-tree get/set).
 
 Each program's own Signal Output topology (configure_output/OutputConfig)
 and demodulator setup (configure_demodulator/DemodConfig) genuinely differ
 — pure AC excitation vs. AC+DC bias vs. wide-bandwidth noise streaming — so
-those stay local to each script, the same way dc_iv_curve.py keeps its own
-sweep-range SourceConfig instead of using the shared fixed-sense-current
-one. sync_follower_oscillator() and acquire_averaged() below only need an
-object with the right attribute (out_cfg.frequency_Hz / cfg.device +
-cfg.demod_index + cfg.sample_rate_Hz) rather than a shared OutputConfig/
-DemodConfig type, so each script's own differently-shaped config classes
-work with them unchanged.
+those stay local to each script. sync_follower_oscillator() and
+acquire_averaged() below only need an object with the right attribute
+(out_cfg.frequency_Hz / cfg.device + cfg.demod_index + cfg.sample_rate_Hz)
+rather than a shared OutputConfig/DemodConfig type, so each script's own
+differently-shaped config classes work with them unchanged.
 
 Usage example:
-    from mfli_daq import connect, connect_device, setup_mds, acquire_averaged
+    from instruments.mfli_daq import connect, connect_device, setup_mds, acquire_averaged
 
     daq = connect("localhost", 8004)
     connect_device(daq, "dev1234", interface="1GbE")

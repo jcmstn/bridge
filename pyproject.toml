@@ -1,8 +1,10 @@
 [project]
 name = "bridge"
 version = "0.1.0"
-description = "Add your description here"
+description = "Instrument control and analysis suite for DC and MFLI lock-in measurements in a spintronics lab"
 readme = "README.md"
+license = "MIT"
+authors = [{ name = "Joacim Stenlund", email = "joacim.stenlund@physics.uu.se" }]
 requires-python = ">=3.14"
 dependencies = [
     "gpib-ctypes>=0.3.0",
@@ -20,3 +22,10 @@ dependencies = [
     "scipy>=1.18.0",
     "nicegui[plotly]>=3.15.0",
 ]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["dc*", "mfli*", "instruments*", "analysis*", "web*"]

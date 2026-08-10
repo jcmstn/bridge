@@ -1,12 +1,11 @@
 """
 Shared output-path helper for bridge measurement programs
 =============================================================
-Promoted out of bridge/DC/dc_sweep_utils.py (which still re-exports it, so
-every existing DC *_tui.py import keeps working unchanged) so both the DC
-and MFLI suites — and bridge/web/ — can build a consistent
-data_dir/subdir/prefix_timestamp.ext path without duplicating the logic.
-Pure pathlib, no DC- or MFLI-specific imports, so it belongs in
-bridge/instruments/ alongside the other cross-suite shared helpers.
+Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
+Created: 2026-08-07
+
+Builds a consistent data_dir/subdir/prefix_timestamp.ext path, used by the
+DC and MFLI measurement programs and by bridge/web/.
 """
 
 from __future__ import annotations

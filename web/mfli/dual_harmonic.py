@@ -2,22 +2,22 @@
 """
 NiceGUI page for mfli_dual_harmonic.py
 ===========================================
+Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
+Created: 2026-08-07
+
 Web equivalent of mfli_dual_harmonic_tui.py. Reuses that TUI module's pure
 DEFAULTS/NUMERIC_FIELDS/TEXT_FIELDS/OPTIONAL_NUMERIC_FIELDS/build_summary()/
 parse_sensor_uids() so validation stays identical to the TUI.
 
-Optional pre-run phase calibration (auto_null_phase) and sample-geometry
-metadata are ported unchanged from RunScreen.do_run() / build_run_metadata()
--- both already flow straight through run_measurement()'s existing
-on_point/stop_event hooks with no change needed in mfli_dual_harmonic.py
-itself.
+Supports optional pre-run phase calibration (auto_null_phase) and
+sample-geometry metadata, both flowing straight through
+run_measurement()'s existing on_point/stop_event hooks.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -28,14 +28,7 @@ import numpy as np
 from plotly.subplots import make_subplots
 from nicegui import ui
 
-_INSTRUMENTS_DIR = Path(__file__).resolve().parent.parent.parent / "instruments"
-_MFLI_DIR = Path(__file__).resolve().parent.parent.parent / "MFLI"
-_WEB_DIR = Path(__file__).resolve().parent.parent
-for _p in (_INSTRUMENTS_DIR, _MFLI_DIR, _WEB_DIR):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
-
-from mfli_dual_harmonic import (  # noqa: E402
+from mfli.mfli_dual_harmonic import (
     AcquisitionConfig, DemodConfig, FilterConfig, GaussmeterConfig, MagnetConfig,
     MeasurementPoint, OutputConfig, SampleGeometryConfig, TemperatureControllerConfig,
     acquire_averaged, auto_null_phase, bidirectional_current_sweep, configure_demodulator,
@@ -44,16 +37,16 @@ from mfli_dual_harmonic import (  # noqa: E402
     shutdown_gaussmeter, shutdown_magnet, shutdown_output, shutdown_temperature_controller,
     sync_follower_oscillator,
 )
-from output_paths import build_output_path  # noqa: E402
-from mfli_dual_harmonic_tui import (  # noqa: E402
+from instruments.output_paths import build_output_path
+from mfli.mfli_dual_harmonic_tui import (
     DEFAULTS, NUMERIC_FIELDS, TEXT_FIELDS, OPTIONAL_NUMERIC_FIELDS,
     build_summary, parse_sensor_uids,
 )
-from run_controller import (  # noqa: E402
+from web.run_controller import (
     RunController, RunCallbacks, FinalStatus, num_field, text_field, bool_switch,
     optional_num_field, render_summary, busy_banner, is_busy,
 )
-from directory_picker import directory_field, validate_directory  # noqa: E402
+from web.directory_picker import directory_field, validate_directory
 
 log = logging.getLogger("web.mfli.dual_harmonic")
 

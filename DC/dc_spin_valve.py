@@ -2,14 +2,11 @@
 """
 DC Spin-Valve / Field Sweep — Keithley 6221/2182 + Kepco magnet + gate
 ==========================================================================
-Companion to dc_hall_measurement.py / dc_gate_sweep.py — same house style
-(dataclass configs, incremental CSV, stop_event/on_point hooks for a live
-UI). Structurally this is dc_hall_measurement.py's field-sweep engine
-(magnet current swept, field measured live via the Lake Shore 475,
-+I/-I reversal averaging to cancel thermal-EMF offsets) generalized to a
-longitudinal voltage read (spin-valve / magnetoresistance) rather than a
-transverse Hall voltage, with an added fixed (or listed) gate voltage via
-a Keithley 2400.
+Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
+Created: 2026-08-04
+
+Field-swept longitudinal voltage read (spin-valve / magnetoresistance),
+with a fixed (or listed) gate voltage via a Keithley 2400.
 
 Wiring
 ------
@@ -29,28 +26,13 @@ Wiring
 Method
 ------
 Sources a fixed DC sense current with the 6221 and reads the longitudinal
-voltage with the 2182. At each field point the sense current is reversed
-(+I / -I) and the voltage decomposed into an odd and even part over
-repeated +/- pairs:
-
-    V_odd  = (V(+I) - V(-I)) / 2      <- reported as "the" voltage/R
-    V_even = (V(+I) + V(-I)) / 2      <- recorded, not discarded
-
-V_odd cancels any DC offset common to both polarities (thermal EMFs at
-the contacts, amplifier offset, etc.) — this works for any resistive
-element, not just an antisymmetric Hall response, since R itself is
-unchanged by the current's sign. But "even in current" is not the same
-thing as "boring instrumental offset": expanding V(I) = V_offset + R*I +
-beta*I^2 + gamma*I^3 + ... shows that V_odd keeps only odd powers of I
-and V_even keeps only even powers, including physics that genuinely
-lives there for spin-valve-type stacks with strong spin-orbit coupling
-(unidirectional spin Hall magnetoresistance, Joule-heating-driven
-Delta-R(T), rectification-type effects) — an offset-cancelling average
-that only ever reports V_odd would silently zero all of that out.
-V_even is therefore recorded alongside V_odd on every point (columns
-voltage_even_V / voltage_even_std_V) rather than thrown away: if it's
-flat noise, nothing was lost; if it shows structure vs. field, that's a
-real signal current-reversal averaging alone would otherwise hide.
+voltage with the 2182, reversing the current (+I / -I) at each field point
+and decomposing the voltage into odd (the reported voltage/R) and even
+parts. See docs/current-reversal.md for why both are recorded (columns
+voltage_even_V / voltage_even_std_V) — for spin-valve-type stacks with
+strong spin-orbit coupling, the even-in-current term can carry real
+physics (unidirectional SMR, Joule heating, rectification), not just
+instrumental offset.
 
 The gate voltage is held fixed for the whole field sweep (or looped over
 a list — one complete field sweep per value, each saved to its own file).
@@ -59,7 +41,6 @@ Requirements:
     pip install pymeasure pyvisa numpy pandas
 """
 
-import sys
 import time
 import logging
 import threading
@@ -71,42 +52,37 @@ from typing import Optional, Callable, List
 
 from pymeasure.instruments.keithley import Keithley2182, Keithley2400, Keithley6221
 
-# The instrument connect/shutdown helpers live in the shared bridge/instruments
-# folder — add it to sys.path directly (it's not installed as a normal package).
-_INSTRUMENTS_DIR = Path(__file__).resolve().parent.parent / "instruments"
-if str(_INSTRUMENTS_DIR) not in sys.path:
-    sys.path.insert(0, str(_INSTRUMENTS_DIR))
-from keithley6221 import (  # noqa: E402
+from instruments.keithley6221 import (
     SourceConfig,
     connect_source,
     shutdown_source,
     acquire_reversal_averaged_voltage,
 )
-from keithley2182 import (  # noqa: E402
+from instruments.keithley2182 import (
     VoltmeterConfig,
     connect_voltmeter,
     acquire_averaged_voltage,
 )
-from keithley2400 import (  # noqa: E402
+from instruments.keithley2400 import (
     GateConfig,
     connect_gate,
     set_gate_voltage,
     shutdown_gate,
 )
-from kepco_magnet import (  # noqa: E402
+from instruments.kepco_magnet import (
     MagnetConfig,
     connect_magnet,
     set_magnet_current,
     shutdown_magnet,
 )
-from lakeshore475 import (  # noqa: E402
+from instruments.lakeshore475 import (
     LakeShore475,
     GaussmeterConfig,
     connect_gaussmeter,
     read_field_mT,
     shutdown_gaussmeter,
 )
-from mercury_itc import (  # noqa: E402
+from instruments.mercury_itc import (
     MercuryITC,
     TemperatureControllerConfig,
     connect_temperature_controller,
@@ -114,7 +90,7 @@ from mercury_itc import (  # noqa: E402
     shutdown_temperature_controller,
 )
 
-from dc_sweep_utils import linear_sweep  # noqa: E402
+from dc.dc_sweep_utils import linear_sweep
 
 # Data lives outside "bridge" (a sibling of it) so measurement output never
 # ends up inside the git-tracked source tree.
@@ -135,11 +111,8 @@ log = logging.getLogger(__name__)
 # Configuration dataclasses  ── change all your parameters here ──────────────
 # ─────────────────────────────────────────────────────────────────────────────
 # SourceConfig, VoltmeterConfig, GateConfig, MagnetConfig and GaussmeterConfig
-# are the same shape as every other DC program's — they live in
-# bridge/instruments/ (see the keithley6221 / keithley2182 / keithley2400 /
-# kepco_magnet / lakeshore475 imports above) instead of being redefined here.
-# Only what's specific to this measurement (the field-sweep points and
-# acquisition timing) is defined below.
+# live in instruments/ (see the imports above). Only what's specific to this
+# measurement (the field-sweep points and acquisition timing) is below.
 
 @dataclass
 class AcquisitionConfig:
@@ -158,11 +131,10 @@ class AcquisitionConfig:
 
 @dataclass
 class FieldPoint:
-    """One point in the magnet-current sweep — mirrors FieldPoint in
-    dc_hall_measurement.py. There is no `magnet_field_mT` input field: the
-    field isn't known ahead of the sweep, it's measured live by the Lake
-    Shore 475 Gaussmeter inside run_measurement() and only appears in the
-    output `record`."""
+    """One point in the magnet-current sweep. There is no `magnet_field_mT`
+    input field: the field isn't known ahead of the sweep, it's measured
+    live by the Lake Shore 475 Gaussmeter inside run_measurement() and only
+    appears in the output `record`."""
     magnet_current_A: Optional[float] = None
     settling_override_s: Optional[float] = None
     set_action: Optional[Callable[[], None]] = field(default=None, repr=False)

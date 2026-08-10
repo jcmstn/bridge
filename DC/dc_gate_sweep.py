@@ -2,10 +2,10 @@
 """
 DC Gate Sweep — Keithley 2400 (gate) + 6221 (fixed sense current) + 2182
 ==========================================================================
-Companion to dc_iv_curve.py / dc_hall_measurement.py — same house style
-(dataclass configs, incremental CSV, stop_event/on_point hooks for a live
-UI). Where dc_iv_curve.py sweeps current at a fixed gate, this program
-sweeps the gate voltage at a fixed sense current — the standard
+Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
+Created: 2026-08-04
+
+Sweeps the gate voltage at a fixed sense current — the standard
 transfer-curve measurement for a gated device.
 
 Wiring
@@ -36,14 +36,12 @@ For each gate voltage point:
 If a magnet current is given (optional — see GatePlan in the TUI), it is
 parked once before the gate sweep starts (not swept) and the resulting
 field is measured live via the Lake Shore 475 and recorded on every row
-for reference — exactly the "field measured live, never computed from
-current" convention used throughout bridge/DC.
+for reference, rather than computed from the magnet current.
 
 Requirements:
     pip install pymeasure pyvisa numpy pandas
 """
 
-import sys
 import time
 import logging
 import threading
@@ -55,36 +53,31 @@ from typing import Optional, Callable, List
 
 from pymeasure.instruments.keithley import Keithley2182, Keithley2400, Keithley6221
 
-# The instrument connect/shutdown helpers live in the shared bridge/instruments
-# folder — add it to sys.path directly (it's not installed as a normal package).
-_INSTRUMENTS_DIR = Path(__file__).resolve().parent.parent / "instruments"
-if str(_INSTRUMENTS_DIR) not in sys.path:
-    sys.path.insert(0, str(_INSTRUMENTS_DIR))
-from keithley6221 import SourceConfig, connect_source, shutdown_source  # noqa: E402
-from keithley2182 import (  # noqa: E402
+from instruments.keithley6221 import SourceConfig, connect_source, shutdown_source
+from instruments.keithley2182 import (
     VoltmeterConfig,
     connect_voltmeter,
     acquire_averaged_voltage,
 )
-from keithley2400 import (  # noqa: E402
+from instruments.keithley2400 import (
     GateConfig,
     connect_gate,
     set_gate_voltage,
     shutdown_gate,
 )
-from kepco_magnet import (  # noqa: E402
+from instruments.kepco_magnet import (
     MagnetConfig,
     connect_magnet,
     set_magnet_current,
     shutdown_magnet,
 )
-from lakeshore475 import (  # noqa: E402
+from instruments.lakeshore475 import (
     GaussmeterConfig,
     connect_gaussmeter,
     read_field_mT,
     shutdown_gaussmeter,
 )
-from mercury_itc import (  # noqa: E402
+from instruments.mercury_itc import (
     MercuryITC,
     TemperatureControllerConfig,
     connect_temperature_controller,
@@ -92,7 +85,7 @@ from mercury_itc import (  # noqa: E402
     shutdown_temperature_controller,
 )
 
-from dc_sweep_utils import linear_sweep  # noqa: E402
+from dc.dc_sweep_utils import linear_sweep
 
 # Data lives outside "bridge" (a sibling of it) so measurement output never
 # ends up inside the git-tracked source tree.
@@ -113,11 +106,8 @@ log = logging.getLogger(__name__)
 # Configuration dataclasses  ── change all your parameters here ──────────────
 # ─────────────────────────────────────────────────────────────────────────────
 # SourceConfig, VoltmeterConfig, GateConfig, MagnetConfig and GaussmeterConfig
-# are the same shape as every other DC program's — they live in
-# bridge/instruments/ (see the keithley6221 / keithley2182 / keithley2400 /
-# kepco_magnet / lakeshore475 imports above) instead of being redefined here.
-# Only what's specific to this sweep (the gate points and acquisition timing)
-# is defined below.
+# live in instruments/ (see the imports above). Only what's specific to this
+# sweep (the gate points and acquisition timing) is defined below.
 
 @dataclass
 class AcquisitionConfig:

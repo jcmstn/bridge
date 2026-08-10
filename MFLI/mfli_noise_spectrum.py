@@ -2,12 +2,13 @@
 """
 Dual MFLI Voltage-Noise Spectrum Characterization
 ==================================================
-Companion script to mfli_dual_harmonic.py — instead of sweeping an external
-parameter and logging averaged 1f/2f points, this script records long raw
-demodulator time series on both MFLIs and turns them into voltage-noise
-amplitude spectral densities (ASD, V/√Hz). Use it to find noise floors,
-1/f corners, and mains pickup, and to check whether a wiring/shielding/
-grounding change actually helped.
+Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
+Created: 2026-07-30
+
+Records long raw demodulator time series on both MFLIs and turns them into
+voltage-noise amplitude spectral densities (ASD, V/√Hz). Use it to find
+noise floors, 1/f corners, and mains pickup, and to check whether a
+wiring/shielding/grounding change actually helped.
 
 Method (deliberately low-tech):
   These MFLIs don't have the LabOne DAQ Module's spectrum/FFT options
@@ -52,7 +53,6 @@ Requirements:
     pip install zhinst-core zhinst-utils numpy pandas scipy matplotlib
 """
 
-import sys
 import time
 import logging
 import numpy as np
@@ -65,20 +65,14 @@ import zhinst.core as zi
 from scipy import signal
 import matplotlib.pyplot as plt
 
-# The MFLI DAQ-server helpers and MercuryiTC driver live in the shared
-# bridge/instruments folder — add it to sys.path directly (it's not
-# installed as a normal package).
-_INSTRUMENTS_DIR = Path(__file__).resolve().parent.parent / "instruments"
-if str(_INSTRUMENTS_DIR) not in sys.path:
-    sys.path.insert(0, str(_INSTRUMENTS_DIR))
-from mfli_daq import (  # noqa: E402
+from instruments.mfli_daq import (
     connect,
     connect_device,
     setup_mds,
     check_mds_status,
     sync_follower_oscillator,
 )
-from mercury_itc import (  # noqa: E402
+from instruments.mercury_itc import (
     MercuryITC,
     TemperatureControllerConfig,
     connect_temperature_controller,
@@ -185,16 +179,8 @@ class Condition:
 # Instrument setup helpers
 # ─────────────────────────────────────────────────────────────────────────────
 # connect, connect_device, setup_mds and sync_follower_oscillator are
-# imported from bridge/instruments/mfli_daq.py above unchanged — see
-# mfli_dual_harmonic.py for the full explanation. Only configure_output
+# imported from instruments/mfli_daq.py above unchanged. configure_output
 # (this program's excitation on/off topology) stays local.
-#
-# Note: the shared setup_mds() calls mds.execute() before mds.set("start", 1)
-# (per the LabOne MultiDeviceSync module reference, that starts the module's
-# worker thread — without it "start" is never actually processed and status
-# sits at 0 forever). This script's own former copy of setup_mds() was
-# missing that call, which would have made every MDS sync here time out
-# after 30 s; using the shared version fixes that as a side effect.
 
 def configure_output(daq: zi.ziDAQServer, cfg: OutputConfig) -> None:
     """Set up the voltage output that drives the current through the sample."""

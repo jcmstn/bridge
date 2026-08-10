@@ -1,12 +1,14 @@
 """
 Local directory picker for bridge/web
 =========================================
-The one genuinely new capability the web frontend has over the TUI: freely
-choosing where a run's data is saved, anywhere on disk, rather than only a
-sub-folder name under a hardcoded data/ root. bridge/web runs locally on
-the same machine as the lab instruments (localhost-only, no auth — see
-bridge/web/app.py), so a server-side local-filesystem browser is safe and
-appropriate here, the same trust boundary the TUI already has.
+Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
+Created: 2026-08-07
+
+Lets a run's save directory be chosen freely anywhere on disk, rather than
+only a sub-folder name under a hardcoded data/ root. bridge/web runs
+locally on the same machine as the lab instruments (localhost-only, no
+auth — see app.py), so a server-side local-filesystem browser is safe and
+appropriate here.
 
 Adapted from NiceGUI's own upstream `local_file_picker` example
 (zauberzeug/nicegui, examples/local_file_picker/local_file_picker.py),

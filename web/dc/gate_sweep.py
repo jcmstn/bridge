@@ -2,17 +2,18 @@
 """
 NiceGUI page for dc_gate_sweep.py
 ======================================
+Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
+Created: 2026-08-07
+
 Web equivalent of dc_gate_sweep_tui.py. Reuses that TUI module's pure
 DEFAULTS/NUMERIC_FIELDS/TEXT_FIELDS/build_summary()/parse_sensor_uids().
 Optional magnet-current list means multiple complete gate sweeps run per
-Start click (plan.series_values, field parked once per value, not swept)
--- ported from RunScreen.do_run()'s per-series loop.
+Start click (field parked once per value, not swept).
 """
 
 from __future__ import annotations
 
 import json
-import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -23,14 +24,7 @@ import numpy as np
 import plotly.graph_objects as go
 from nicegui import ui
 
-_INSTRUMENTS_DIR = Path(__file__).resolve().parent.parent.parent / "instruments"
-_DC_DIR = Path(__file__).resolve().parent.parent.parent / "DC"
-_WEB_DIR = Path(__file__).resolve().parent.parent
-for _p in (_INSTRUMENTS_DIR, _DC_DIR, _WEB_DIR):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
-
-from dc_gate_sweep import (  # noqa: E402
+from dc.dc_gate_sweep import (
     AcquisitionConfig, GateConfig, GatePoint, GaussmeterConfig, MagnetConfig,
     SourceConfig, TemperatureControllerConfig, VoltmeterConfig,
     connect_gate, connect_gaussmeter, connect_magnet, connect_source,
@@ -38,16 +32,16 @@ from dc_gate_sweep import (  # noqa: E402
     set_magnet_current, shutdown_gate, shutdown_gaussmeter, shutdown_magnet,
     shutdown_source, shutdown_temperature_controller,
 )
-from dc_sweep_utils import build_output_path, linear_sweep, parse_value_list  # noqa: E402
-from dc_gate_sweep_tui import (  # noqa: E402
+from dc.dc_sweep_utils import build_output_path, linear_sweep, parse_value_list
+from dc.dc_gate_sweep_tui import (
     DEFAULTS, NUMERIC_FIELDS, TEXT_FIELDS, DC_GATE_SWEEP_DESCRIPTION,
     build_summary, parse_sensor_uids,
 )
-from run_controller import (  # noqa: E402
+from web.run_controller import (
     RunController, RunCallbacks, FinalStatus, num_field, text_field, bool_switch,
     render_summary, busy_banner, is_busy,
 )
-from directory_picker import directory_field, validate_directory  # noqa: E402
+from web.directory_picker import directory_field, validate_directory
 
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data"
 _SETTINGS_PATH = _DATA_DIR / "web_settings" / "dc_gate_sweep_web_settings.json"

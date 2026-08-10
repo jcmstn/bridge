@@ -1,18 +1,16 @@
 """
 SQLite run index for bridge/web
 ===================================
-Nothing like this exists anywhere in bridge today — every prior "settings"
-file is just the last-used form values for one TUI, not a history of runs.
-This is meant to become the entry point for a future run-picker in
-bridge/analysis/ (out of scope here — only the index itself, and it being
-populated by every run, is built now).
+Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
+Created: 2026-08-07
 
-Lives at a FIXED location (_DATA_DIR / "runs.db", the same sibling-of-bridge
-data/ directory every script's _DATA_DIR already points at by default) —
-deliberately independent of any given run's user-chosen save directory
-(bridge/web's new "choose a directory freely" feature), so the index always
-lives somewhere predictable regardless of where individual runs' data
-actually landed.
+Records every run (start, finish, status, parameters, output paths) to
+drive the landing page's run-history table.
+
+Lives at a fixed location (_DATA_DIR / "runs.db", the sibling-of-bridge
+data/ directory) — deliberately independent of any given run's user-chosen
+save directory, so the index always lives somewhere predictable regardless
+of where individual runs' data actually landed.
 
 Each helper opens a short-lived connection, does its one statement, commits,
 and closes — avoids sharing one sqlite3 connection across the worker thread

@@ -2,6 +2,9 @@
 """
 Dual MFLI Lock-in Harmonic Measurement with MDS
 ================================================
+Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
+Created: 2026-07-29
+
 Drives a current through the sample via:
     V_out (MFLI_1 Signal Output) ──[ R_series ]──> sample
 
@@ -53,7 +56,6 @@ Requirements:
     pip install zhinst-core zhinst-utils numpy pandas pyvisa
 """
 
-import sys
 import time
 import math
 import logging
@@ -68,13 +70,7 @@ from typing import Optional, Callable, List
 import zhinst.core as zi
 import zhinst.utils as ziutils
 
-# The MFLI DAQ-server helpers, Kepco magnet and Lake Shore 475 drivers live
-# in the shared bridge/instruments folder — add it to sys.path directly
-# (it's not installed as a normal package).
-_INSTRUMENTS_DIR = Path(__file__).resolve().parent.parent / "instruments"
-if str(_INSTRUMENTS_DIR) not in sys.path:
-    sys.path.insert(0, str(_INSTRUMENTS_DIR))
-from mfli_daq import (  # noqa: E402
+from instruments.mfli_daq import (
     connect,
     connect_device,
     setup_mds,
@@ -82,21 +78,21 @@ from mfli_daq import (  # noqa: E402
     sync_follower_oscillator,
     acquire_averaged,
 )
-from kepco_magnet import (  # noqa: E402
+from instruments.kepco_magnet import (
     KepkoBOPGL,
     MagnetConfig,
     connect_magnet,
     set_magnet_current,
     shutdown_magnet,
 )
-from lakeshore475 import (  # noqa: E402
+from instruments.lakeshore475 import (
     LakeShore475,
     GaussmeterConfig,
     connect_gaussmeter,
     read_field_mT,
     shutdown_gaussmeter,
 )
-from mercury_itc import (  # noqa: E402
+from instruments.mercury_itc import (
     MercuryITC,
     TemperatureControllerConfig,
     connect_temperature_controller,
@@ -122,8 +118,7 @@ log = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────────────────
 # Configuration dataclasses  ── change all your parameters here ──────────────
 # ─────────────────────────────────────────────────────────────────────────────
-# MagnetConfig and GaussmeterConfig are the same shape as bridge/DC's — they
-# live in bridge/instruments/ (see the kepco_magnet / lakeshore475 imports
+# MagnetConfig and GaussmeterConfig live in bridge/instruments/ (see imports
 # above) instead of being redefined here.
 
 @dataclass
@@ -213,12 +208,9 @@ class PhaseCalibrationResult:
 # Instrument setup helpers
 # ─────────────────────────────────────────────────────────────────────────────
 # connect, connect_device, setup_mds and sync_follower_oscillator are
-# imported from bridge/instruments/mfli_daq.py above unchanged — every MFLI
-# program connects to the LabOne data server, MDS-syncs a leader/follower
-# pair, and re-syncs the follower's oscillator the same way. Only
-# configure_output (this program's pure-AC excitation topology, not shared
-# with e.g. mfli_diff_resistance_vs_bias.py's AC+DC-bias one) and
-# set_excitation_frequency (dual_harmonic-specific) stay local.
+# imported from instruments/mfli_daq.py above unchanged. configure_output
+# (this program's pure-AC excitation topology) and set_excitation_frequency
+# stay local since each MFLI program's output topology differs.
 
 def configure_output(daq: zi.ziDAQServer, cfg: OutputConfig) -> None:
     """Set up the voltage output that drives the current through the sample."""
@@ -515,9 +507,8 @@ def auto_null_phase(
 # Magnet / gaussmeter control
 # ─────────────────────────────────────────────────────────────────────────────
 # connect_magnet, set_magnet_current, shutdown_magnet, connect_gaussmeter,
-# read_field_mT and shutdown_gaussmeter are imported from bridge/instruments/
-# (kepco_magnet.py, lakeshore475.py) above unchanged — identical to
-# bridge/DC's field-sweep programs.
+# read_field_mT and shutdown_gaussmeter are imported from instruments/
+# (kepco_magnet.py, lakeshore475.py) above unchanged.
 
 def bidirectional_current_sweep(i_min: float, i_max: float, n_points: int) -> np.ndarray:
     """
@@ -537,9 +528,9 @@ def bidirectional_current_sweep(i_min: float, i_max: float, n_points: int) -> np
 # ─────────────────────────────────────────────────────────────────────────────
 # Data acquisition
 # ─────────────────────────────────────────────────────────────────────────────
-# acquire_averaged is imported from bridge/instruments/mfli_daq.py above
-# unchanged — it only needs cfg.device/.demod_index/.sample_rate_Hz, which
-# DemodConfig (above) already has.
+# acquire_averaged is imported from instruments/mfli_daq.py above unchanged
+# — it only needs cfg.device/.demod_index/.sample_rate_Hz, which DemodConfig
+# (above) already has.
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Measurement point  ── extend this for sweeping external parameters ──────────

@@ -2,6 +2,9 @@
 """
 MFLI Measurement Suite  ── single entry point for all MFLI TUIs
 =================================================================
+Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
+Created: 2026-08-03
+
 Picks between the available dual-MFLI measurement programs and shows a
 quick wiring schematic for each, so you don't have to remember which
 signal goes where before launching the full parameter form.
@@ -22,9 +25,9 @@ from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
 from textual.widgets import Button, Footer, Header, Static
 
-from mfli_dual_harmonic_tui import MFLIDualHarmonicApp
-from mfli_diff_resistance_tui import MFLIDiffResistanceApp
-from mfli_phase_calibration_tui import MFLIPhaseCalibrationApp
+from mfli.mfli_dual_harmonic_tui import MFLIDualHarmonicApp
+from mfli.mfli_diff_resistance_tui import MFLIDiffResistanceApp
+from mfli.mfli_phase_calibration_tui import MFLIPhaseCalibrationApp
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -1,13 +1,15 @@
 """
 Keithley 2182 Nanovoltmeter — shared connect/acquisition helpers
 ===================================================================
+Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
+Created: 2026-08-06
+
 The 2182 driver itself ships with pymeasure (pymeasure.instruments.keithley.
 Keithley2182) — this module holds the connect/acquisition wrapper functions
-that dc_hall_measurement.py, dc_gate_sweep.py, dc_iv_curve.py and
-dc_spin_valve.py each used to define an identical copy of.
+shared by the DC measurement programs.
 
 Usage example:
-    from keithley2182 import VoltmeterConfig, connect_voltmeter, acquire_averaged_voltage
+    from instruments.keithley2182 import VoltmeterConfig, connect_voltmeter, acquire_averaged_voltage
 
     volt_cfg = VoltmeterConfig(visa_resource="GPIB0::7::INSTR", nplc=5)
     voltmeter = connect_voltmeter(volt_cfg)

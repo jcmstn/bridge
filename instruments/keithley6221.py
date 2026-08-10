@@ -1,16 +1,15 @@
 """
 Keithley 6221 DC Current Source — shared connect/shutdown/acquisition helpers
 ===============================================================================
+Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
+Created: 2026-08-06
+
 The 6221 driver itself ships with pymeasure (pymeasure.instruments.keithley.
 Keithley6221) — this module holds the connect/shutdown/acquisition wrapper
-functions that dc_hall_measurement.py, dc_gate_sweep.py, dc_spin_valve.py and
-dc_iv_curve.py each used to define an identical (or near-identical) copy of,
-the same way kepco_magnet.py and lakeshore475.py share their own
-connect/read/shutdown helpers instead of leaving them duplicated per-script.
+functions shared by the DC measurement programs.
 
-Usage example (fixed sense-current case — dc_hall_measurement.py,
-dc_gate_sweep.py, dc_spin_valve.py):
-    from keithley6221 import SourceConfig, connect_source, shutdown_source
+Usage example (fixed sense-current case):
+    from instruments.keithley6221 import SourceConfig, connect_source, shutdown_source
 
     src_cfg = SourceConfig(visa_resource="GPIB0::12::INSTR", sense_current_A=1e-3)
     source = connect_source(src_cfg)
@@ -100,32 +99,13 @@ def acquire_reversal_averaged_voltage(
 ) -> dict:
     """
     Reverse the sense current n_reversals times and decompose the resulting
-    voltage into its odd and even parts in I:
-
-        V_odd  = (V(+I) - V(-I)) / 2   — the resistive signal (R = V_odd/I);
-                                          cancels any offset common to both
-                                          polarities (thermal EMFs at the
-                                          contacts, amplifier offset, etc.),
-                                          since a true offset doesn't flip
-                                          sign with the current but R does
-        V_even = (V(+I) + V(-I)) / 2   — everything that DOES share the
-                                          offset's sign symmetry: a real
-                                          instrumental offset, but also any
-                                          genuine even-in-I physics (e.g.
-                                          unidirectional SMR, I^2 Joule
-                                          heating) that V_odd alone would
-                                          silently discard
-
-    Both are returned (and both get logged to the CSV by the caller) so
-    V_even can be checked after the fact instead of being thrown away.
+    voltage into its odd part (V_odd, the resistive signal) and even part
+    (V_even, offset plus any genuinely even-in-current physics) — both are
+    returned rather than just V_odd; see docs/current-reversal.md for why.
 
     `source_delay_s`, if given, is slept after each polarity flip before the
-    voltmeter is read — a plain property write (`source.source_current =
-    ...`) does not itself wait for `source_delay_s` (that instrument
-    register only governs the 6221's own triggered/delta-sweep timing, not
-    a bare write), so without this the voltmeter can be read before the
-    reversed current has actually settled, especially noticeable as
-    n_reversals grows and many flips happen back-to-back.
+    voltmeter is read — a plain property write does not itself wait for the
+    reversed current to settle.
 
     Leaves the source at +sense_current_A on return. If `stop_event` fires
     partway through, returns the mean/std of whatever pairs were already

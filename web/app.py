@@ -2,14 +2,15 @@
 """
 bridge/web — NiceGUI entrypoint
 ====================================
-Alternative front end to the Textual TUI (bridge/DC/dc_tui.py,
-bridge/MFLI/mfli_tui.py), covering the same 7 measurements plus one new
-capability the TUI doesn't have: freely choosing the save directory for a
-run, anywhere on disk (see directory_picker.py), rather than only a
-sub-folder name under a hardcoded data/ root.
+Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
+Created: 2026-08-07
 
-Runs alongside the TUI, not instead of it — both remain ongoing entry
-points into the same bridge/DC, bridge/MFLI and bridge/instruments code.
+Alternative front end to the Textual TUI (dc/dc_tui.py, mfli/mfli_tui.py),
+covering the same 7 measurements plus one new capability the TUI doesn't
+have: freely choosing the save directory for a run, anywhere on disk (see
+directory_picker.py), rather than only a sub-folder name under a hardcoded
+data/ root. Runs alongside the TUI, not instead of it.
+
 Localhost-only ("localhost", not 127.0.0.1 — some network/VPN setups block
 the loopback IP specifically while allowing the hostname), no
 authentication — the same trust boundary the terminal-based TUI already has.
@@ -21,16 +22,9 @@ Port defaults to 8080; override with the BRIDGE_WEB_PORT env var if that
 port is unavailable, e.g.:
     set BRIDGE_WEB_PORT=8090 && uv run python app.py     (Windows cmd)
 
-On Windows, a bind failure surfaces as OSError WinError 10013
-("forbidden by its access protection") rather than the usual "address
-already in use" — this is almost always Hyper-V/WSL2 reserving 8080 in its
-dynamic port-exclusion range, not a conflicting process. Diagnose with
-(elevated cmd):
-    netsh interface ipv4 show excludedportrange protocol=tcp
-If 8080 falls inside a listed range, either set BRIDGE_WEB_PORT to a port
-outside all listed ranges, or free it with `net stop winnat` followed by
-`net start winnat` (regenerates the exclusion list; may reassign to a new
-range on restart, so re-check after).
+On Windows, a bind failure at this port is usually Hyper-V/WSL2 port
+reservation, not a conflicting process — see the README Troubleshooting
+section.
 
 `reload=False` is deliberate, not an oversight: NiceGUI's default file-watch
 auto-reload would restart the server process — and with it, the run lock
@@ -40,28 +34,13 @@ and any live instrument connections — if a .py file changed mid-measurement.
 from __future__ import annotations
 
 import os
-import sys
-from pathlib import Path
 
 from nicegui import ui
 
-_WEB_DIR = Path(__file__).resolve().parent
-_DC_DIR = _WEB_DIR / "dc"
-_MFLI_DIR = _WEB_DIR / "mfli"
-for _p in (_WEB_DIR, _DC_DIR, _MFLI_DIR):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
-
-import hall               # noqa: E402
-import iv_curve            # noqa: E402
-import gate_sweep          # noqa: E402
-import spin_valve          # noqa: E402
-import dual_harmonic       # noqa: E402
-import diff_resistance     # noqa: E402
-import phase_calibration   # noqa: E402
-
-import run_index  # noqa: E402
-from run_controller import busy_banner  # noqa: E402
+from web.dc import hall, iv_curve, gate_sweep, spin_valve
+from web.mfli import dual_harmonic, diff_resistance, phase_calibration
+from web import run_index
+from web.run_controller import busy_banner
 
 APP_TITLE = "Bridge Measurement Suite"
 

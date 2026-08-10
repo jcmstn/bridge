@@ -2,19 +2,19 @@
 """
 NiceGUI page for dc_hall_measurement.py
 ===========================================
+Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
+Created: 2026-08-07
+
 Web equivalent of dc_hall_measurement_tui.py. Reuses that TUI module's pure
 (Textual-independent) DEFAULTS/NUMERIC_FIELDS/TEXT_FIELDS/build_summary() so
-validation stays identical between the TUI and the web page rather than
-drifting apart as two hand-maintained copies -- the only things
-reimplemented here are the layout (NiceGUI instead of Textual widgets) and
-plan-building (adds a free-choice `data_dir` in place of the TUI's fixed
-_DATA_DIR).
+validation stays identical between the TUI and the web page — only the
+layout (NiceGUI instead of Textual widgets) and plan-building (a free-choice
+`data_dir` in place of the TUI's fixed _DATA_DIR) are reimplemented here.
 """
 
 from __future__ import annotations
 
 import json
-import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -24,30 +24,23 @@ import numpy as np
 import plotly.graph_objects as go
 from nicegui import ui
 
-_INSTRUMENTS_DIR = Path(__file__).resolve().parent.parent.parent / "instruments"
-_DC_DIR = Path(__file__).resolve().parent.parent.parent / "DC"
-_WEB_DIR = Path(__file__).resolve().parent.parent
-for _p in (_INSTRUMENTS_DIR, _DC_DIR, _WEB_DIR):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
-
-from dc_hall_measurement import (  # noqa: E402
+from dc.dc_hall_measurement import (
     AcquisitionConfig, FieldPoint, GaussmeterConfig, MagnetConfig, SourceConfig,
     TemperatureControllerConfig, VoltmeterConfig,
     connect_gaussmeter, connect_magnet, connect_source, connect_temperature_controller,
     connect_voltmeter, run_measurement, set_magnet_current, shutdown_gaussmeter,
     shutdown_magnet, shutdown_source, shutdown_temperature_controller,
 )
-from dc_sweep_utils import build_output_path, linear_sweep  # noqa: E402
-from dc_hall_measurement_tui import (  # noqa: E402
+from dc.dc_sweep_utils import build_output_path, linear_sweep
+from dc.dc_hall_measurement_tui import (
     DEFAULTS, NUMERIC_FIELDS, TEXT_FIELDS, DC_HALL_DESCRIPTION,
     build_summary, parse_sensor_uids,
 )
-from run_controller import (  # noqa: E402
+from web.run_controller import (
     RunController, RunCallbacks, FinalStatus, num_field, text_field, bool_switch,
     render_summary, busy_banner, is_busy, format_duration,
 )
-from directory_picker import directory_field, validate_directory  # noqa: E402
+from web.directory_picker import directory_field, validate_directory
 
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data"
 _SETTINGS_PATH = _DATA_DIR / "web_settings" / "dc_hall_web_settings.json"
