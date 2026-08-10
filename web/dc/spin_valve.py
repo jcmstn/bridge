@@ -60,19 +60,19 @@ SUITE = "DC"
 class MeasurementPlan:
     src_cfg: SourceConfig
     volt_cfg: VoltmeterConfig
-    gate_cfg: GateConfig
     magnet_cfg: MagnetConfig
     gauss_cfg: GaussmeterConfig
     acq_cfg: AcquisitionConfig
     currents_A: np.ndarray
-    gate_voltages_V: List[float]
     output_subdir: str
     output_prefix: str
+    gate_cfg: Optional[GateConfig] = None
+    gate_voltages_V: Optional[List[float]] = None
     temp_cfg: Optional[TemperatureControllerConfig] = None
 
     @property
-    def series_values(self) -> List[float]:
-        return self.gate_voltages_V
+    def series_values(self) -> List[Optional[float]]:
+        return list(self.gate_voltages_V) if self.gate_voltages_V else [None]
 
     @property
     def total_points(self) -> int:
@@ -101,10 +101,6 @@ def build_plan(state: dict) -> MeasurementPlan:
     )
     volt_cfg = VoltmeterConfig(
         visa_resource=state["voltmeter_visa_resource"], nplc=state["nplc"], auto_range=state["auto_range"])
-    gate_cfg = GateConfig(
-        visa_resource=state["gate_visa_resource"], gate_voltage_limit_V=state["gate_voltage_limit_V"],
-        compliance_current_A=state["gate_compliance_current_A"],
-    )
     magnet_cfg = MagnetConfig(
         visa_resource=state["magnet_visa_resource"], current_limit_A=state["current_limit_A"],
         voltage_compliance_V=state["voltage_compliance_V"], ramp_step_A=state["ramp_step_A"],
@@ -115,12 +111,22 @@ def build_plan(state: dict) -> MeasurementPlan:
         read_delay_s=state["gaussmeter_read_delay_s"],
     )
     acq_cfg = AcquisitionConfig(
-        settling_time_s=state["settling_time_s"], n_reversals=int(state["n_reversals"]), output_file="")
+        settling_time_s=state["settling_time_s"], reversal_enabled=state["reversal_enabled"],
+        n_averages=int(state["n_averages"]), output_file="")
 
     currents_A = linear_sweep(
         start=state["i_min_A"], stop=state["i_max_A"], step=state["step_A"],
         bidirectional=state["bidirectional_sweep"],
     )
+
+    gate_cfg = None
+    gate_voltages_V = None
+    if state["enable_gate"]:
+        gate_cfg = GateConfig(
+            visa_resource=state["gate_visa_resource"], gate_voltage_limit_V=state["gate_voltage_limit_V"],
+            compliance_current_A=state["gate_compliance_current_A"],
+        )
+        gate_voltages_V = state["gate_voltage_list"]
 
     temp_cfg = None
     if state["enable_temperature"]:
@@ -130,19 +136,20 @@ def build_plan(state: dict) -> MeasurementPlan:
                 visa_resource=state["temperature_visa_resource"], sensor_uids=uids)
 
     return MeasurementPlan(
-        src_cfg=src_cfg, volt_cfg=volt_cfg, gate_cfg=gate_cfg, magnet_cfg=magnet_cfg,
+        src_cfg=src_cfg, volt_cfg=volt_cfg, magnet_cfg=magnet_cfg,
         gauss_cfg=gauss_cfg, acq_cfg=acq_cfg, currents_A=currents_A,
-        gate_voltages_V=state["gate_voltage_list"], output_subdir=state["output_subdir"],
-        output_prefix=state["output_name"], temp_cfg=temp_cfg,
+        output_subdir=state["output_subdir"], output_prefix=state["output_name"],
+        gate_cfg=gate_cfg, gate_voltages_V=gate_voltages_V, temp_cfg=temp_cfg,
     )
 
 
-def series_label(gate_V: float) -> str:
-    return f"Vg={gate_V:g}V"
+def series_label(gate_V: Optional[float]) -> Optional[str]:
+    return f"Vg={gate_V:g}V" if gate_V is not None else None
 
 
-def output_path_for_series(plan: MeasurementPlan, data_dir: str, session_ts: str, gate_V: float) -> str:
-    suffix = f"_Vg{gate_V:g}V"
+def output_path_for_series(plan: MeasurementPlan, data_dir: str, session_ts: str,
+                            gate_V: Optional[float]) -> str:
+    suffix = f"_Vg{gate_V:g}V" if gate_V is not None else ""
     return str(build_output_path(Path(data_dir), plan.output_subdir, plan.output_prefix, session_ts, suffix))
 
 
@@ -200,10 +207,23 @@ def page() -> None:
             with ui.expansion("Sense current & compliance", value=True, icon="bolt").classes("w-full"):
                 inputs["sense_current_A"] = num_field(
                     "Sense current (A)", float(d("sense_current_A")),
-                    hint="Reversed +I/-I each rep to cancel thermal-EMF offsets.")
+                    hint="Reversed +I/-I each rep to cancel thermal-EMF offsets, unless "
+                         "reversal is switched off below.")
+                switches["reversal_enabled"] = bool_switch(
+                    "Reverse current each rep (+I/-I)", d("reversal_enabled"))
+                ui.label(
+                    "Turn off for bias-direction-dependent devices (diodes, asymmetric "
+                    "spin-orbit stacks, ...) where reversing the current destroys rather "
+                    "than cleans up the signal — the sense current is then just held fixed "
+                    "at +I and plainly averaged instead."
+                ).classes("text-xs text-grey-6 -mt-1 mb-1")
                 inputs["compliance_V"] = num_field("Compliance voltage (V)", float(d("compliance_V")))
                 with ui.expansion("Source timing (advanced)"):
-                    inputs["source_delay_s"] = num_field("6221 source delay (s)", float(d("source_delay_s")))
+                    inputs["source_delay_s"] = num_field(
+                        "6221 source delay (s)", float(d("source_delay_s")),
+                        hint="Also the settle time between a current reversal and reading "
+                             "the voltmeter, so the reversal has actually finished before "
+                             "it's read.")
 
             with ui.expansion("Voltmeter (Keithley 2182)", value=True, icon="speed").classes("w-full"):
                 inputs["nplc"] = num_field("NPLC (integration time)", float(d("nplc")))
@@ -213,13 +233,16 @@ def page() -> None:
                 inputs["settling_time_s"] = num_field(
                     "Settling time per point (s)", float(d("settling_time_s")),
                     hint="Dead-time after a field change, before acquiring.")
-                inputs["n_reversals"] = num_field(
-                    "+I/-I reversal pairs averaged per point", float(d("n_reversals")), integer=True)
+                inputs["n_averages"] = num_field(
+                    "Voltage averages per point", float(d("n_averages")), integer=True,
+                    hint="Reversal on: +I/-I reversal pairs. Reversal off: plain voltage "
+                         "samples at the fixed sense current.")
                 inputs["output_name"] = text_field("Output file name (prefix)", d("output_name"))
                 inputs["output_subdir"] = text_field("Data sub-directory (optional)", d("output_subdir"))
                 data_dir_input = directory_field("Save directory", saved.get("data_dir") or str(_DATA_DIR))
 
-            with ui.expansion("Gate voltage (Keithley 2400)", value=True, icon="tune").classes("w-full"):
+            with ui.expansion("Gate voltage (Keithley 2400, optional)", value=True, icon="tune").classes("w-full"):
+                switches["enable_gate"] = bool_switch("Enable gate (Keithley 2400)", d("enable_gate"))
                 inputs["gate_voltage_limit_V"] = num_field("Gate voltage software limit (V)", float(d("gate_voltage_limit_V")))
                 inputs["gate_compliance_current_A"] = num_field("Gate leakage compliance (A)", float(d("gate_compliance_current_A")))
                 inputs["gate_voltage_values"] = text_field(
@@ -298,10 +321,11 @@ def page() -> None:
             state[fid] = sw.value
         state["gate_voltage_list"] = []
         state["gate_parse_error"] = None
-        try:
-            state["gate_voltage_list"] = parse_value_list(state["gate_voltage_values"])
-        except ValueError as exc:
-            state["gate_parse_error"] = str(exc)
+        if state["enable_gate"]:
+            try:
+                state["gate_voltage_list"] = parse_value_list(state["gate_voltage_values"])
+            except ValueError as exc:
+                state["gate_parse_error"] = str(exc)
         return state, errors
 
     def collect_raw() -> dict:
@@ -384,10 +408,13 @@ def page() -> None:
         def run_fn(stop_event, cb: RunCallbacks):
             source = voltmeter = gate = magnet = gaussmeter = temp_ctrl = None
             try:
-                cb.on_status("Connecting to Keithley 6221, 2182 & 2400 …")
+                cb.on_status("Connecting to Keithley 6221 & 2182 …")
                 source = connect_source(plan.src_cfg)
                 voltmeter = connect_voltmeter(plan.volt_cfg)
-                gate = connect_gate(plan.gate_cfg)
+
+                if plan.gate_cfg is not None:
+                    cb.on_status("Connecting gate (Keithley 2400) …")
+                    gate = connect_gate(plan.gate_cfg)
 
                 if plan.temp_cfg is not None:
                     cb.on_status("Connecting to MercuryiTC (temperature) …")
@@ -402,8 +429,9 @@ def page() -> None:
                     if stop_event.is_set():
                         break
                     label = series_label(gate_V)
-                    cb.on_status(f"Setting gate to {gate_V:g} V …")
-                    set_gate_voltage(gate, plan.gate_cfg, gate_V)
+                    if gate_V is not None:
+                        cb.on_status(f"Setting gate to {gate_V:g} V …")
+                        set_gate_voltage(gate, plan.gate_cfg, gate_V)
 
                     plan.acq_cfg.output_file = output_path_for_series(plan, data_dir, session_ts, gate_V)
                     points = [
@@ -417,7 +445,9 @@ def page() -> None:
                         record["series_label"] = _label
                         cb.on_point(record)
 
-                    cb.on_status(f"Running field sweep (Vg={gate_V:g} V) …")
+                    status = "Running field sweep …" if gate_V is None \
+                        else f"Running field sweep (Vg={gate_V:g} V) …"
+                    cb.on_status(status)
                     run_measurement(
                         source, voltmeter, plan.src_cfg, plan.acq_cfg, points,
                         stop_event=stop_event, on_point=tagged_on_point,

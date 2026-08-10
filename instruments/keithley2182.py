@@ -15,7 +15,9 @@ Usage example:
 """
 
 import logging
+import threading
 from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
 from pymeasure.instruments.keithley import Keithley2182
@@ -40,9 +42,25 @@ def connect_voltmeter(cfg: VoltmeterConfig) -> Keithley2182:
     return voltmeter
 
 
-def acquire_averaged_voltage(voltmeter: Keithley2182, n_averages: int) -> dict:
-    """Read `n_averages` voltage samples off the 2182 and return mean/std."""
+def acquire_averaged_voltage(
+    voltmeter: Keithley2182,
+    n_averages: int,
+    stop_event: Optional[threading.Event] = None,
+) -> dict:
+    """
+    Read `n_averages` voltage samples off the 2182 (current held fixed,
+    unlike acquire_reversal_averaged_voltage) and return mean/std.
+
+    `stop_event`, if given, is checked between samples — set it to break
+    out early and return the mean/std of whatever was already collected
+    (at least one sample).
+    """
     samples = np.empty(n_averages)
+    n_used = 0
     for i in range(n_averages):
         samples[i] = voltmeter.voltage
-    return {"mean": float(np.mean(samples)), "std": float(np.std(samples))}
+        n_used = i + 1
+        if stop_event is not None and stop_event.is_set():
+            break
+    used = samples[:n_used]
+    return {"mean": float(np.mean(used)), "std": float(np.std(used))}

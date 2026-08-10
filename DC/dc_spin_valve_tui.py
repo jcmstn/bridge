@@ -91,13 +91,17 @@ SETTINGS_PATH = _DATA_DIR / "dc_spin_valve_tui_settings.json"
 DC_SPIN_VALVE_DESCRIPTION = (
     "Sources a fixed DC sense current with a Keithley 6221 and reads the "
     "longitudinal voltage with a Keithley 2182, reversing the current each "
-    "rep to cancel thermal-EMF offsets — the same reversal-averaging "
-    "technique as the Hall measurement, but for a longitudinal (spin-valve "
-    "/ magnetoresistance) read. Sweeps a Kepco electromagnet's field "
-    "(bidirectionally, for hysteresis) with the field measured live via a "
-    "Lake Shore 475 Gaussmeter at every point. The gate voltage (Keithley "
-    "2400) is held fixed for each field sweep — single value or a "
-    "comma-separated list — one complete sweep per value, each saved to "
+    "rep to cancel thermal-EMF offsets by default — the same "
+    "reversal-averaging technique as the Hall measurement, but for a "
+    "longitudinal (spin-valve / magnetoresistance) read. Reversal can be "
+    "switched off for bias-direction-dependent devices, where flipping the "
+    "current destroys rather than cleans up the signal — the sense current "
+    "is then just held fixed and plainly averaged instead. Sweeps a Kepco "
+    "electromagnet's field (bidirectionally, for hysteresis) with the "
+    "field measured live via a Lake Shore 475 Gaussmeter at every point. "
+    "The gate voltage (Keithley 2400, optional — off by default needs no "
+    "2400 connected) is held fixed for each field sweep — single value or "
+    "a comma-separated list — one complete sweep per value, each saved to "
     "its own file and plotted together in different colors."
 )
 
@@ -116,9 +120,11 @@ DEFAULTS: dict = {
     "nplc": "5",
     "auto_range": True,
     "settling_time_s": "1.0",
-    "n_reversals": "5",
+    "reversal_enabled": True,
+    "n_averages": "5",
     "output_name": "dc_spin_valve",
     "output_subdir": "",
+    "enable_gate": False,
     "gate_voltage_limit_V": "20.0",
     "gate_compliance_current_A": "0.000001",
     "gate_voltage_values": "0.0",
@@ -145,7 +151,7 @@ NUMERIC_FIELDS: dict = {
     "source_delay_s": float,
     "nplc": float,
     "settling_time_s": float,
-    "n_reversals": int,
+    "n_averages": int,
     "gate_voltage_limit_V": float,
     "gate_compliance_current_A": float,
     "current_limit_A": float,
@@ -162,6 +168,8 @@ TEXT_FIELDS = ["source_visa_resource", "voltmeter_visa_resource", "gate_visa_res
                "output_name", "output_subdir", "magnet_visa_resource",
                "gaussmeter_visa_resource", "gate_voltage_values",
                "temperature_visa_resource", "temperature_sensor_uids"]
+GATE_FIELD_IDS = ["gate_visa_resource", "gate_voltage_limit_V",
+                   "gate_compliance_current_A", "gate_voltage_values"]
 TEMPERATURE_FIELD_IDS = ["temperature_visa_resource", "temperature_sensor_uids"]
 
 
@@ -208,19 +216,20 @@ def _reading_duration_s(nplc: float) -> float:
 class MeasurementPlan:
     src_cfg: SourceConfig
     volt_cfg: VoltmeterConfig
-    gate_cfg: GateConfig
     magnet_cfg: MagnetConfig
     gauss_cfg: GaussmeterConfig
     acq_cfg: AcquisitionConfig
     currents_A: np.ndarray
-    gate_voltages_V: List[float]
     output_subdir: str
     output_prefix: str
+    gate_cfg: Optional[GateConfig] = None
+    gate_voltages_V: Optional[List[float]] = None
     temp_cfg: Optional[TemperatureControllerConfig] = None
 
     @property
-    def series_values(self) -> List[float]:
-        return self.gate_voltages_V
+    def series_values(self) -> List[Optional[float]]:
+        """[None] for a single gate-less run, else one entry per gate voltage."""
+        return list(self.gate_voltages_V) if self.gate_voltages_V else [None]
 
     @property
     def total_points(self) -> int:
@@ -258,9 +267,15 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     warnings: list[str] = []
     errors: list[str] = []
 
-    resources = [state["source_visa_resource"], state["voltmeter_visa_resource"], state["gate_visa_resource"]]
+    resources = [state["source_visa_resource"], state["voltmeter_visa_resource"]]
+    if state["enable_gate"]:
+        resources.append(state["gate_visa_resource"])
     if len(set(resources)) < len(resources):
-        errors.append("Source (6221), voltmeter (2182), and gate (2400) VISA resources must all be different.")
+        errors.append(
+            "Source (6221), voltmeter (2182)"
+            + (", and gate (2400)" if state["enable_gate"] else "")
+            + " VISA resources must all be different."
+        )
 
     if state["sense_current_A"] == 0:
         errors.append("Sense current must be nonzero (resistance divides by it).")
@@ -270,28 +285,41 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     if state["compliance_V"] <= 0:
         errors.append("Compliance voltage must be > 0 V.")
 
+    if state["reversal_enabled"]:
+        info.append("Sense current reversed +I/-I each rep to cancel thermal-EMF offsets.")
+    else:
+        info.append("Reversal off — sense current held fixed at +I "
+                     "(use for bias-direction-dependent devices).")
+
     read_s = _reading_duration_s(state["nplc"])
     info.append(f"Estimated 2182 reading time ≈ {read_s * 1000:.0f} ms (NPLC={state['nplc']:g})")
-    per_point_s = state["settling_time_s"] + state["n_reversals"] * 2 * read_s
+    reps_per_point = 2 if state["reversal_enabled"] else 1
+    per_point_s = state["settling_time_s"] + state["n_averages"] * reps_per_point * read_s
 
-    # ── Gate ─────────────────────────────────────────────────────────────────
-    if state.get("gate_parse_error"):
-        errors.append(f"Gate voltage list: {state['gate_parse_error']}")
-        gate_list: list[float] = []
+    # ── Gate (optional) ─────────────────────────────────────────────────────
+    n_series = 1
+    if state["enable_gate"]:
+        if state["gate_voltage_limit_V"] <= 0:
+            errors.append("Gate voltage limit must be > 0 V.")
+        if state.get("gate_parse_error"):
+            errors.append(f"Gate voltage list: {state['gate_parse_error']}")
+            gate_list: list[float] = []
+        else:
+            gate_list = state.get("gate_voltage_list", [])
+            over_limit = [v for v in gate_list if abs(v) > state["gate_voltage_limit_V"]]
+            if over_limit:
+                errors.append(
+                    f"Gate voltage(s) {over_limit} exceed the configured limit "
+                    f"±{state['gate_voltage_limit_V']:g} V."
+                )
+        n_series = len(gate_list)
+        if n_series > 1:
+            info.append(f"Gate: {n_series} values {gate_list} V — {n_series} complete field sweeps, "
+                        f"one file each, plotted together")
+        elif n_series == 1:
+            info.append(f"Gate held fixed at {format_si(gate_list[0], 'V')}")
     else:
-        gate_list = state.get("gate_voltage_list", [])
-        over_limit = [v for v in gate_list if abs(v) > state["gate_voltage_limit_V"]]
-        if over_limit:
-            errors.append(
-                f"Gate voltage(s) {over_limit} exceed the configured limit "
-                f"±{state['gate_voltage_limit_V']:g} V."
-            )
-    n_series = len(gate_list)
-    if n_series > 1:
-        info.append(f"Gate: {n_series} values {gate_list} V — {n_series} complete field sweeps, "
-                    f"one file each, plotted together")
-    elif n_series == 1:
-        info.append(f"Gate held fixed at {format_si(gate_list[0], 'V')}")
+        info.append("Gate off — Keithley 2400 not used, single field sweep run.")
 
     # ── Field sweep ──────────────────────────────────────────────────────────
     max_abs_I = max(abs(state["i_min_A"]), abs(state["i_max_A"]))
@@ -484,7 +512,7 @@ class RunScreen(Screen):
 
     def on_mount(self) -> None:
         self.query_one("#results_table", DataTable).add_columns(
-            "#", "Vg (V)", "I_magnet (A)", "B (mT)", "V (V)", "R (Ω)", "n_rev",
+            "#", "Vg (V)", "I_magnet (A)", "B (mT)", "V (V)", "R (Ω)", "n_avg",
             "T1 (K)", "T2 (K)",
         )
         self._log_handler = _LogRelay(self)
@@ -535,7 +563,7 @@ class RunScreen(Screen):
             f"{B:.2f}" if B is not None else "—",
             f"{record['voltage_V']:.4e}",
             f"{record['resistance_ohm']:.5g}",
-            str(record["n_reversals"]),
+            str(record["n_averages"]),
             f"{T1:.3f}" if T1 is not None else "—",
             f"{T2:.3f}" if T2 is not None else "—",
         )
@@ -589,10 +617,13 @@ class RunScreen(Screen):
         gaussmeter = None
         temp_ctrl = None
         try:
-            self._set_status_threadsafe("Connecting to Keithley 6221, 2182 & 2400 …")
+            self._set_status_threadsafe("Connecting to Keithley 6221 & 2182 …")
             source = connect_source(plan.src_cfg)
             voltmeter = connect_voltmeter(plan.volt_cfg)
-            gate = connect_gate(plan.gate_cfg)
+
+            if plan.gate_cfg is not None:
+                self._set_status_threadsafe("Connecting gate (Keithley 2400) …")
+                gate = connect_gate(plan.gate_cfg)
 
             if plan.temp_cfg is not None:
                 self._set_status_threadsafe("Connecting to MercuryiTC (temperature) …")
@@ -607,10 +638,13 @@ class RunScreen(Screen):
                 if self._stop_event.is_set():
                     break
 
-                label = f"Vg={gate_V:g}V"
-                suffix = f"_Vg{gate_V:g}V"
-                self._set_status_threadsafe(f"Setting gate to {gate_V:g} V …")
-                set_gate_voltage(gate, plan.gate_cfg, gate_V)
+                label = None
+                suffix = ""
+                if gate_V is not None:
+                    label = f"Vg={gate_V:g}V"
+                    suffix = f"_Vg{gate_V:g}V"
+                    self._set_status_threadsafe(f"Setting gate to {gate_V:g} V …")
+                    set_gate_voltage(gate, plan.gate_cfg, gate_V)
 
                 plan.acq_cfg.output_file = str(build_output_path(
                     _DATA_DIR, plan.output_subdir, plan.output_prefix,
@@ -625,7 +659,9 @@ class RunScreen(Screen):
                     for I in plan.currents_A
                 ]
 
-                self._set_status_threadsafe(f"Running field sweep (Vg={gate_V:g} V) …")
+                status = "Running field sweep …" if gate_V is None \
+                    else f"Running field sweep (Vg={gate_V:g} V) …"
+                self._set_status_threadsafe(status)
                 run_measurement(
                     source, voltmeter, plan.src_cfg, plan.acq_cfg, points,
                     stop_event=self._stop_event,
@@ -713,13 +749,27 @@ class DCSpinValveApp(App):
                 with Collapsible(title="Sense current & compliance", collapsed=False):
                     yield field("sense_current_A", "Sense current (A)",
                                 DEFAULTS["sense_current_A"],
-                                hint="Reversed +I/-I each rep to cancel thermal-EMF offsets.")
+                                hint="Reversed +I/-I each rep to cancel thermal-EMF offsets, "
+                                     "unless reversal is switched off below.")
+                    yield switch_field("reversal_enabled",
+                                       "Reverse current each rep (+I/-I)",
+                                       DEFAULTS["reversal_enabled"])
+                    yield Label(
+                        "Turn off for bias-direction-dependent devices (diodes, asymmetric "
+                        "spin-orbit stacks, ...) where reversing the current destroys rather "
+                        "than cleans up the signal — the sense current is then just held "
+                        "fixed at +I and plainly averaged instead.",
+                        classes="hint",
+                    )
                     yield field("compliance_V", "Compliance voltage (V)",
                                 DEFAULTS["compliance_V"],
                                 validators=[Number(minimum=0.0, failure_description="must be ≥ 0")])
                     with Collapsible(title="Source timing (advanced)", collapsed=True):
                         yield field("source_delay_s", "6221 source delay (s)",
-                                    DEFAULTS["source_delay_s"])
+                                    DEFAULTS["source_delay_s"],
+                                    hint="Also the settle time between a current reversal and "
+                                         "reading the voltmeter, so the reversal has actually "
+                                         "finished before it's read.")
 
                 with Collapsible(title="Voltmeter (Keithley 2182)", collapsed=False):
                     yield field("nplc", "NPLC (integration time)", DEFAULTS["nplc"],
@@ -732,11 +782,13 @@ class DCSpinValveApp(App):
                                 DEFAULTS["settling_time_s"],
                                 hint="Dead-time after a field change, before acquiring.",
                                 validators=[Number(minimum=0.0, failure_description="must be ≥ 0")])
-                    yield field("n_reversals", "+I/-I reversal pairs averaged per point",
-                                DEFAULTS["n_reversals"], kind="integer",
-                                hint="Splits each point into (V(+I)-V(-I))/2 [reported R] and "
-                                     "(V(+I)+V(-I))/2 [recorded, not discarded — real offsets "
-                                     "land here, but so can genuine even-in-I physics].",
+                    yield field("n_averages", "Voltage averages per point",
+                                DEFAULTS["n_averages"], kind="integer",
+                                hint="Reversal on: +I/-I reversal pairs — splits each point "
+                                     "into (V(+I)-V(-I))/2 [reported R] and (V(+I)+V(-I))/2 "
+                                     "[recorded, not discarded — real offsets land here, but "
+                                     "so can genuine even-in-I physics]. Reversal off: plain "
+                                     "voltage samples at the fixed sense current.",
                                 validators=[Number(minimum=1, failure_description="must be ≥ 1")])
                     yield field("output_name", "Output file name (prefix)",
                                 DEFAULTS["output_name"], kind="text")
@@ -744,7 +796,9 @@ class DCSpinValveApp(App):
                                 DEFAULTS["output_subdir"], kind="text",
                                 hint="Saved to data/<sub-directory>/<prefix>_<timestamp>.csv")
 
-                with Collapsible(title="Gate voltage (Keithley 2400)", collapsed=False):
+                with Collapsible(title="Gate voltage (Keithley 2400, optional)", collapsed=False):
+                    yield switch_field("enable_gate", "Enable gate (Keithley 2400)",
+                                       DEFAULTS["enable_gate"])
                     yield field("gate_voltage_limit_V", "Gate voltage software limit (V)",
                                 DEFAULTS["gate_voltage_limit_V"],
                                 hint="Hard safety ceiling — independent of the values below.")
@@ -812,6 +866,7 @@ class DCSpinValveApp(App):
     def on_mount(self) -> None:
         logging.getLogger().handlers.clear()
         self._load_settings()
+        self._set_gate_fields_enabled(self.query_one("#enable_gate", Switch).value)
         self._set_temperature_fields_enabled(self.query_one("#enable_temperature", Switch).value)
         self.refresh_summary()
 
@@ -824,6 +879,8 @@ class DCSpinValveApp(App):
         raw: dict = {fid: self.query_one(f"#{fid}", Input).value for fid in self._all_field_ids()}
         raw["auto_range"] = self.query_one("#auto_range", Switch).value
         raw["bidirectional_sweep"] = self.query_one("#bidirectional_sweep", Switch).value
+        raw["reversal_enabled"] = self.query_one("#reversal_enabled", Switch).value
+        raw["enable_gate"] = self.query_one("#enable_gate", Switch).value
         raw["enable_temperature"] = self.query_one("#enable_temperature", Switch).value
         return raw
 
@@ -842,6 +899,10 @@ class DCSpinValveApp(App):
             self.query_one("#auto_range", Switch).value = bool(saved["auto_range"])
         if "bidirectional_sweep" in saved:
             self.query_one("#bidirectional_sweep", Switch).value = bool(saved["bidirectional_sweep"])
+        if "reversal_enabled" in saved:
+            self.query_one("#reversal_enabled", Switch).value = bool(saved["reversal_enabled"])
+        if "enable_gate" in saved:
+            self.query_one("#enable_gate", Switch).value = bool(saved["enable_gate"])
         if "enable_temperature" in saved:
             self.query_one("#enable_temperature", Switch).value = bool(saved["enable_temperature"])
 
@@ -866,14 +927,17 @@ class DCSpinValveApp(App):
             state[fid] = self.query_one(f"#{fid}", Input).value.strip()
         state["auto_range"] = self.query_one("#auto_range", Switch).value
         state["bidirectional_sweep"] = self.query_one("#bidirectional_sweep", Switch).value
+        state["reversal_enabled"] = self.query_one("#reversal_enabled", Switch).value
+        state["enable_gate"] = self.query_one("#enable_gate", Switch).value
         state["enable_temperature"] = self.query_one("#enable_temperature", Switch).value
 
         state["gate_voltage_list"] = []
         state["gate_parse_error"] = None
-        try:
-            state["gate_voltage_list"] = parse_value_list(state["gate_voltage_values"])
-        except ValueError as exc:
-            state["gate_parse_error"] = str(exc)
+        if state["enable_gate"]:
+            try:
+                state["gate_voltage_list"] = parse_value_list(state["gate_voltage_values"])
+            except ValueError as exc:
+                state["gate_parse_error"] = str(exc)
 
         return state, errors
 
@@ -883,9 +947,15 @@ class DCSpinValveApp(App):
         self.refresh_summary()
 
     def on_switch_changed(self, event: Switch.Changed) -> None:
-        if event.switch.id == "enable_temperature":
+        if event.switch.id == "enable_gate":
+            self._set_gate_fields_enabled(event.value)
+        elif event.switch.id == "enable_temperature":
             self._set_temperature_fields_enabled(event.value)
         self.refresh_summary()
+
+    def _set_gate_fields_enabled(self, enabled: bool) -> None:
+        for fid in GATE_FIELD_IDS:
+            self.query_one(f"#{fid}", Input).disabled = not enabled
 
     def _set_temperature_fields_enabled(self, enabled: bool) -> None:
         for fid in TEMPERATURE_FIELD_IDS:
@@ -943,11 +1013,6 @@ class DCSpinValveApp(App):
             nplc=state["nplc"],
             auto_range=state["auto_range"],
         )
-        gate_cfg = GateConfig(
-            visa_resource=state["gate_visa_resource"],
-            gate_voltage_limit_V=state["gate_voltage_limit_V"],
-            compliance_current_A=state["gate_compliance_current_A"],
-        )
         magnet_cfg = MagnetConfig(
             visa_resource=state["magnet_visa_resource"],
             current_limit_A=state["current_limit_A"],
@@ -962,7 +1027,8 @@ class DCSpinValveApp(App):
         )
         acq_cfg = AcquisitionConfig(
             settling_time_s=state["settling_time_s"],
-            n_reversals=state["n_reversals"],
+            reversal_enabled=state["reversal_enabled"],
+            n_averages=state["n_averages"],
             output_file=str(_DATA_DIR / "dc_spin_valve.csv"),  # placeholder — overwritten per series
         )
 
@@ -970,6 +1036,16 @@ class DCSpinValveApp(App):
             start=state["i_min_A"], stop=state["i_max_A"], step=state["step_A"],
             bidirectional=state["bidirectional_sweep"],
         )
+
+        gate_cfg = None
+        gate_voltages_V = None
+        if state["enable_gate"]:
+            gate_cfg = GateConfig(
+                visa_resource=state["gate_visa_resource"],
+                gate_voltage_limit_V=state["gate_voltage_limit_V"],
+                compliance_current_A=state["gate_compliance_current_A"],
+            )
+            gate_voltages_V = state["gate_voltage_list"]
 
         temp_cfg = None
         if state["enable_temperature"]:
@@ -981,10 +1057,11 @@ class DCSpinValveApp(App):
                 )
 
         return MeasurementPlan(
-            src_cfg=src_cfg, volt_cfg=volt_cfg, gate_cfg=gate_cfg,
+            src_cfg=src_cfg, volt_cfg=volt_cfg,
             magnet_cfg=magnet_cfg, gauss_cfg=gauss_cfg, acq_cfg=acq_cfg,
-            currents_A=currents_A, gate_voltages_V=state["gate_voltage_list"],
+            currents_A=currents_A,
             output_subdir=state["output_subdir"], output_prefix=state["output_name"],
+            gate_cfg=gate_cfg, gate_voltages_V=gate_voltages_V,
             temp_cfg=temp_cfg,
         )
 

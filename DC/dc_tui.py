@@ -78,12 +78,15 @@ GATE_SWEEP_SCHEMATIC = """\
 SPIN_VALVE_SCHEMATIC = """\
   KEITHLEY 6221  (DC current source)
     Output ──▶ sample ── common ground
+    Current reversal (+I/-I) is a toggle — some devices are
+    bias-direction dependent and reversal destroys the signal
 
   KEITHLEY 2182  (nanovoltmeter)
     Channel 1 (differential) ──▶ longitudinal voltage leads
 
-  KEITHLEY 2400  (gate source — fixed per sweep, single value or list)
+  KEITHLEY 2400  (gate source, optional — "Enable gate" switch)
     Output ──▶ gate electrode
+    Fixed per sweep, single value or list
 
   Magnet field sweep  (the swept axis)
     Kepco BOP-GL      ──GPIB──▶ electromagnet coil

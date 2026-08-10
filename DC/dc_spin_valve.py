@@ -82,7 +82,11 @@ from keithley6221 import (  # noqa: E402
     shutdown_source,
     acquire_reversal_averaged_voltage,
 )
-from keithley2182 import VoltmeterConfig, connect_voltmeter  # noqa: E402
+from keithley2182 import (  # noqa: E402
+    VoltmeterConfig,
+    connect_voltmeter,
+    acquire_averaged_voltage,
+)
 from keithley2400 import (  # noqa: E402
     GateConfig,
     connect_gate,
@@ -140,9 +144,16 @@ log = logging.getLogger(__name__)
 @dataclass
 class AcquisitionConfig:
     """Timing and averaging parameters."""
-    settling_time_s: float = 1.0      # Dead-time after a field change  [s]
-    n_reversals: int       = 5        # +I/-I reversal pairs averaged per point
-    output_file: str       = "dc_spin_valve.csv"
+    settling_time_s: float  = 1.0      # Dead-time after a field change  [s]
+    reversal_enabled: bool  = True     # Reverse the sense current each rep (+I/-I) to
+                                        # cancel thermal-EMF offsets. Some devices are
+                                        # bias-direction dependent (e.g. diodes,
+                                        # asymmetric spin-orbit stacks) and reversing the
+                                        # current there destroys rather than cleans up the
+                                        # signal — turn this off for those.
+    n_averages: int         = 5        # reversal_enabled=True:  +I/-I reversal pairs averaged per point
+                                        # reversal_enabled=False: plain voltage samples averaged per point
+    output_file: str        = "dc_spin_valve.csv"
 
 
 @dataclass
@@ -232,12 +243,30 @@ def run_measurement(
             field_mT = read_field_mT(gaussmeter, gauss_cfg)
             log.info("   B=%.4f mT (measured)", field_mT)
 
-        # ── 4. Acquire reversal-averaged voltage ────────────────────────────
-        rv = acquire_reversal_averaged_voltage(
-            source, voltmeter, src_cfg.sense_current_A, acq_cfg.n_reversals, stop_event)
-        r = rv["mean"] / src_cfg.sense_current_A
-        log.info("   V=%.4e V  σ=%.2e V  R=%.5g Ω  V_even=%.4e V  (n=%d reversals)",
-                  rv["mean"], rv["std"], r, rv["even_mean"], rv["n_reversals"])
+        # ── 4. Acquire voltage ────────────────────────────────────────────
+        # Reversal averaging (+I/-I, cancels thermal-EMF offsets) is the
+        # default, but some devices are bias-direction dependent — reversing
+        # the current there destroys the signal rather than cleaning it up
+        # — so acq_cfg.reversal_enabled lets the sense current be held fixed
+        # and just averaged plainly instead.
+        if acq_cfg.reversal_enabled:
+            rv = acquire_reversal_averaged_voltage(
+                source, voltmeter, src_cfg.sense_current_A, acq_cfg.n_averages,
+                stop_event, source_delay_s=src_cfg.source_delay_s)
+            v_mean, v_std = rv["mean"], rv["std"]
+            v_even_mean, v_even_std = rv["even_mean"], rv["even_std"]
+            n_used = rv["n_reversals"]
+            r = v_mean / src_cfg.sense_current_A
+            log.info("   V=%.4e V  σ=%.2e V  R=%.5g Ω  V_even=%.4e V  (n=%d reversals)",
+                      v_mean, v_std, r, v_even_mean, n_used)
+        else:
+            av = acquire_averaged_voltage(voltmeter, acq_cfg.n_averages, stop_event)
+            v_mean, v_std = av["mean"], av["std"]
+            v_even_mean, v_even_std = None, None
+            n_used = acq_cfg.n_averages
+            r = v_mean / src_cfg.sense_current_A
+            log.info("   V=%.4e V  σ=%.2e V  R=%.5g Ω  (n=%d averages, reversal off)",
+                      v_mean, v_std, r, n_used)
 
         # ── 4b. Read temperature (MercuryiTC, optional) ─────────────────────
         temp_1_K, temp_2_K = read_temperature(temp_ctrl, temp_cfg) \
@@ -252,12 +281,13 @@ def run_measurement(
             "temperature_1_K":  temp_1_K,
             "temperature_2_K":  temp_2_K,
             "sense_current_A":  src_cfg.sense_current_A,
-            "voltage_V":        rv["mean"],
-            "voltage_std_V":    rv["std"],
-            "voltage_even_V":     rv["even_mean"],
-            "voltage_even_std_V": rv["even_std"],
+            "reversal_enabled": acq_cfg.reversal_enabled,
+            "voltage_V":        v_mean,
+            "voltage_std_V":    v_std,
+            "voltage_even_V":     v_even_mean,
+            "voltage_even_std_V": v_even_std,
             "resistance_ohm":   r,
-            "n_reversals":      rv["n_reversals"],
+            "n_averages":       n_used,
             "gate_voltage_V":   gate_voltage_V,
         }
         records.append(record)
@@ -309,9 +339,10 @@ def main() -> None:
 
     # ── Acquisition settings ─────────────────────────────────────────────────
     acq_cfg = AcquisitionConfig(
-        settling_time_s = 1.0,
-        n_reversals     = 5,
-        output_file     = str(_DATA_DIR / f"dc_spin_valve_{datetime.now():%Y%m%d_%H%M%S}.csv"),
+        settling_time_s  = 1.0,
+        reversal_enabled = True,
+        n_averages       = 5,
+        output_file      = str(_DATA_DIR / f"dc_spin_valve_{datetime.now():%Y%m%d_%H%M%S}.csv"),
     )
 
     # ── Magnet (Kepco BOP-GL current source) ─────────────────────────────────

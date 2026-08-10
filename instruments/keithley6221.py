@@ -96,6 +96,7 @@ def acquire_reversal_averaged_voltage(
     sense_current_A: float,
     n_reversals: int,
     stop_event: Optional[threading.Event] = None,
+    source_delay_s: float = 0.0,
 ) -> dict:
     """
     Reverse the sense current n_reversals times and decompose the resulting
@@ -118,6 +119,14 @@ def acquire_reversal_averaged_voltage(
     Both are returned (and both get logged to the CSV by the caller) so
     V_even can be checked after the fact instead of being thrown away.
 
+    `source_delay_s`, if given, is slept after each polarity flip before the
+    voltmeter is read — a plain property write (`source.source_current =
+    ...`) does not itself wait for `source_delay_s` (that instrument
+    register only governs the 6221's own triggered/delta-sweep timing, not
+    a bare write), so without this the voltmeter can be read before the
+    reversed current has actually settled, especially noticeable as
+    n_reversals grows and many flips happen back-to-back.
+
     Leaves the source at +sense_current_A on return. If `stop_event` fires
     partway through, returns the mean/std of whatever pairs were already
     collected (at least one).
@@ -128,9 +137,13 @@ def acquire_reversal_averaged_voltage(
 
     for i in range(n_reversals):
         source.source_current = sense_current_A
+        if source_delay_s > 0:
+            time.sleep(source_delay_s)
         v_plus = voltmeter.voltage
 
         source.source_current = -sense_current_A
+        if source_delay_s > 0:
+            time.sleep(source_delay_s)
         v_minus = voltmeter.voltage
 
         samples_odd[i] = (v_plus - v_minus) / 2.0
