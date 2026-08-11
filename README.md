@@ -53,9 +53,6 @@ docs/          Physics/theory background for specific measurements
 
 - [`docs/current-reversal.md`](docs/current-reversal.md) — the V_odd/V_even
   current-reversal decomposition used by every DC measurement program.
-- [`docs/harmonic-hall-theory.md`](docs/harmonic-hall-theory.md) — the
-  geometry, sign conventions and second-harmonic fit derivation behind
-  `analysis/harmonic_hall.py`.
 
 ## Troubleshooting
 
