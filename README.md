@@ -1,11 +1,11 @@
 # bridge
 
-Instrument control and analysis suite for DC transport and MFLI lock-in
+Instrument control suite for DC transport and MFLI lock-in
 measurements in a spintronics lab: Keithley 6221/2182/2400/2450 current
 sources, nanovoltmeters and gate sources, a Kepco BOP-GL electromagnet, a
 Lake Shore 475 Gaussmeter, an Oxford Instruments MercuryiTC, and Zurich
 Instruments MFLI lock-ins — driven either from a terminal UI (Textual) or a
-browser (NiceGUI), plus offline analysis GUIs for the resulting data.
+browser (NiceGUI).
 
 ## Install
 
@@ -17,7 +17,7 @@ uv sync
 
 This installs the project's dependencies and editable-installs `bridge`
 itself, so every module below is importable as a package (`instruments.*`,
-`dc.*`, `mfli.*`, `analysis.*`, `web.*`) regardless of which script you run
+`dc.*`, `mfli.*`, `web.*`) regardless of which script you run
 or from where.
 
 ## Running it
@@ -39,20 +39,12 @@ with `BRIDGE_WEB_PORT` if that's taken:
 BRIDGE_WEB_PORT=8090 uv run python web/app.py
 ```
 
-Analysis GUIs (run after a measurement has produced CSV output):
-
-```
-uv run python analysis/ahe_gui.py             # anomalous Hall effect analysis
-uv run python analysis/harmonic_hall_gui.py   # harmonic Hall (spin-orbit torque) analysis
-```
-
 ## Layout
 
 ```
 dc/            Keithley 6221/2182/2400 DC measurement programs + TUIs
 mfli/          Zurich Instruments MFLI lock-in measurement programs + TUIs
 instruments/   Shared instrument drivers and connect/shutdown helpers
-analysis/      Offline analysis GUIs for measurement output (AHE, harmonic Hall)
 web/           NiceGUI browser front end for the dc/ and mfli/ programs
 docs/          Physics/theory background for specific measurements
 ```
