@@ -118,7 +118,8 @@ class LauncherApp(App):
     CSS = """
     #picker { padding: 1 2; }
     .intro { margin-bottom: 1; text-style: bold; }
-    .card { border: solid $primary; padding: 1 2; margin-bottom: 2; height: auto; }
+    .picker-grid { layout: grid; grid-size: 2; grid-gutter: 1 2; height: auto; }
+    .card { border: solid $primary; padding: 1 2; height: auto; }
     .card-title { text-style: bold underline; margin-bottom: 1; }
     .card-desc { color: $text-muted; margin-bottom: 1; }
     .schematic-title { text-style: bold; margin-bottom: 1; }
@@ -134,30 +135,31 @@ class LauncherApp(App):
         yield Header(show_clock=False)
         with VerticalScroll(id="picker"):
             yield Static("Select a measurement to run:", classes="intro")
-            yield _card(
-                "1) Hall Measurement (DC, field sweep)",
-                DC_HALL_DESCRIPTION,
-                HALL_SCHEMATIC,
-                "launch_hall", "▶  Launch Hall measurement TUI",
-            )
-            yield _card(
-                "2) I-V Curve (DC current sweep, optional gate)",
-                DC_IV_DESCRIPTION,
-                IV_SCHEMATIC,
-                "launch_iv", "▶  Launch I-V curve TUI",
-            )
-            yield _card(
-                "3) Gate Sweep (gate voltage sweep, optional field)",
-                DC_GATE_SWEEP_DESCRIPTION,
-                GATE_SWEEP_SCHEMATIC,
-                "launch_gate_sweep", "▶  Launch Gate Sweep TUI",
-            )
-            yield _card(
-                "4) Spin-Valve / Field Sweep (fixed gate, field sweep)",
-                DC_SPIN_VALVE_DESCRIPTION,
-                SPIN_VALVE_SCHEMATIC,
-                "launch_spin_valve", "▶  Launch Spin-Valve TUI",
-            )
+            with Vertical(classes="picker-grid"):
+                yield _card(
+                    "1) Hall Measurement (DC, field sweep)",
+                    DC_HALL_DESCRIPTION,
+                    HALL_SCHEMATIC,
+                    "launch_hall", "▶  Launch Hall measurement TUI",
+                )
+                yield _card(
+                    "2) I-V Curve (DC current sweep, optional gate)",
+                    DC_IV_DESCRIPTION,
+                    IV_SCHEMATIC,
+                    "launch_iv", "▶  Launch I-V curve TUI",
+                )
+                yield _card(
+                    "3) Gate Sweep (gate voltage sweep, optional field)",
+                    DC_GATE_SWEEP_DESCRIPTION,
+                    GATE_SWEEP_SCHEMATIC,
+                    "launch_gate_sweep", "▶  Launch Gate Sweep TUI",
+                )
+                yield _card(
+                    "4) Spin-Valve / Field Sweep (fixed gate, field sweep)",
+                    DC_SPIN_VALVE_DESCRIPTION,
+                    SPIN_VALVE_SCHEMATIC,
+                    "launch_spin_valve", "▶  Launch Spin-Valve TUI",
+                )
         yield Footer()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:

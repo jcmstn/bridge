@@ -49,7 +49,6 @@ from textual.screen import Screen
 from textual.validation import Number
 from textual.widgets import (
     Button,
-    Collapsible,
     DataTable,
     Footer,
     Header,
@@ -271,21 +270,41 @@ def build_header_fields(plan: "MeasurementPlan", ctx: RunContext, records: list[
 # ─────────────────────────────────────────────────────────────────────────────
 
 def field(field_id: str, label_text: str, default: str, *, kind: str = "number",
-          hint: str = "", validators=None, valid_empty: bool = False) -> Vertical:
-    children = [Label(label_text, classes="field-label"),
-                Input(value=default, id=field_id, type=kind, validators=validators,
-                      valid_empty=valid_empty)]
+          hint: str = "", validators=None, valid_empty: bool = False) -> list:
+    """A field's widgets, flat (not wrapped in a container). Grid cells
+    (see card()) that contain a further nested auto-height Vertical break
+    Textual's grid auto-row sizing -- GridLayout.arrange() computes an
+    'auto' row's height by calling get_content_height() on each cell, and a
+    doubly-nested Vertical makes that blow up to ~100 rows instead of the
+    handful the content needs. One level of Vertical (the card itself) is
+    fine; a Vertical inside that is not -- so fields stay flat and spacing
+    is set directly on the last widget instead of via a wrapping container."""
+    label = Label(label_text, classes="field-label")
+    inp = Input(value=default, id=field_id, type=kind, validators=validators,
+                valid_empty=valid_empty)
+    widgets = [label, inp]
     if hint:
-        children.append(Label(hint, classes="hint"))
-    return Vertical(*children, classes="field")
+        widgets.append(Label(hint, classes="hint"))
+    widgets[-1].styles.margin = (0, 0, 1, 0)
+    return widgets
 
 
-def switch_field(field_id: str, label_text: str, default: bool) -> Vertical:
-    return Vertical(
-        Horizontal(Switch(value=default, id=field_id), Label(label_text, classes="switch-label"),
-                   classes="switch-row"),
-        classes="field",
-    )
+def switch_field(field_id: str, label_text: str, default: bool) -> Horizontal:
+    row = Horizontal(Switch(value=default, id=field_id), Label(label_text, classes="switch-label"),
+                      classes="switch-row")
+    row.styles.margin = (0, 0, 1, 0)
+    return row
+
+
+def card(title: str, *groups, muted: bool = False) -> Vertical:
+    """A bordered grid cell: a title plus its fields (each a flat list from
+    field(), or a single widget like switch_field()'s Horizontal -- see
+    field() for why fields must stay flat here). `muted` = stable/rarely
+    -changed configuration, styled to recede rather than compete for attention."""
+    children: list = [Static(title, classes="card-title")]
+    for group in groups:
+        children.extend(group) if isinstance(group, list) else children.append(group)
+    return Vertical(*children, classes="stable-card" if muted else "param-card")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -303,14 +322,6 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         errors.append("Choose a sample (or create a new one).")
     if not state.get("device"):
         errors.append("Device is required (e.g. HB3, SV2).")
-    if not errors:
-        preview = preview_raw_filename(
-            state["sample"], state["device"], MEASUREMENT_TYPE,
-            temperature_setpoint_K=state.get("temperature_setpoint_K"),
-        )
-        info.append(f"Will save as: {preview}_<timestamp>.csv"
-                     + (" (one file per gate voltage)" if state.get("enable_gate") and
-                        len(state.get("gate_voltage_list", [])) > 1 else ""))
 
     if state["source_visa_resource"] == state["voltmeter_visa_resource"]:
         errors.append("Source (6221) and voltmeter (2182) VISA resources must be different.")
@@ -380,6 +391,20 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         info.append("Temperature logging off.")
 
     return info, warnings, errors
+
+
+def compute_filename_preview(state: dict) -> Optional[str]:
+    """Raw-file name the run will be saved as, or None until sample+device
+    are both set -- drives the identity bar's #filename_preview."""
+    if not state.get("sample") or state["sample"] == NEW_SAMPLE_SENTINEL or not state.get("device"):
+        return None
+    preview = preview_raw_filename(
+        state["sample"], state["device"], MEASUREMENT_TYPE,
+        temperature_setpoint_K=state.get("temperature_setpoint_K"),
+    )
+    suffix = (" (one file per gate voltage)" if state.get("enable_gate") and
+              len(state.get("gate_voltage_list", [])) > 1 else "")
+    return f"{preview}_<timestamp>.csv{suffix}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -791,7 +816,22 @@ class DCIVCurveApp(App):
     CSS = """
     #body { height: 1fr; }
     #form { width: 1fr; padding: 1 2; }
-    #sidebar { width: 48; border-left: solid $primary; padding: 1 2; overflow-y: auto; }
+    #sidebar { width: 44; border-left: solid $primary; padding: 1 2; overflow-y: auto; }
+
+    #identity_bar { height: auto; border: round $accent; padding: 1 2; margin-bottom: 1; }
+    #filename_preview { text-style: bold; margin-bottom: 1; }
+    #identity_fields { layout: grid; grid-size: 4; grid-gutter: 0 2; height: auto; }
+
+    .section-title { text-style: bold; color: $text-muted; margin: 1 0; }
+    .param-grid { layout: grid; grid-size: 3; grid-gutter: 1 2; height: auto; margin-bottom: 1; }
+    .param-card { border: solid $primary; padding: 1 2; height: auto; }
+
+    .stable-grid { layout: grid; grid-size: 3; grid-gutter: 1 2; height: auto; }
+    .stable-card { border: round $panel-darken-1; padding: 1 2; height: auto; }
+    .stable-card .card-title { color: $text-muted; text-style: none; }
+    .stable-card .field-label { color: $text-muted; text-style: none; }
+
+    .card-title { text-style: bold underline; margin-bottom: 1; }
     .field { margin-bottom: 1; }
     .field-label { text-style: bold; }
     .hint { text-style: italic; color: $text-muted; }
@@ -811,90 +851,102 @@ class DCIVCurveApp(App):
         yield Header(show_clock=False)
         with Horizontal(id="body"):
             with VerticalScroll(id="form"):
-                with Collapsible(title="Instruments", collapsed=False):
-                    yield field("source_visa_resource", "Keithley 6221 (current source)",
-                                DEFAULTS["source_visa_resource"], kind="text")
-                    yield field("voltmeter_visa_resource", "Keithley 2182 (DUT voltage)",
-                                DEFAULTS["voltmeter_visa_resource"], kind="text")
+                # ── File & run identity ── changes every run, always on top ──
+                with Vertical(id="identity_bar"):
+                    yield Static("", id="filename_preview")
+                    with Vertical(id="identity_fields"):
+                        yield Vertical(
+                            Label("Sample", classes="field-label"),
+                            Select(sample_options(_DATA_DIR), id="sample_select",
+                                   allow_blank=False, value=TEST_SAMPLE),
+                            classes="field",
+                        )
+                        yield Vertical(*field("device", "Device (e.g. HB3, SV2)",
+                                              DEFAULTS["device"], kind="text"), classes="field")
+                        yield Vertical(*field("cooldown", "Cooldown (optional)",
+                                              DEFAULTS["cooldown"], kind="text"), classes="field")
+                        yield Vertical(*field("temperature_setpoint_K", "Temp. setpoint (K, optional)",
+                                              DEFAULTS["temperature_setpoint_K"], kind="number",
+                                              valid_empty=True, hint="Filename's T###K token only."),
+                                       classes="field")
 
-                with Collapsible(title="Current sweep & compliance", collapsed=False):
-                    yield field("current_min_A", "Sweep current min (A)",
-                                DEFAULTS["current_min_A"])
-                    yield field("current_max_A", "Sweep current max (A)",
-                                DEFAULTS["current_max_A"])
-                    yield field("compliance_V", "Compliance voltage (V)",
-                                DEFAULTS["compliance_V"],
-                                hint="Set high enough to reach the expected voltage at "
-                                     "current_max_A, or the sweep clips against compliance.",
-                                validators=[Number(minimum=0.0, failure_description="must be ≥ 0")])
-                    with Collapsible(title="Source timing (advanced)", collapsed=True):
-                        yield field("source_delay_s", "6221 source delay (s)",
-                                    DEFAULTS["source_delay_s"])
-
-                with Collapsible(title="Voltmeter (Keithley 2182)", collapsed=False):
-                    yield field("nplc", "NPLC (integration time)", DEFAULTS["nplc"],
-                                hint="Bigger = quieter but slower. 1 line cycle = 1/50 or 1/60 s.",
-                                validators=[Number(minimum=0.01, failure_description="must be > 0")])
-                    yield switch_field("auto_range", "Auto-range", DEFAULTS["auto_range"])
-
-                with Collapsible(title="Acquisition timing", collapsed=False):
-                    yield field("settling_time_s", "Settling time per current step (s)",
-                                DEFAULTS["settling_time_s"],
-                                validators=[Number(minimum=0.0, failure_description="must be ≥ 0")])
-                    yield field("n_averages", "Voltage samples averaged per point",
-                                DEFAULTS["n_averages"], kind="integer",
-                                validators=[Number(minimum=1, failure_description="must be ≥ 1")])
-
-                with Collapsible(title="Sample & run identity", collapsed=False):
-                    yield Vertical(
-                        Label("Sample", classes="field-label"),
-                        Select(sample_options(_DATA_DIR), id="sample_select",
-                               allow_blank=False, value=TEST_SAMPLE),
-                        classes="field",
+                # ── Parameters that decide the physics of this run ──────────
+                with Vertical(classes="param-grid"):
+                    yield card(
+                        "Source (Keithley 6221) — current sweep",
+                        field("current_min_A", "Sweep current min (A)", DEFAULTS["current_min_A"]),
+                        field("current_max_A", "Sweep current max (A)", DEFAULTS["current_max_A"]),
+                        field("step_A", "Sweep step size (A)", DEFAULTS["step_A"],
+                              validators=[Number(minimum=1e-12, failure_description="must be > 0")]),
+                        switch_field("bidirectional_sweep", "Bidirectional (min → max → min)",
+                                     DEFAULTS["bidirectional_sweep"]),
+                        field("compliance_V", "Compliance voltage (V)", DEFAULTS["compliance_V"],
+                              hint="Set high enough to reach the expected voltage at "
+                                   "current_max_A, or the sweep clips against compliance.",
+                              validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
                     )
-                    yield field("device", "Device (e.g. HB3, SV2)", DEFAULTS["device"], kind="text")
-                    yield field("cooldown", "Cooldown (optional)", DEFAULTS["cooldown"], kind="text")
-                    yield field("temperature_setpoint_K", "Temperature setpoint (K, optional)",
-                                DEFAULTS["temperature_setpoint_K"], kind="number", valid_empty=True,
-                                hint="Drives only the filename's T###K token — the header's T_K "
-                                     "uses the measured temperature when available.")
+                    yield card(
+                        "Voltmeter (Keithley 2182)",
+                        field("nplc", "NPLC (integration time)", DEFAULTS["nplc"],
+                              hint="Bigger = quieter but slower.",
+                              validators=[Number(minimum=0.01, failure_description="must be > 0")]),
+                        switch_field("auto_range", "Auto-range", DEFAULTS["auto_range"]),
+                    )
+                    yield card(
+                        "Acquisition timing",
+                        field("settling_time_s", "Settling time per current step (s)",
+                              DEFAULTS["settling_time_s"],
+                              validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
+                        field("n_averages", "Voltage samples averaged per point",
+                              DEFAULTS["n_averages"], kind="integer",
+                              validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
+                    )
+                    yield card(
+                        "Gate voltage (Keithley 2400, optional)",
+                        switch_field("enable_gate", "Enable gate", DEFAULTS["enable_gate"]),
+                        field("gate_voltage_values", "Gate voltage (V)",
+                              DEFAULTS["gate_voltage_values"], kind="text",
+                              hint="Single value, or comma-separated list — one complete "
+                                   "sweep runs per value, plotted together."),
+                    )
+                    yield card(
+                        "Temperature logging",
+                        switch_field("enable_temperature", "Log temperature (MercuryiTC)",
+                                     DEFAULTS["enable_temperature"]),
+                    )
 
-                with Collapsible(title="Sweep resolution", collapsed=False):
-                    yield field("step_A", "Sweep step size (A)",
-                                DEFAULTS["step_A"],
-                                validators=[Number(minimum=1e-12, failure_description="must be > 0")])
-                    yield switch_field("bidirectional_sweep",
-                                       "Bidirectional sweep (min → max → min)",
-                                       DEFAULTS["bidirectional_sweep"])
-
-                with Collapsible(title="Gate voltage (Keithley 2400, optional)", collapsed=True):
-                    yield switch_field("enable_gate", "Enable gate (Keithley 2400)",
-                                       DEFAULTS["enable_gate"])
-                    yield field("gate_visa_resource", "Keithley 2400 (gate) VISA resource",
-                                DEFAULTS["gate_visa_resource"], kind="text")
-                    yield field("gate_voltage_limit_V", "Gate voltage software limit (V)",
-                                DEFAULTS["gate_voltage_limit_V"],
-                                hint="Hard safety ceiling on any gate voltage below.")
-                    yield field("gate_compliance_current_A", "Gate leakage compliance (A)",
-                                DEFAULTS["gate_compliance_current_A"])
-                    yield field("gate_voltage_values", "Gate voltage (V)",
-                                DEFAULTS["gate_voltage_values"], kind="text",
-                                hint="Single value, or comma-separated list — one complete "
-                                     "current sweep runs per value, each saved to its own "
-                                     "file and plotted together.")
-
-                with Collapsible(title="Temperature (MercuryiTC)", collapsed=False):
-                    yield switch_field("enable_temperature",
-                                        "Log temperature (Oxford Instruments MercuryiTC)",
-                                        DEFAULTS["enable_temperature"])
-                    yield field("temperature_visa_resource", "MercuryiTC VISA resource",
-                                DEFAULTS["temperature_visa_resource"], kind="text",
-                                hint="e.g. TCPIP0::<ip>::7020::SOCKET (Ethernet) or an ASRL resource.")
-                    yield field("temperature_sensor_uids", "Sensor board UID(s)",
-                                DEFAULTS["temperature_sensor_uids"], kind="text",
-                                hint="1 or 2 board UIDs, comma-separated, e.g. 'MB1.T1, DB5.T1'. "
-                                     "Not connected, or only one probe wired up? Fine either way — "
-                                     "missing readings just leave the column empty.")
+                # ── Instrument wiring & timing constants ── rarely change ───
+                yield Static("Instrument configuration", classes="section-title")
+                with Vertical(classes="stable-grid"):
+                    yield card(
+                        "Instrument addresses",
+                        field("source_visa_resource", "6221 (current source)",
+                              DEFAULTS["source_visa_resource"], kind="text"),
+                        field("voltmeter_visa_resource", "2182 (DUT voltage)",
+                              DEFAULTS["voltmeter_visa_resource"], kind="text"),
+                        field("gate_visa_resource", "2400 (gate)",
+                              DEFAULTS["gate_visa_resource"], kind="text"),
+                        field("temperature_visa_resource", "MercuryiTC",
+                              DEFAULTS["temperature_visa_resource"], kind="text"),
+                        muted=True,
+                    )
+                    yield card(
+                        "Source & gate limits",
+                        field("source_delay_s", "6221 source delay (s)", DEFAULTS["source_delay_s"]),
+                        field("gate_voltage_limit_V", "Gate voltage software limit (V)",
+                              DEFAULTS["gate_voltage_limit_V"],
+                              hint="Hard safety ceiling."),
+                        field("gate_compliance_current_A", "Gate leakage compliance (A)",
+                              DEFAULTS["gate_compliance_current_A"]),
+                        muted=True,
+                    )
+                    yield card(
+                        "Temperature sensors",
+                        field("temperature_sensor_uids", "MercuryiTC sensor board UID(s)",
+                              DEFAULTS["temperature_sensor_uids"], kind="text",
+                              hint="1-2 UIDs, comma-separated."),
+                        muted=True,
+                    )
 
             with Vertical(id="sidebar"):
                 yield Static("Description", classes="sidebar-title")
@@ -1048,8 +1100,15 @@ class DCIVCurveApp(App):
         state, parse_errors = self.parse_state()
         if parse_errors:
             info, warnings, errors = [], [], parse_errors
+            preview = None
         else:
             info, warnings, errors = build_summary(state)
+            preview = compute_filename_preview(state)
+
+        self.query_one("#filename_preview", Static).update(
+            f"File:  [bold]{preview}[/bold]" if preview
+            else "[dim]File:  (choose a sample and device to preview the filename)[/dim]"
+        )
 
         lines: list[str] = []
         if errors:
