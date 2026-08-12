@@ -852,6 +852,7 @@ class DCGateSweepApp(App):
     #identity_bar { height: auto; border: round $accent; padding: 1 2; margin-bottom: 1; }
     #filename_preview { text-style: bold; margin-bottom: 1; }
     #identity_fields { layout: grid; grid-size: 4; grid-gutter: 0 2; height: auto; }
+    #identity_fields > Vertical { height: auto; }
 
     .section-title { text-style: bold; color: $text-muted; margin: 1 0; }
     .param-grid { layout: grid; grid-size: 3; grid-gutter: 1 2; height: auto; margin-bottom: 1; }

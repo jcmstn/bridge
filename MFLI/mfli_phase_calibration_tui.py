@@ -797,6 +797,7 @@ class MFLIPhaseCalibrationApp(App):
     #identity_bar { border: round $accent; padding: 1 2; margin-bottom: 1; height: auto; }
     #filename_preview { margin-bottom: 1; }
     #identity_fields { layout: grid; grid-size: 4; grid-gutter: 1 2; height: auto; }
+    #identity_fields > Vertical { height: auto; }
     .section-title { text-style: bold underline; margin: 1 0; }
     .param-grid { layout: grid; grid-size: 3; grid-gutter: 1 2; height: auto; }
     .param-card { border: round $primary; padding: 1 2; height: auto; }
@@ -819,17 +820,21 @@ class MFLIPhaseCalibrationApp(App):
                 with Vertical(id="identity_bar"):
                     yield Static(id="filename_preview")
                     with Vertical(id="identity_fields"):
-                        yield Label("Sample", classes="field-label")
-                        yield Select(sample_options(_DATA_DIR), id="sample_select",
-                                     allow_blank=False, value=TEST_SAMPLE)
-                        yield from field("device", "Device (e.g. HB3, SV2)",
-                                         DEFAULTS["device"], kind="text")
-                        yield from field("cooldown", "Cooldown (optional)",
-                                         DEFAULTS["cooldown"], kind="text")
-                        yield from field("temperature_setpoint_K", "Temperature setpoint (K, optional)",
-                                         DEFAULTS["temperature_setpoint_K"], kind="number", valid_empty=True,
-                                         hint="Drives only the filename's T###K token — the header's "
-                                              "T_K uses the measured temperature when available.")
+                        yield Vertical(
+                            Label("Sample", classes="field-label"),
+                            Select(sample_options(_DATA_DIR), id="sample_select",
+                                   allow_blank=False, value=TEST_SAMPLE),
+                        )
+                        yield Vertical(*field("device", "Device (e.g. HB3, SV2)",
+                                              DEFAULTS["device"], kind="text"))
+                        yield Vertical(*field("cooldown", "Cooldown (optional)",
+                                              DEFAULTS["cooldown"], kind="text"))
+                        yield Vertical(*field(
+                            "temperature_setpoint_K", "Temperature setpoint (K, optional)",
+                            DEFAULTS["temperature_setpoint_K"], kind="number", valid_empty=True,
+                            hint="Drives only the filename's T###K token — the header's "
+                                 "T_K uses the measured temperature when available.",
+                        ))
 
                 with Vertical(classes="param-grid"):
                     yield card(

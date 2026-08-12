@@ -952,6 +952,7 @@ class MFLIDualHarmonicApp(App):
     #identity_bar { border: round $accent; padding: 1 2; height: auto; margin-bottom: 1; }
     #filename_preview { margin-bottom: 1; }
     #identity_fields { layout: grid; grid-size: 4; grid-gutter: 1 2; height: auto; }
+    #identity_fields > Vertical { height: auto; }
     .field { margin-bottom: 1; }
     .section-title { text-style: bold underline; margin: 1 0; }
     .param-grid { layout: grid; grid-size: 3; grid-gutter: 1 2; height: auto; }

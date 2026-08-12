@@ -34,7 +34,7 @@ from dc.dc_sweep_utils import linear_sweep, parse_value_list
 from dc.dc_gate_sweep_tui import (
     DEFAULTS, NUMERIC_FIELDS, TEXT_FIELDS, OPTIONAL_NUMERIC_FIELDS, MEASUREMENT_TYPE,
     DC_GATE_SWEEP_DESCRIPTION, MeasurementPlan, build_header_fields, build_summary,
-    parse_sensor_uids,
+    compute_filename_preview, parse_sensor_uids,
 )
 from instruments.data_naming import (
     TEST_SAMPLE, RunContext, allocate_run, finalize_index_row,
@@ -43,9 +43,11 @@ from instruments.data_naming import (
 from web.run_controller import (
     RunController, RunCallbacks, FinalStatus, num_field, optional_num_field, text_field,
     bool_switch, render_summary, busy_banner, is_busy,
+    param_card, stable_card, param_grid, stable_grid, section_title,
 )
-from web.directory_picker import directory_field, validate_directory
-from web.sample_picker import NEW_SAMPLE_SENTINEL, sample_select, status_comment_dialog
+from web.directory_picker import validate_directory
+from web.identity_bar import identity_bar
+from web.sample_picker import NEW_SAMPLE_SENTINEL, status_comment_dialog
 
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data"
 _SETTINGS_PATH = _DATA_DIR / "web_settings" / "dc_gate_sweep_web_settings.json"
@@ -179,78 +181,77 @@ def page() -> None:
     switches: dict = {}
     controller: dict[str, Optional[RunController]] = {"c": None}
 
+    identity = identity_bar(
+        default_data_dir=saved.get("data_dir") or str(_DATA_DIR),
+        default_sample=saved.get("sample") or TEST_SAMPLE,
+        default_device=d("device"), default_cooldown=d("cooldown"),
+        default_temperature_K=(lambda t: float(t) if t not in ("", None) else None)(
+            d("temperature_setpoint_K")),
+    )
+
     with ui.row().classes("w-full gap-4 items-start no-wrap"):
-        with ui.column().classes("flex-grow gap-1 max-w-3xl"):
-            with ui.expansion("Instruments", value=True, icon="cable").classes("w-full"):
-                inputs["source_visa_resource"] = text_field("Keithley 6221 (sense current)", d("source_visa_resource"))
-                inputs["voltmeter_visa_resource"] = text_field("Keithley 2182 (DUT voltage)", d("voltmeter_visa_resource"))
-                inputs["gate_visa_resource"] = text_field("Keithley 2400 (gate)", d("gate_visa_resource"))
+        with ui.column().classes("flex-grow gap-1 max-w-4xl"):
+            with param_grid():
+                with param_card("Source (6221)"):
+                    inputs["sense_current_A"] = num_field("Fixed sense current (A)", float(d("sense_current_A")))
+                    inputs["compliance_V"] = num_field("Compliance voltage (V)", float(d("compliance_V")))
 
-            with ui.expansion("Sense current & compliance", value=True, icon="bolt").classes("w-full"):
-                inputs["sense_current_A"] = num_field("Fixed sense current (A)", float(d("sense_current_A")))
-                inputs["compliance_V"] = num_field("Compliance voltage (V)", float(d("compliance_V")))
-                with ui.expansion("Source timing (advanced)"):
+                with param_card("Voltmeter (2182)"):
+                    inputs["nplc"] = num_field("NPLC (integration time)", float(d("nplc")))
+                    switches["auto_range"] = bool_switch("Auto-range", d("auto_range"))
+
+                with param_card("Acquisition timing"):
+                    inputs["settling_time_s"] = num_field("Settling time per gate step (s)", float(d("settling_time_s")))
+                    inputs["n_averages"] = num_field("Voltage samples averaged per point", float(d("n_averages")), integer=True)
+
+                with param_card("Gate voltage sweep (2400)"):
+                    inputs["gate_min_V"] = num_field("Sweep gate voltage min (V)", float(d("gate_min_V")))
+                    inputs["gate_max_V"] = num_field("Sweep gate voltage max (V)", float(d("gate_max_V")))
+                    inputs["step_V"] = num_field("Sweep step size (V)", float(d("step_V")))
+                    switches["bidirectional_sweep"] = bool_switch(
+                        "Bidirectional sweep (min → max → min)", d("bidirectional_sweep"))
+
+                with param_card("Field (Kepco magnet, optional)"):
+                    switches["enable_field"] = bool_switch("Park field (Kepco magnet)", d("enable_field"))
+                    inputs["field_current_values"] = text_field(
+                        "Magnet current (A)", d("field_current_values"),
+                        hint="Single value, or comma-separated list — one complete gate sweep runs "
+                             "per value, each saved to its own file and plotted together.")
+
+                with param_card("Temperature logging"):
+                    switches["enable_temperature"] = bool_switch(
+                        "Log temperature (Oxford Instruments MercuryiTC)", d("enable_temperature"))
+
+            section_title("Instrument configuration")
+            with stable_grid():
+                with stable_card("Instrument addresses"):
+                    inputs["source_visa_resource"] = text_field("Keithley 6221 (sense current)", d("source_visa_resource"))
+                    inputs["voltmeter_visa_resource"] = text_field("Keithley 2182 (DUT voltage)", d("voltmeter_visa_resource"))
+                    inputs["gate_visa_resource"] = text_field("Keithley 2400 (gate)", d("gate_visa_resource"))
+                    inputs["magnet_visa_resource"] = text_field("Magnet VISA resource", d("magnet_visa_resource"))
+                    inputs["gaussmeter_visa_resource"] = text_field(
+                        "Gaussmeter VISA resource", d("gaussmeter_visa_resource"),
+                        hint="Lake Shore 475 — measures the actual field once parked.")
+                    inputs["temperature_visa_resource"] = text_field("MercuryiTC VISA resource", d("temperature_visa_resource"))
+
+                with stable_card("Source & gate limits"):
                     inputs["source_delay_s"] = num_field("6221 source delay (s)", float(d("source_delay_s")))
+                    inputs["gate_voltage_limit_V"] = num_field(
+                        "Gate voltage software limit (V)", float(d("gate_voltage_limit_V")),
+                        hint="Hard safety ceiling — independent of the sweep range above.")
+                    inputs["gate_compliance_current_A"] = num_field("Gate leakage compliance (A)", float(d("gate_compliance_current_A")))
 
-            with ui.expansion("Voltmeter (Keithley 2182)", value=True, icon="speed").classes("w-full"):
-                inputs["nplc"] = num_field("NPLC (integration time)", float(d("nplc")))
-                switches["auto_range"] = bool_switch("Auto-range", d("auto_range"))
-
-            with ui.expansion("Acquisition timing", value=True, icon="save").classes("w-full"):
-                inputs["settling_time_s"] = num_field("Settling time per gate step (s)", float(d("settling_time_s")))
-                inputs["n_averages"] = num_field("Voltage samples averaged per point", float(d("n_averages")), integer=True)
-
-            with ui.expansion("Sample & run identity", value=True, icon="science").classes("w-full"):
-                data_dir_input = directory_field(
-                    "Data root directory", saved.get("data_dir") or str(_DATA_DIR))
-                sample_dropdown, refresh_sample_options = sample_select(
-                    lambda: data_dir_input.value, default=saved.get("sample") or TEST_SAMPLE)
-                data_dir_input.on_value_change(lambda: refresh_sample_options())
-                inputs["device"] = text_field("Device (e.g. HB3, SV2)", d("device"))
-                inputs["cooldown"] = text_field("Cooldown (optional)", d("cooldown"))
-                _t_default = d("temperature_setpoint_K")
-                inputs["temperature_setpoint_K"] = optional_num_field(
-                    "Temperature setpoint (K, optional)",
-                    float(_t_default) if _t_default not in ("", None) else None,
-                    hint="Drives only the filename's T###K token — the header's T_K uses the "
-                         "measured temperature when available.")
-
-            with ui.expansion("Gate voltage sweep", value=True, icon="tune").classes("w-full"):
-                inputs["gate_voltage_limit_V"] = num_field(
-                    "Gate voltage software limit (V)", float(d("gate_voltage_limit_V")),
-                    hint="Hard safety ceiling — independent of the sweep range below.")
-                inputs["gate_compliance_current_A"] = num_field("Gate leakage compliance (A)", float(d("gate_compliance_current_A")))
-                inputs["gate_min_V"] = num_field("Sweep gate voltage min (V)", float(d("gate_min_V")))
-                inputs["gate_max_V"] = num_field("Sweep gate voltage max (V)", float(d("gate_max_V")))
-                inputs["step_V"] = num_field("Sweep step size (V)", float(d("step_V")))
-                switches["bidirectional_sweep"] = bool_switch(
-                    "Bidirectional sweep (min → max → min)", d("bidirectional_sweep"))
-
-            with ui.expansion("Field (Kepco magnet, optional)", value=False, icon="explore").classes("w-full"):
-                switches["enable_field"] = bool_switch("Park field (Kepco magnet)", d("enable_field"))
-                inputs["magnet_visa_resource"] = text_field("Magnet VISA resource", d("magnet_visa_resource"))
-                inputs["current_limit_A"] = num_field("Software current limit (A)", float(d("current_limit_A")))
-                inputs["voltage_compliance_V"] = num_field("Voltage compliance (V)", float(d("voltage_compliance_V")))
-                with ui.expansion("Ramp safety (advanced)"):
+                with stable_card("Magnet ramp safety"):
+                    inputs["current_limit_A"] = num_field("Software current limit (A)", float(d("current_limit_A")))
+                    inputs["voltage_compliance_V"] = num_field("Voltage compliance (V)", float(d("voltage_compliance_V")))
                     inputs["ramp_step_A"] = num_field("Ramp step (A)", float(d("ramp_step_A")))
                     inputs["ramp_delay_s"] = num_field("Ramp delay (s)", float(d("ramp_delay_s")))
-                inputs["field_settle_s"] = num_field("Settling time after parking field (s)", float(d("field_settle_s")))
-                inputs["gaussmeter_visa_resource"] = text_field(
-                    "Gaussmeter VISA resource", d("gaussmeter_visa_resource"),
-                    hint="Lake Shore 475 — measures the actual field once parked.")
-                with ui.expansion("Gaussmeter averaging (advanced)"):
+                    inputs["field_settle_s"] = num_field("Settling time after parking field (s)", float(d("field_settle_s")))
+
+                with stable_card("Gaussmeter & temperature sensors"):
                     inputs["gaussmeter_n_averages"] = num_field("Field readings averaged", float(d("gaussmeter_n_averages")), integer=True)
                     inputs["gaussmeter_read_delay_s"] = num_field("Delay between readings (s)", float(d("gaussmeter_read_delay_s")))
-                inputs["field_current_values"] = text_field(
-                    "Magnet current (A)", d("field_current_values"),
-                    hint="Single value, or comma-separated list — one complete gate sweep runs "
-                         "per value, each saved to its own file and plotted together.")
-
-            with ui.expansion("Temperature (MercuryiTC)", value=True, icon="thermostat").classes("w-full"):
-                switches["enable_temperature"] = bool_switch(
-                    "Log temperature (Oxford Instruments MercuryiTC)", d("enable_temperature"))
-                inputs["temperature_visa_resource"] = text_field("MercuryiTC VISA resource", d("temperature_visa_resource"))
-                inputs["temperature_sensor_uids"] = text_field("Sensor board UID(s)", d("temperature_sensor_uids"))
+                    inputs["temperature_sensor_uids"] = text_field("Sensor board UID(s)", d("temperature_sensor_uids"))
 
         with ui.column().classes("w-96 gap-2"):
             ui.label("Summary").classes("text-lg font-bold")
@@ -291,12 +292,15 @@ def page() -> None:
                 errors.append(f"'{fid}' is not a valid number.")
                 state[fid] = 0
         for fid in TEXT_FIELDS:
+            if fid in ("device", "cooldown"):
+                continue
             state[fid] = (inputs[fid].value or "").strip()
-        for fid in OPTIONAL_NUMERIC_FIELDS:
-            state[fid] = inputs[fid].value
+        state["device"] = (identity.device_input.value or "").strip()
+        state["cooldown"] = (identity.cooldown_input.value or "").strip()
+        state["temperature_setpoint_K"] = identity.temperature_input.value
         for fid, sw in switches.items():
             state[fid] = sw.value
-        sample_value = sample_dropdown.value
+        sample_value = identity.sample_dropdown.value
         state["sample"] = sample_value if sample_value not in (None, NEW_SAMPLE_SENTINEL) else ""
         state["field_current_list"] = []
         state["field_parse_error"] = None
@@ -311,8 +315,11 @@ def page() -> None:
         raw = {fid: inp.value for fid, inp in inputs.items()}
         for fid, sw in switches.items():
             raw[fid] = sw.value
-        raw["data_dir"] = data_dir_input.value
-        sample_value = sample_dropdown.value
+        raw["device"] = identity.device_input.value
+        raw["cooldown"] = identity.cooldown_input.value
+        raw["temperature_setpoint_K"] = identity.temperature_input.value
+        raw["data_dir"] = identity.data_dir_input.value
+        sample_value = identity.sample_dropdown.value
         if sample_value not in (None, NEW_SAMPLE_SENTINEL):
             raw["sample"] = sample_value
         return raw
@@ -320,11 +327,16 @@ def page() -> None:
     @ui.refreshable
     def refresh_summary() -> None:
         state, parse_errors = parse_state()
-        dir_warning, dir_error = validate_directory(data_dir_input.value or "")
+        dir_warning, dir_error = validate_directory(identity.data_dir_input.value or "")
         if parse_errors:
             info, warnings, errors = [], [], parse_errors
+            preview = None
         else:
             info, warnings, errors = build_summary(state)
+            preview = compute_filename_preview(state)
+        identity.filename_label.set_text(
+            f"File:  {preview}" if preview
+            else "File:  (choose a sample and device to preview the filename)")
         if dir_warning:
             warnings = warnings + [dir_warning]
         if dir_error:
@@ -334,8 +346,11 @@ def page() -> None:
             render_summary([i for i in info if i], warnings, errors)
         start_btn.set_enabled(not errors and not is_busy())
 
-    for inp in list(inputs.values()) + [data_dir_input, sample_dropdown]:
+    for inp in list(inputs.values()):
         inp.on_value_change(refresh_summary.refresh)
+    for handle in (identity.data_dir_input, identity.sample_dropdown,
+                   identity.device_input, identity.cooldown_input, identity.temperature_input):
+        handle.on_value_change(refresh_summary.refresh)
     for sw in switches.values():
         sw.on_value_change(refresh_summary.refresh)
     refresh_summary()
@@ -528,7 +543,7 @@ def page() -> None:
 
     def on_start() -> None:
         state, parse_errors = parse_state()
-        dir_warning, dir_error = validate_directory(data_dir_input.value or "")
+        dir_warning, dir_error = validate_directory(identity.data_dir_input.value or "")
         if parse_errors or dir_error:
             ui.notify("Fix the blocking issues before starting.", type="negative")
             return
@@ -536,7 +551,7 @@ def page() -> None:
         if errors:
             ui.notify("Fix the blocking issues before starting.", type="negative")
             return
-        state["data_dir"] = data_dir_input.value.strip()
+        state["data_dir"] = identity.data_dir_input.value.strip()
 
         _save_settings(collect_raw())
 

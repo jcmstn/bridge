@@ -26,8 +26,9 @@ import logging
 import queue
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterator, Optional
 
 from nicegui import ui
 
@@ -97,6 +98,44 @@ def optional_num_field(label: str, default: Optional[float], *, hint: str = "") 
     if hint:
         ui.label(hint).classes("text-xs text-grey-6 -mt-1 mb-1")
     return inp
+
+
+@contextmanager
+def param_card(title: str) -> Iterator[ui.card]:
+    """NiceGUI analog of the TUI's card() -- a bordered card grouping a few
+    related fields, used inside param_grid() in place of the old
+    ui.expansion() sections. For parameters the user actually changes run
+    to run (current, field, gate, ...)."""
+    with ui.card().classes("w-full") as c:
+        ui.label(title).classes("font-bold")
+        yield c
+
+
+@contextmanager
+def stable_card(title: str) -> Iterator[ui.card]:
+    """Muted variant of param_card, for wiring addresses/timing constants
+    that rarely if ever change -- used inside stable_grid()."""
+    with ui.card().classes("w-full bg-grey-1 dark:bg-grey-9") as c:
+        ui.label(title).classes("font-bold text-grey-6")
+        yield c
+
+
+def param_grid() -> ui.grid:
+    """3-column grid of param_card()s -- NiceGUI analog of the TUI's
+    .param-grid. Use as `with param_grid(): ...`."""
+    return ui.grid(columns=3).classes("w-full gap-4")
+
+
+def stable_grid() -> ui.grid:
+    """3-column grid of stable_card()s -- NiceGUI analog of the TUI's
+    .stable-grid. Use as `with stable_grid(): ...`."""
+    return ui.grid(columns=3).classes("w-full gap-4")
+
+
+def section_title(text: str) -> None:
+    """Divider label between param_grid() and stable_grid(), matching the
+    TUI's "Instrument configuration" .section-title Static."""
+    ui.label(text).classes("text-sm font-bold text-grey-6 mt-3 mb-1")
 
 
 def render_summary(info: list[str], warnings: list[str], errors: list[str]) -> None:

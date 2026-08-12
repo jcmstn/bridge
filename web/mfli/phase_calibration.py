@@ -37,8 +37,9 @@ from mfli.mfli_phase_calibration import (
     format_report, run_phase_calibration,
 )
 from mfli.mfli_phase_calibration_tui import (
-    DEFAULTS, NUMERIC_FIELDS, TEXT_FIELDS, LIST_FIELDS, OPTIONAL_NUMERIC_FIELDS,
+    DEFAULTS, NUMERIC_FIELDS, TEXT_FIELDS, LIST_FIELDS,
     MEASUREMENT_TYPE, CalibrationPlan, build_header_fields, build_summary, parse_sensor_uids,
+    compute_filename_preview,
 )
 from instruments.data_naming import (
     TEST_SAMPLE, allocate_run, finalize_index_row, make_incremental_writer,
@@ -46,10 +47,12 @@ from instruments.data_naming import (
 )
 from web.run_controller import (
     RunController, RunCallbacks, FinalStatus, num_field, text_field, bool_switch,
-    optional_num_field, render_summary, busy_banner, is_busy,
+    render_summary, busy_banner, is_busy,
+    param_card, stable_card, param_grid, stable_grid, section_title,
 )
-from web.directory_picker import directory_field, validate_directory
-from web.sample_picker import NEW_SAMPLE_SENTINEL, sample_select, status_comment_dialog
+from web.directory_picker import validate_directory
+from web.identity_bar import identity_bar
+from web.sample_picker import NEW_SAMPLE_SENTINEL, status_comment_dialog
 
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data"
 _SETTINGS_PATH = _DATA_DIR / "web_settings" / "mfli_phase_calibration_web_settings.json"
@@ -224,118 +227,119 @@ def page() -> None:
 
     inputs: dict = {}
     switches: dict = {}
-    optional_inputs: dict = {}
     controller: dict[str, Optional[RunController]] = {"c": None}
+
+    _t_default = d("temperature_setpoint_K")
+    identity = identity_bar(
+        default_data_dir=saved.get("data_dir") or str(_DATA_DIR),
+        default_sample=saved.get("sample") or TEST_SAMPLE,
+        default_device=d("device"), default_cooldown=d("cooldown"),
+        default_temperature_K=float(_t_default) if _t_default not in ("", None) else None,
+    )
 
     with ui.row().classes("w-full gap-4 items-start no-wrap"):
         with ui.column().classes("flex-grow gap-1 max-w-3xl"):
-            with ui.expansion("Devices", value=True, icon="cable").classes("w-full"):
-                inputs["leader_device"] = text_field("Leader MFLI (current source + 1f)", d("leader_device"))
-                inputs["follower_device"] = text_field("Follower MFLI (2f)", d("follower_device"))
-                with ui.expansion("Connection (advanced)"):
+            with param_grid():
+                with param_card("Devices"):
+                    inputs["leader_device"] = text_field("Leader MFLI (current source + 1f)", d("leader_device"))
+                    inputs["follower_device"] = text_field("Follower MFLI (2f)", d("follower_device"))
+
+                with param_card("Excitation"):
+                    inputs["frequency_Hz"] = num_field(
+                        "Excitation frequency (Hz)", float(d("frequency_Hz")),
+                        hint="Avoid exact multiples of 50/60 Hz (mains pickup).")
+                    inputs["amplitude_V"] = num_field("Output amplitude (V, peak)", float(d("amplitude_V")))
+                    inputs["series_R_ohm"] = num_field(
+                        "Series resistor (Ω)", float(d("series_R_ohm")), hint="Sets excitation current: I ≈ V / R.")
+
+                with param_card("Field sweep & calibration point"):
+                    inputs["calibration_current_A"] = num_field(
+                        "Calibration magnet current (A)", float(d("calibration_current_A")),
+                        hint="Where the 1f Y-null is performed — pick a point near saturation "
+                             "(e.g. matching the sweep max).")
+                    inputs["i_min_A"] = num_field("Sweep current min (A)", float(d("i_min_A")))
+                    inputs["i_max_A"] = num_field("Sweep current max (A)", float(d("i_max_A")))
+                    inputs["n_points"] = num_field("Points per sweep direction", float(d("n_points")), integer=True)
+
+                with param_card("Phase null"):
+                    inputs["null_n_averages"] = num_field("Averages per phase read", float(d("null_n_averages")), integer=True)
+                    inputs["null_max_iterations"] = num_field("Max null iterations", float(d("null_max_iterations")), integer=True)
+                    inputs["null_tol_deg"] = num_field("Convergence tolerance (°)", float(d("null_tol_deg")))
+
+                with param_card("Amplitude check (optional)"):
+                    switches["enable_amplitude_check"] = bool_switch("Run current-amplitude scaling check", d("enable_amplitude_check"))
+                    inputs["amplitudes_V"] = text_field(
+                        "Amplitudes to test (V, comma-separated)", d("amplitudes_V"),
+                        hint="≥ 2 values. Checks whether the 2f signal scales linearly with drive current.")
+
+                with param_card("Frequency check (optional)"):
+                    switches["enable_frequency_check"] = bool_switch("Run frequency scaling check", d("enable_frequency_check"))
+                    inputs["frequencies_Hz"] = text_field(
+                        "Frequencies to test (Hz, comma-separated)", d("frequencies_Hz"),
+                        hint="≥ 2 values. Checks whether the optimal 1f phase scales linearly with frequency.")
+
+                with param_card("Temperature logging"):
+                    switches["enable_temperature"] = bool_switch(
+                        "Log temperature (Oxford Instruments MercuryiTC)", d("enable_temperature"))
+
+            section_title("Instrument configuration")
+
+            with stable_grid():
+                with stable_card("Connection"):
                     inputs["daq_host"] = text_field("LabOne data server host", d("daq_host"))
                     inputs["daq_port"] = num_field("LabOne data server port", float(d("daq_port")), integer=True)
 
-            with ui.expansion("Excitation (current source)", value=True, icon="bolt").classes("w-full"):
-                inputs["frequency_Hz"] = num_field(
-                    "Excitation frequency (Hz)", float(d("frequency_Hz")),
-                    hint="Avoid exact multiples of 50/60 Hz (mains pickup).")
-                inputs["amplitude_V"] = num_field("Output amplitude (V, peak)", float(d("amplitude_V")))
-                inputs["series_R_ohm"] = num_field(
-                    "Series resistor (Ω)", float(d("series_R_ohm")), hint="Sets excitation current: I ≈ V / R.")
+                with stable_card("Lock-in filter"):
+                    inputs["time_constant_s"] = num_field(
+                        "Filter time constant (s)", float(d("time_constant_s")),
+                        hint="Bigger = quieter but slower & longer settling.")
+                    order_select = ui.select(list(range(1, 9)), value=int(d("order")), label="Filter order").classes("w-full")
+                    switches["sinc_filter"] = bool_switch("Sinc filter (extra harmonic rejection)", d("sinc_filter"))
+                    inputs["input_range_1f_V"] = num_field("1f input range (V)", float(d("input_range_1f_V")))
+                    inputs["input_range_2f_V"] = num_field("2f input range (V)", float(d("input_range_2f_V")))
+                    inputs["sample_rate_Hz"] = num_field("Demodulator sample rate (Sa/s)", float(d("sample_rate_Hz")))
 
-            with ui.expansion("Lock-in filters & inputs", value=True, icon="filter_alt").classes("w-full"):
-                inputs["time_constant_s"] = num_field(
-                    "Filter time constant (s)", float(d("time_constant_s")),
-                    hint="Bigger = quieter but slower & longer settling.")
-                order_select = ui.select(list(range(1, 9)), value=int(d("order")), label="Filter order").classes("w-full")
-                switches["sinc_filter"] = bool_switch("Sinc filter (extra harmonic rejection)", d("sinc_filter"))
-                inputs["input_range_1f_V"] = num_field("1f input range (V)", float(d("input_range_1f_V")))
-                inputs["input_range_2f_V"] = num_field("2f input range (V)", float(d("input_range_2f_V")))
-                inputs["sample_rate_Hz"] = num_field("Demodulator sample rate (Sa/s)", float(d("sample_rate_Hz")))
-
-            with ui.expansion("Magnet", value=True, icon="explore").classes("w-full"):
-                inputs["visa_resource"] = text_field("Magnet VISA resource", d("visa_resource"))
-                inputs["current_limit_A"] = num_field(
-                    "Software current limit (A)", float(d("current_limit_A")),
-                    hint="Hard safety ceiling — independent of the supply's own range.")
-                inputs["voltage_compliance_V"] = num_field("Voltage compliance (V)", float(d("voltage_compliance_V")))
-                with ui.expansion("Ramp safety (advanced)"):
+                with stable_card("Magnet & ramp safety"):
+                    inputs["visa_resource"] = text_field("Magnet VISA resource", d("visa_resource"))
+                    inputs["current_limit_A"] = num_field(
+                        "Software current limit (A)", float(d("current_limit_A")),
+                        hint="Hard safety ceiling — independent of the supply's own range.")
+                    inputs["voltage_compliance_V"] = num_field("Voltage compliance (V)", float(d("voltage_compliance_V")))
                     inputs["ramp_step_A"] = num_field("Ramp step (A)", float(d("ramp_step_A")))
                     inputs["ramp_delay_s"] = num_field("Ramp delay (s)", float(d("ramp_delay_s")))
 
-            with ui.expansion("Gaussmeter", value=True, icon="speed").classes("w-full"):
-                inputs["gaussmeter_visa_resource"] = text_field(
-                    "Gaussmeter VISA resource", d("gaussmeter_visa_resource"),
-                    hint="Lake Shore 475 — measures the actual field at each point.")
-                with ui.expansion("Gaussmeter averaging (advanced)"):
+                with stable_card("Gaussmeter"):
+                    inputs["gaussmeter_visa_resource"] = text_field(
+                        "Gaussmeter VISA resource", d("gaussmeter_visa_resource"),
+                        hint="Lake Shore 475 — measures the actual field at each point.")
                     inputs["gaussmeter_n_averages"] = num_field(
                         "Field readings averaged per point", float(d("gaussmeter_n_averages")), integer=True)
                     inputs["gaussmeter_read_delay_s"] = num_field(
                         "Delay between readings (s)", float(d("gaussmeter_read_delay_s")))
 
-            with ui.expansion("Field sweep & calibration point", value=True, icon="tune").classes("w-full"):
-                inputs["calibration_current_A"] = num_field(
-                    "Calibration magnet current (A)", float(d("calibration_current_A")),
-                    hint="Where the 1f Y-null is performed — pick a point near saturation "
-                         "(e.g. matching the sweep max).")
-                inputs["i_min_A"] = num_field("Sweep current min (A)", float(d("i_min_A")))
-                inputs["i_max_A"] = num_field("Sweep current max (A)", float(d("i_max_A")))
-                inputs["n_points"] = num_field("Points per sweep direction", float(d("n_points")), integer=True)
-                inputs["sweep_settling_time_s"] = num_field(
-                    "Settling time per sweep point (s)", float(d("sweep_settling_time_s")),
-                    hint="Rule of thumb: ≥ 5 × time constant.")
-                inputs["sweep_n_averages"] = num_field(
-                    "Samples to average per sweep point", float(d("sweep_n_averages")), integer=True)
-                with ui.expansion("Hold-check tolerance (advanced)"):
+                with stable_card("Sweep timing & hold check"):
+                    inputs["sweep_settling_time_s"] = num_field(
+                        "Settling time per sweep point (s)", float(d("sweep_settling_time_s")),
+                        hint="Rule of thumb: ≥ 5 × time constant.")
+                    inputs["sweep_n_averages"] = num_field(
+                        "Samples to average per sweep point", float(d("sweep_n_averages")), integer=True)
                     inputs["hold_tol_ratio"] = num_field(
                         "Max acceptable |Y|/R away from the calibration point", float(d("hold_tol_ratio")),
                         hint="Flags drift if the null residual exceeds this anywhere in the sweep.")
+                    ui.label(
+                        "Nulls the leader's 1f Y quadrature by adjusting its demod phaseshift node "
+                        "(the same thing LabOne's \"Auto\" phase button does)."
+                    ).classes("text-xs text-grey-6")
 
-            with ui.expansion("Phase null", value=True, icon="rule").classes("w-full"):
-                inputs["null_n_averages"] = num_field("Averages per phase read", float(d("null_n_averages")), integer=True)
-                inputs["null_max_iterations"] = num_field("Max null iterations", float(d("null_max_iterations")), integer=True)
-                inputs["null_tol_deg"] = num_field("Convergence tolerance (°)", float(d("null_tol_deg")))
-                ui.label(
-                    "Nulls the leader's 1f Y quadrature by adjusting its demod phaseshift node "
-                    "(the same thing LabOne's \"Auto\" phase button does)."
-                ).classes("text-xs text-grey-6")
+                with stable_card("Scaling-check advanced"):
+                    inputs["amp_n_averages"] = num_field("Averages per amplitude point", float(d("amp_n_averages")), integer=True)
+                    inputs["freq_n_averages"] = num_field("Averages per phase read", float(d("freq_n_averages")), integer=True)
+                    inputs["freq_max_iterations"] = num_field("Max null iterations per frequency", float(d("freq_max_iterations")), integer=True)
+                    inputs["freq_tol_deg"] = num_field("Convergence tolerance per frequency (°)", float(d("freq_tol_deg")))
 
-            with ui.expansion("Optional: amplitude & frequency scaling checks", value=False, icon="science").classes("w-full"):
-                switches["enable_amplitude_check"] = bool_switch("Run current-amplitude scaling check", d("enable_amplitude_check"))
-                inputs["amplitudes_V"] = text_field(
-                    "Amplitudes to test (V, comma-separated)", d("amplitudes_V"),
-                    hint="≥ 2 values. Checks whether the 2f signal scales linearly with drive current.")
-                inputs["amp_n_averages"] = num_field("Averages per amplitude point", float(d("amp_n_averages")), integer=True)
-
-                switches["enable_frequency_check"] = bool_switch("Run frequency scaling check", d("enable_frequency_check"))
-                inputs["frequencies_Hz"] = text_field(
-                    "Frequencies to test (Hz, comma-separated)", d("frequencies_Hz"),
-                    hint="≥ 2 values. Checks whether the optimal 1f phase scales linearly with frequency.")
-                inputs["freq_n_averages"] = num_field("Averages per phase read", float(d("freq_n_averages")), integer=True)
-                inputs["freq_max_iterations"] = num_field("Max null iterations per frequency", float(d("freq_max_iterations")), integer=True)
-                inputs["freq_tol_deg"] = num_field("Convergence tolerance per frequency (°)", float(d("freq_tol_deg")))
-
-            with ui.expansion("Temperature (MercuryiTC)", value=True, icon="thermostat").classes("w-full"):
-                switches["enable_temperature"] = bool_switch(
-                    "Log temperature (Oxford Instruments MercuryiTC)", d("enable_temperature"))
-                inputs["temperature_visa_resource"] = text_field("MercuryiTC VISA resource", d("temperature_visa_resource"))
-                inputs["temperature_sensor_uids"] = text_field("Sensor board UID(s)", d("temperature_sensor_uids"))
-
-            with ui.expansion("Sample & run identity", value=True, icon="science").classes("w-full"):
-                data_dir_input = directory_field(
-                    "Data root directory", saved.get("data_dir") or str(_DATA_DIR))
-                sample_dropdown, refresh_sample_options = sample_select(
-                    lambda: data_dir_input.value, default=saved.get("sample") or TEST_SAMPLE)
-                data_dir_input.on_value_change(lambda: refresh_sample_options())
-                inputs["device"] = text_field("Device (e.g. HB3, SV2)", d("device"))
-                inputs["cooldown"] = text_field("Cooldown (optional)", d("cooldown"))
-                _t_default = d("temperature_setpoint_K")
-                optional_inputs["temperature_setpoint_K"] = optional_num_field(
-                    "Temperature setpoint (K, optional)",
-                    float(_t_default) if _t_default not in ("", None) else None,
-                    hint="Drives only the filename's T###K token — the header's T_K uses the "
-                         "measured temperature when available.")
+                with stable_card("Temperature controller"):
+                    inputs["temperature_visa_resource"] = text_field("MercuryiTC VISA resource", d("temperature_visa_resource"))
+                    inputs["temperature_sensor_uids"] = text_field("Sensor board UID(s)", d("temperature_sensor_uids"))
 
         with ui.column().classes("w-96 gap-2"):
             ui.label("Summary").classes("text-lg font-bold")
@@ -384,30 +388,33 @@ def page() -> None:
                 errors.append(f"'{fid}' is not a valid number.")
                 state[fid] = 0
         for fid in TEXT_FIELDS:
+            if fid in ("device", "cooldown"):
+                continue
             state[fid] = (inputs[fid].value or "").strip()
         for fid in LIST_FIELDS:
             values, list_errors = _parse_float_list(inputs[fid].value or "")
             state[fid] = values
             errors += [f"'{fid}': {e}" for e in list_errors]
-        for fid in OPTIONAL_NUMERIC_FIELDS:
-            v = optional_inputs[fid].value
-            state[fid] = float(v) if v is not None else None
+        state["temperature_setpoint_K"] = identity.temperature_input.value
+        state["device"] = (identity.device_input.value or "").strip()
+        state["cooldown"] = (identity.cooldown_input.value or "").strip()
         for fid, sw in switches.items():
             state[fid] = sw.value
         state["order"] = int(order_select.value)
-        sample_value = sample_dropdown.value
+        sample_value = identity.sample_dropdown.value
         state["sample"] = sample_value if sample_value not in (None, NEW_SAMPLE_SENTINEL) else ""
         return state, errors
 
     def collect_raw() -> dict:
         raw = {fid: inp.value for fid, inp in inputs.items()}
-        for fid, inp in optional_inputs.items():
-            raw[fid] = inp.value if inp.value is not None else ""
+        raw["temperature_setpoint_K"] = identity.temperature_input.value if identity.temperature_input.value is not None else ""
+        raw["device"] = identity.device_input.value
+        raw["cooldown"] = identity.cooldown_input.value
         for fid, sw in switches.items():
             raw[fid] = sw.value
         raw["order"] = order_select.value
-        raw["data_dir"] = data_dir_input.value
-        sample_value = sample_dropdown.value
+        raw["data_dir"] = identity.data_dir_input.value
+        sample_value = identity.sample_dropdown.value
         if sample_value not in (None, NEW_SAMPLE_SENTINEL):
             raw["sample"] = sample_value
         return raw
@@ -415,11 +422,15 @@ def page() -> None:
     @ui.refreshable
     def refresh_summary() -> None:
         state, parse_errors = parse_state()
-        dir_warning, dir_error = validate_directory(data_dir_input.value or "")
+        dir_warning, dir_error = validate_directory(identity.data_dir_input.value or "")
         if parse_errors:
             info, warnings, errors = [], [], parse_errors
+            preview = None
         else:
             info, warnings, errors = build_summary(state)
+            preview = compute_filename_preview(state)
+        identity.filename_label.set_text(
+            f"File:  {preview}" if preview else "File:  (choose a sample and device to preview the filename)")
         if dir_warning:
             warnings = warnings + [dir_warning]
         if dir_error:
@@ -429,7 +440,9 @@ def page() -> None:
             render_summary(info, warnings, errors)
         start_btn.set_enabled(not errors and not is_busy())
 
-    for inp in list(inputs.values()) + list(optional_inputs.values()) + [data_dir_input, sample_dropdown]:
+    for inp in list(inputs.values()) + [identity.device_input, identity.cooldown_input,
+                                         identity.temperature_input, identity.data_dir_input,
+                                         identity.sample_dropdown]:
         inp.on_value_change(refresh_summary.refresh)
     for sw in switches.values():
         sw.on_value_change(refresh_summary.refresh)
@@ -567,7 +580,7 @@ def page() -> None:
 
     def on_start() -> None:
         state, parse_errors = parse_state()
-        dir_warning, dir_error = validate_directory(data_dir_input.value or "")
+        dir_warning, dir_error = validate_directory(identity.data_dir_input.value or "")
         if parse_errors or dir_error:
             ui.notify("Fix the blocking issues before starting.", type="negative")
             return
@@ -575,7 +588,7 @@ def page() -> None:
         if errors:
             ui.notify("Fix the blocking issues before starting.", type="negative")
             return
-        state["data_dir"] = data_dir_input.value.strip()
+        state["data_dir"] = identity.data_dir_input.value.strip()
 
         _save_settings(collect_raw())
 
