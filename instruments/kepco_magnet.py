@@ -1,6 +1,8 @@
 """
 Kepco BOP 20-50GL Bipolar Power Supply Driver
-Compatible with pymeasure's Instrument architecture.
+Built on pymeasure's Instrument architecture (SCPIMixin — this is a
+genuinely SCPI/IEEE-488.2 instrument, unlike the LakeShore 475 or
+MercuryiTC drivers in this package which use proprietary command sets).
 
 Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
 Created: 2026-07-29
@@ -10,10 +12,8 @@ Firmware: 3.05+
 
 Usage example:
     from instruments.kepco_magnet import KepkoBOPGL
-    import pyvisa
 
-    rm = pyvisa.ResourceManager()
-    psu = KepkoBOPGL(rm.open_resource("GPIB0::6::INSTR"))
+    psu = KepkoBOPGL("GPIB0::6::INSTR")
 
     psu.reset()
     psu.raise_range_limits_to_max()  # undo any stale CURR:LIM/VOLT:LIM from
@@ -44,12 +44,13 @@ import logging
 import time
 from dataclasses import dataclass
 
-import pyvisa
+from pymeasure.instruments import Instrument, SCPIMixin
+from pymeasure.instruments.validators import strict_range
 
 log = logging.getLogger(__name__)
 
 
-class KepkoBOPGL:
+class KepkoBOPGL(SCPIMixin, Instrument):
     """
     Instrument driver for the Kepco BOP 20-50GL (and compatible BOP-GL 1kW series)
     bipolar power supply, optimised for inductive loads (e.g. superconducting magnets).
@@ -68,58 +69,14 @@ class KepkoBOPGL:
     MAX_VOLTAGE: float = 20.0   # V
     MAX_CURRENT: float = 50.0   # A
 
-    def __init__(self, resource, read_termination: str = "\n",
-                 write_termination: str = "\n", timeout: int = 5000):
-        """
-        Initialise the driver.
-
-        Args:
-            resource: A pyvisa Resource object (already opened).
-            read_termination: Line terminator for read operations.
-            write_termination: Line terminator for write operations.
-            timeout: Communication timeout in milliseconds.
-        """
-        self._inst = resource
-        self._inst.read_termination = read_termination
-        self._inst.write_termination = write_termination
-        self._inst.timeout = timeout
-
-    # ------------------------------------------------------------------ #
-    #  Low-level communication helpers                                     #
-    # ------------------------------------------------------------------ #
-
-    def write(self, command: str) -> None:
-        """Send a command string to the instrument."""
-        self._inst.write(command)
-
-    def query(self, command: str) -> str:
-        """Send a command and return the stripped response string."""
-        return self._inst.query(command).strip()
-
-    def query_float(self, command: str) -> float:
-        """Send a command and return the response parsed as float."""
-        return float(self.query(command))
-
-    def write_checked(self, command: str) -> None:
-        """
-        Send a command and immediately drain the error queue.
-
-        Per the BOP-GL manual (PAR. 3.3.5), a value rejected by a software
-        limit (VOLT:LIM / CURR:LIM) is *silently disregarded* by the
-        instrument -- no exception, no output change, just a queued SCPI
-        error (-120 or -222) that a plain ``write()`` would never surface.
-        Used for any command that programs an output setpoint or limit, so
-        a stale/narrowed limit shows up as a Python exception instead of a
-        mysteriously "stuck" output.
-        """
-        self._inst.write(command)
-        errors = self.check_errors()
-        if errors:
-            raise RuntimeError(f"Kepco rejected {command!r}: {'; '.join(errors)}")
-
-    def close(self) -> None:
-        """Close the VISA resource."""
-        self._inst.close()
+    def __init__(self, adapter, name="Kepco BOP-GL Bipolar Power Supply", **kwargs):
+        super().__init__(
+            adapter,
+            name,
+            read_termination="\n",
+            write_termination="\n",
+            **kwargs,
+        )
 
     # ------------------------------------------------------------------ #
     #  IEEE 488.2 common commands                                          #
@@ -138,12 +95,8 @@ class KepkoBOPGL:
         ``current_limit``/``voltage_limit``, call
         :meth:`raise_range_limits_to_max` right after this.
         """
-        self.write("*RST")
+        super().reset()
         time.sleep(0.5)  # Allow unit to reinitialise
-
-    def clear_status(self) -> None:
-        """Clear all status registers (*CLS)."""
-        self.write("*CLS")
 
     def wait(self) -> None:
         """Block until all pending operations complete (*WAI)."""
@@ -153,20 +106,31 @@ class KepkoBOPGL:
         """Send a group execute trigger (*TRG)."""
         self.write("*TRG")
 
-    @property
-    def identification(self) -> str:
-        """Return the instrument identification string (*IDN?)."""
-        return self.query("*IDN?")
+    identification = Instrument.measurement(
+        "*IDN?",
+        """ Get the instrument identification string (*IDN?). """,
+        cast=str,
+        maxsplit=0,
+    )
 
-    @property
-    def status_byte(self) -> int:
-        """Return the status byte register (*STB?)."""
-        return int(self.query("*STB?"))
+    def check_set_errors(self) -> list:
+        """
+        Drain the error queue after every setpoint write and raise if the
+        instrument rejected it.
 
-    @property
-    def event_status(self) -> int:
-        """Return the standard event status register (*ESR?)."""
-        return int(self.query("*ESR?"))
+        Per the BOP-GL manual (PAR. 3.3.5), a value rejected by a software
+        limit (VOLT:LIM / CURR:LIM) is *silently disregarded* by the
+        instrument -- no exception, no output change, just a queued SCPI
+        error (-120 or -222) that would otherwise go unnoticed. Every
+        setpoint-programming property below is declared with
+        ``check_set_errors=True`` so this runs after each one, turning a
+        stale/narrowed limit into a Python exception instead of a
+        mysteriously "stuck" output.
+        """
+        errors = self.check_errors()
+        if errors:
+            raise RuntimeError(f"Kepco rejected the setpoint: {errors}")
+        return errors
 
     # ------------------------------------------------------------------ #
     #  Output enable / disable                                             #
@@ -179,7 +143,7 @@ class KepkoBOPGL:
 
         Returns True if the output is currently enabled.
         """
-        return bool(int(self.query("OUTP?")))
+        return bool(int(self.ask("OUTP?")))
 
     @output_enabled.setter
     def output_enabled(self, enable: bool) -> None:
@@ -236,7 +200,7 @@ class KepkoBOPGL:
             ``"voltage"``  — constant-voltage (CV) mode
             ``"current"``  — constant-current (CC) mode
         """
-        response = self.query("FUNC:MODE?").upper()
+        response = self.ask("FUNC:MODE?").strip().upper()
         if "VOLT" in response:
             return "voltage"
         elif "CURR" in response:
@@ -257,39 +221,34 @@ class KepkoBOPGL:
     #  Voltage programming and protection                                  #
     # ------------------------------------------------------------------ #
 
-    @property
-    def voltage(self) -> float:
-        """
-        Programmed voltage setpoint in volts.
+    voltage = Instrument.control(
+        "VOLT?", "VOLT %.6f",
+        """ Control the programmed voltage setpoint in volts.
 
-        Valid range: –MAX_VOLTAGE to +MAX_VOLTAGE (±20 V).
-        """
-        return self.query_float("VOLT?")
+        Valid range: –MAX_VOLTAGE to +MAX_VOLTAGE (±20 V). A setpoint the
+        instrument rejects (e.g. above a stale, narrowed VOLT:LIM ceiling
+        -- see :meth:`raise_range_limits_to_max`) raises RuntimeError
+        instead of being silently disregarded. """,
+        validator=strict_range,
+        values=[-MAX_VOLTAGE, MAX_VOLTAGE],
+        check_set_errors=True,
+    )
 
-    @voltage.setter
-    def voltage(self, value: float) -> None:
-        self._check_range(value, -self.MAX_VOLTAGE, self.MAX_VOLTAGE, "Voltage")
-        self.write_checked(f"VOLT {self._fmt(value)}")
-
-    @property
-    def voltage_limit(self) -> float:
-        """
-        Voltage protection (OVP) limit in volts.
+    voltage_limit = Instrument.control(
+        "VOLT:PROT:POS?", "VOLT:PROT %.6f",
+        """ Control the voltage protection (OVP) limit in volts.
 
         When operating in current mode this is the compliance voltage limit.
-        Valid range: 0 to MAX_VOLTAGE.
-        """
-        return self.query_float("VOLT:PROT:POS?")
+        Valid range: 0 to MAX_VOLTAGE. """,
+        validator=strict_range,
+        values=[0, MAX_VOLTAGE],
+        check_set_errors=True,
+    )
 
-    @voltage_limit.setter
-    def voltage_limit(self, value: float) -> None:
-        self._check_range(value, 0, self.MAX_VOLTAGE, "Voltage limit")
-        self.write_checked(f"VOLT:PROT {self._fmt(value)}")
-
-    @property
-    def voltage_setpoint_max(self) -> float:
-        """
-        Software ceiling on the ``voltage`` setpoint itself (VOLT:LIM), in volts.
+    voltage_setpoint_max = Instrument.control(
+        "VOLT:LIM:POS?", "VOLT:LIM %.6f",
+        """ Control the software ceiling on the ``voltage`` setpoint itself
+        (VOLT:LIM), in volts.
 
         This is a *different* register from ``voltage_limit`` (VOLT:PROT).
         ``voltage_limit`` clamps the compliance voltage while the unit
@@ -300,52 +259,41 @@ class KepkoBOPGL:
         :meth:`reset`) will NOT restore it -- it silently keeps rejecting
         any higher ``voltage`` setpoint. Call
         :meth:`raise_range_limits_to_max` at the start of a session if you
-        suspect this.
-        """
-        return self.query_float("VOLT:LIM:POS?")
-
-    @voltage_setpoint_max.setter
-    def voltage_setpoint_max(self, value: float) -> None:
-        self._check_range(value, 0, self.MAX_VOLTAGE, "Voltage setpoint limit")
-        self.write_checked(f"VOLT:LIM {self._fmt(value)}")
+        suspect this. """,
+        validator=strict_range,
+        values=[0, MAX_VOLTAGE],
+        check_set_errors=True,
+    )
 
     # ------------------------------------------------------------------ #
     #  Current programming and protection                                  #
     # ------------------------------------------------------------------ #
 
-    @property
-    def current(self) -> float:
-        """
-        Programmed current setpoint in amperes.
+    current = Instrument.control(
+        "CURR?", "CURR %.6f",
+        """ Control the programmed current setpoint in amperes.
 
-        Valid range: –MAX_CURRENT to +MAX_CURRENT (±50 A).
-        """
-        return self.query_float("CURR?")
+        Valid range: –MAX_CURRENT to +MAX_CURRENT (±50 A). """,
+        validator=strict_range,
+        values=[-MAX_CURRENT, MAX_CURRENT],
+        check_set_errors=True,
+    )
 
-    @current.setter
-    def current(self, value: float) -> None:
-        self._check_range(value, -self.MAX_CURRENT, self.MAX_CURRENT, "Current")
-        self.write_checked(f"CURR {self._fmt(value)}")
-
-    @property
-    def current_limit(self) -> float:
-        """
-        Current protection limit in amperes.
+    current_limit = Instrument.control(
+        "CURR:PROT:POS?", "CURR:PROT %.6f",
+        """ Control the current protection limit in amperes.
 
         When operating in voltage mode this is the compliance current limit.
-        Valid range: 0 to MAX_CURRENT.
-        """
-        return self.query_float("CURR:PROT:POS?")
+        Valid range: 0 to MAX_CURRENT. """,
+        validator=strict_range,
+        values=[0, MAX_CURRENT],
+        check_set_errors=True,
+    )
 
-    @current_limit.setter
-    def current_limit(self, value: float) -> None:
-        self._check_range(value, 0, self.MAX_CURRENT, "Current limit")
-        self.write_checked(f"CURR:PROT {self._fmt(value)}")
-
-    @property
-    def current_setpoint_max(self) -> float:
-        """
-        Software ceiling on the ``current`` setpoint itself (CURR:LIM), in amperes.
+    current_setpoint_max = Instrument.control(
+        "CURR:LIM:POS?", "CURR:LIM %.6f",
+        """ Control the software ceiling on the ``current`` setpoint itself
+        (CURR:LIM), in amperes.
 
         This is a *different* register from ``current_limit`` (CURR:PROT).
         ``current_limit`` clamps the compliance current while the unit
@@ -359,14 +307,11 @@ class KepkoBOPGL:
         the instrument just disregards (SCPI error -120) any higher
         ``current`` setpoint. Call :meth:`raise_range_limits_to_max` at
         the start of a session if you suspect this is why the magnet
-        current won't climb past a fixed ceiling.
-        """
-        return self.query_float("CURR:LIM:POS?")
-
-    @current_setpoint_max.setter
-    def current_setpoint_max(self, value: float) -> None:
-        self._check_range(value, 0, self.MAX_CURRENT, "Current setpoint limit")
-        self.write_checked(f"CURR:LIM {self._fmt(value)}")
+        current won't climb past a fixed ceiling. """,
+        validator=strict_range,
+        values=[0, MAX_CURRENT],
+        check_set_errors=True,
+    )
 
     def raise_range_limits_to_max(self, persist: bool = False) -> None:
         """
@@ -396,15 +341,15 @@ class KepkoBOPGL:
     #  Measurements                                                        #
     # ------------------------------------------------------------------ #
 
-    @property
-    def measure_voltage(self) -> float:
-        """Measure and return the actual output voltage in volts."""
-        return self.query_float("MEAS:VOLT?")
+    measure_voltage = Instrument.measurement(
+        "MEAS:VOLT?",
+        """ Measure and return the actual output voltage in volts. """,
+    )
 
-    @property
-    def measure_current(self) -> float:
-        """Measure and return the actual output current in amperes."""
-        return self.query_float("MEAS:CURR?")
+    measure_current = Instrument.measurement(
+        "MEAS:CURR?",
+        """ Measure and return the actual output current in amperes. """,
+    )
 
     # ------------------------------------------------------------------ #
     #  Memory: save and recall settings                                    #
@@ -446,33 +391,6 @@ class KepkoBOPGL:
         Warning: tag the unit with the custom power-up config per manual.
         """
         self.write("MEM:UPD")
-
-    # ------------------------------------------------------------------ #
-    #  Status and error handling                                           #
-    # ------------------------------------------------------------------ #
-
-    @property
-    def error(self) -> str:
-        """
-        Return the next error from the error queue.
-
-        Returns ``"0,'No error'"`` when the queue is empty.
-        """
-        return self.query("SYST:ERR?")
-
-    def check_errors(self) -> list[str]:
-        """
-        Drain the error queue and return all errors as a list.
-
-        Returns an empty list if no errors are present.
-        """
-        errors = []
-        while True:
-            err = self.error
-            if err.startswith("0"):
-                break
-            errors.append(err)
-        return errors
 
     # ------------------------------------------------------------------ #
     #  Waveform / LIST subsystem (basic)                                   #
@@ -532,36 +450,12 @@ class KepkoBOPGL:
         self.output_enabled = False
 
     # ------------------------------------------------------------------ #
-    #  Internal helpers                                                    #
+    #  Connection lifecycle                                                #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _check_range(value: float, lo: float, hi: float, name: str) -> None:
-        if not lo <= value <= hi:
-            raise ValueError(
-                f"{name} {value} is out of range [{lo}, {hi}]."
-            )
-
-    @staticmethod
-    def _fmt(value: float) -> str:
-        """
-        Format a setpoint for a SCPI command in plain decimal notation.
-
-        The BOP-GL parser only accepts NR1/NR2 (plain integer/decimal)
-        numbers, not NR3 (exponential) -- but Python's ``g`` format
-        switches to exponential notation for small magnitudes (e.g.
-        ``f"{2e-05:.6g}"`` -> ``"2e-05"``), which the instrument rejects
-        with error -122 "invalid character found in number string". Fixed
-        decimal notation avoids that form for any setpoint in range.
-        """
-        return f"{value:.6f}"
-
-    def __repr__(self) -> str:
-        return f"KepkoBOPGL(resource={self._inst.resource_name!r})"
-
-    # ------------------------------------------------------------------ #
-    #  Context manager support                                             #
-    # ------------------------------------------------------------------ #
+    def close(self) -> None:
+        """Close the underlying VISA session."""
+        self.adapter.close()
 
     def __enter__(self):
         return self
@@ -596,11 +490,10 @@ def connect_magnet(cfg: MagnetConfig) -> "KepkoBOPGL":
     in constant-current mode with the configured software compliance
     voltage and current limit.
     """
-    rm = pyvisa.ResourceManager()
-    psu = KepkoBOPGL(rm.open_resource(cfg.visa_resource))
+    psu = KepkoBOPGL(cfg.visa_resource, timeout=5000)
 
     psu.reset()
-    psu.clear_status()
+    psu.clear()
     psu.raise_range_limits_to_max()
     psu.mode = "current"
     psu.voltage_limit = cfg.voltage_compliance_V
@@ -633,11 +526,7 @@ def shutdown_magnet(psu: "KepkoBOPGL", cfg: MagnetConfig) -> None:
 
 
 if __name__ == "__main__":
-    import pyvisa
-
-    rm = pyvisa.ResourceManager()
-
-    with KepkoBOPGL(rm.open_resource("GPIB0::6::INSTR")) as psu:
+    with KepkoBOPGL("GPIB0::6::INSTR") as psu:
         print(psu.identification)
         psu.reset()
         psu.raise_range_limits_to_max()  # clear any stale CURR:LIM/VOLT:LIM
