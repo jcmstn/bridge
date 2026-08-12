@@ -140,7 +140,8 @@ class LauncherApp(App):
     CSS = """
     #picker { padding: 1 2; }
     .intro { margin-bottom: 1; text-style: bold; }
-    .card { border: solid $primary; padding: 1 2; margin-bottom: 2; height: auto; }
+    .picker-grid { layout: grid; grid-size: 2; grid-gutter: 1 2; height: auto; }
+    .card { border: solid $primary; padding: 1 2; height: auto; }
     .card-title { text-style: bold underline; margin-bottom: 1; }
     .card-desc { color: $text-muted; margin-bottom: 1; }
     .schematic-title { text-style: bold; margin-bottom: 1; }
@@ -156,24 +157,25 @@ class LauncherApp(App):
         yield Header(show_clock=False)
         with VerticalScroll(id="picker"):
             yield Static("Select a measurement to run:", classes="intro")
-            yield _card(
-                "1) Dual-Harmonic Measurement (1f / 2f)",
-                DUAL_HARMONIC_DESC,
-                DUAL_HARMONIC_SCHEMATIC,
-                "launch_dual", "▶  Launch dual-harmonic TUI",
-            )
-            yield _card(
-                "2) Differential Resistance vs. Bias (dV/dI)",
-                DIFF_RESISTANCE_DESC,
-                DIFF_RESISTANCE_SCHEMATIC,
-                "launch_diff", "▶  Launch differential-resistance TUI",
-            )
-            yield _card(
-                "3) Phase Calibration (1f Y-null + 2f channel ID)",
-                PHASE_CALIBRATION_DESC,
-                PHASE_CALIBRATION_SCHEMATIC,
-                "launch_phase_cal", "▶  Launch phase-calibration TUI",
-            )
+            with Vertical(classes="picker-grid"):
+                yield _card(
+                    "1) Dual-Harmonic Measurement (1f / 2f)",
+                    DUAL_HARMONIC_DESC,
+                    DUAL_HARMONIC_SCHEMATIC,
+                    "launch_dual", "▶  Launch dual-harmonic TUI",
+                )
+                yield _card(
+                    "2) Differential Resistance vs. Bias (dV/dI)",
+                    DIFF_RESISTANCE_DESC,
+                    DIFF_RESISTANCE_SCHEMATIC,
+                    "launch_diff", "▶  Launch differential-resistance TUI",
+                )
+                yield _card(
+                    "3) Phase Calibration (1f Y-null + 2f channel ID)",
+                    PHASE_CALIBRATION_DESC,
+                    PHASE_CALIBRATION_SCHEMATIC,
+                    "launch_phase_cal", "▶  Launch phase-calibration TUI",
+                )
         yield Footer()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:

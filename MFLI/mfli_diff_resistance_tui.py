@@ -44,7 +44,6 @@ from textual.screen import Screen
 from textual.validation import Number
 from textual.widgets import (
     Button,
-    Collapsible,
     DataTable,
     Footer,
     Header,
@@ -266,29 +265,49 @@ def build_header_fields(plan: "MeasurementPlan", records: list[dict], *,
 # ─────────────────────────────────────────────────────────────────────────────
 
 def field(field_id: str, label_text: str, default: str, *, kind: str = "number",
-          hint: str = "", validators=None, valid_empty: bool = False) -> Vertical:
-    children = [Label(label_text, classes="field-label"),
-                Input(value=default, id=field_id, type=kind, validators=validators,
-                      valid_empty=valid_empty)]
+          hint: str = "", validators=None, valid_empty: bool = False) -> list:
+    """A field's widgets, flat (not wrapped in a container). Grid cells
+    (see card()) that contain a further nested auto-height Vertical break
+    Textual's grid auto-row sizing -- GridLayout.arrange() computes an
+    'auto' row's height by calling get_content_height() on each cell, and a
+    doubly-nested Vertical makes that blow up to ~100 rows instead of the
+    handful the content needs. One level of Vertical (the card itself) is
+    fine; a Vertical inside that is not -- so fields stay flat and spacing
+    is set directly on the last widget instead of via a wrapping container."""
+    label = Label(label_text, classes="field-label")
+    inp = Input(value=default, id=field_id, type=kind, validators=validators,
+                valid_empty=valid_empty)
+    widgets = [label, inp]
     if hint:
-        children.append(Label(hint, classes="hint"))
-    return Vertical(*children, classes="field")
+        widgets.append(Label(hint, classes="hint"))
+    widgets[-1].styles.margin = (0, 0, 1, 0)
+    return widgets
 
 
-def switch_field(field_id: str, label_text: str, default: bool) -> Vertical:
-    return Vertical(
-        Horizontal(Switch(value=default, id=field_id), Label(label_text, classes="switch-label"),
-                   classes="switch-row"),
-        classes="field",
-    )
+def switch_field(field_id: str, label_text: str, default: bool) -> Horizontal:
+    row = Horizontal(Switch(value=default, id=field_id), Label(label_text, classes="switch-label"),
+                      classes="switch-row")
+    row.styles.margin = (0, 0, 1, 0)
+    return row
 
 
-def select_field(field_id: str, label_text: str, options: list[int], default: int) -> Vertical:
-    return Vertical(
-        Label(label_text, classes="field-label"),
-        Select([(str(o), o) for o in options], id=field_id, value=default, allow_blank=False),
-        classes="field",
-    )
+def select_field(field_id: str, label_text: str, options: list[int], default: int) -> list:
+    label = Label(label_text, classes="field-label")
+    select = Select([(str(o), o) for o in options], id=field_id, value=default, allow_blank=False)
+    select.styles.margin = (0, 0, 1, 0)
+    return [label, select]
+
+
+def card(title: str, *groups, muted: bool = False) -> Vertical:
+    """A bordered grid cell: a title plus its fields (each a flat list from
+    field()/select_field(), or a single widget like switch_field()'s
+    Horizontal -- see field() for why fields must stay flat here). `muted`
+    = stable/rarely-changed configuration, styled to recede rather than
+    compete for attention."""
+    children: list = [Static(title, classes="card-title")]
+    for group in groups:
+        children.extend(group) if isinstance(group, list) else children.append(group)
+    return Vertical(*children, classes="stable-card" if muted else "param-card")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -306,12 +325,6 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         errors.append("Choose a sample (or create a new one).")
     if not state.get("device"):
         errors.append("Device is required (e.g. HB3, SV2).")
-    if not errors:
-        preview = preview_raw_filename(
-            state["sample"], state["device"], MEASUREMENT_TYPE,
-            temperature_setpoint_K=state.get("temperature_setpoint_K"),
-        )
-        info.append(f"Will save as: {preview}_<timestamp>.csv")
 
     if state["leader_device"] == state["follower_device"]:
         errors.append("Leader and follower device IDs must be different.")
@@ -394,6 +407,18 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         info.append("Temperature logging off.")
 
     return info, warnings, errors
+
+
+def compute_filename_preview(state: dict) -> Optional[str]:
+    """Raw-file name the run will be saved as, or None until sample+device
+    are both set -- drives the identity bar's #filename_preview."""
+    if not state.get("sample") or state["sample"] == NEW_SAMPLE_SENTINEL or not state.get("device"):
+        return None
+    preview = preview_raw_filename(
+        state["sample"], state["device"], MEASUREMENT_TYPE,
+        temperature_setpoint_K=state.get("temperature_setpoint_K"),
+    )
+    return f"{preview}_<timestamp>.csv"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -757,13 +782,24 @@ class MFLIDiffResistanceApp(App):
     #body { height: 1fr; }
     #form { width: 1fr; padding: 1 2; }
     #sidebar { width: 48; border-left: solid $primary; padding: 1 2; overflow-y: auto; }
-    .field { margin-bottom: 1; }
     .field-label { text-style: bold; }
     .hint { text-style: italic; color: $text-muted; }
     .switch-row { height: 3; }
     .switch-row Label { margin-left: 1; content-align: left middle; height: 3; }
     .sidebar-title { text-style: bold underline; margin-bottom: 1; }
     #actionbar { height: 3; align: center middle; }
+
+    #identity_bar { border: round $accent; padding: 1 2; height: auto; margin-bottom: 1; }
+    #filename_preview { margin-bottom: 1; }
+    #identity_fields { layout: grid; grid-size: 4; grid-gutter: 1 2; height: auto; }
+    .section-title { text-style: bold underline; margin: 1 0; }
+    .param-grid { layout: grid; grid-size: 3; grid-gutter: 1 2; height: auto; }
+    .param-card { border: round $primary; padding: 1 2; height: auto; }
+    .stable-grid { layout: grid; grid-size: 3; grid-gutter: 1 2; height: auto; }
+    .stable-card { border: round $panel-darken-1; padding: 1 2; height: auto; }
+    .stable-card .card-title { color: $text-muted; }
+    .stable-card .field-label { color: $text-muted; }
+    .card-title { text-style: bold underline; margin-bottom: 1; }
     """
 
     BINDINGS = [
@@ -775,99 +811,121 @@ class MFLIDiffResistanceApp(App):
         yield Header(show_clock=False)
         with Horizontal(id="body"):
             with VerticalScroll(id="form"):
-                with Collapsible(title="Devices", collapsed=False):
-                    yield field("leader_device", "Leader MFLI (bias + AC excitation, I-sense)",
-                                DEFAULTS["leader_device"], kind="text")
-                    yield field("follower_device", "Follower MFLI (V-sense across DUT)",
-                                DEFAULTS["follower_device"], kind="text")
-                    with Collapsible(title="Connection (advanced)", collapsed=True):
-                        yield field("daq_host", "LabOne data server host",
-                                    DEFAULTS["daq_host"], kind="text")
-                        yield field("daq_port", "LabOne data server port",
-                                    DEFAULTS["daq_port"], kind="integer")
+                with Vertical(id="identity_bar"):
+                    yield Static(id="filename_preview")
+                    with Vertical(id="identity_fields"):
+                        yield Vertical(
+                            Label("Sample", classes="field-label"),
+                            Select(sample_options(_DATA_DIR), id="sample_select",
+                                   allow_blank=False, value=TEST_SAMPLE),
+                        )
+                        yield Vertical(*field("device", "Device (e.g. HB3, SV2)",
+                                              DEFAULTS["device"], kind="text"))
+                        yield Vertical(*field("cooldown", "Cooldown (optional)",
+                                              DEFAULTS["cooldown"], kind="text"))
+                        yield Vertical(*field(
+                            "temperature_setpoint_K", "Temperature setpoint (K, optional)",
+                            DEFAULTS["temperature_setpoint_K"], kind="number", valid_empty=True,
+                            hint="Drives only the filename's T###K token.",
+                        ))
 
-                with Collapsible(title="Excitation & bias", collapsed=False):
-                    yield field("frequency_Hz", "AC excitation frequency (Hz)",
-                                DEFAULTS["frequency_Hz"],
-                                hint="Avoid exact multiples of 50/60 Hz (mains pickup).",
-                                validators=[Number(minimum=1e-3, failure_description="must be > 0")])
-                    yield field("ac_amplitude_V", "AC excitation amplitude (V, peak)",
-                                DEFAULTS["ac_amplitude_V"],
-                                hint="Keep small vs. any bias step over which R_diff changes "
-                                     "— this is a small-signal (linear-response) measurement.",
-                                validators=[Number(minimum=0.0, failure_description="must be ≥ 0")])
-                    yield field("series_R_ohm", "Series resistor (Ω)",
-                                DEFAULTS["series_R_ohm"],
-                                hint="Current-limiting/protection resistor between the output "
-                                     "and the DUT. Not used to compute I — the leader's Current "
-                                     "Input reads the DUT current directly.",
-                                validators=[Number(minimum=1.0, failure_description="must be > 0")])
-                    yield field("bias_min_V", "DC bias sweep min (V)", DEFAULTS["bias_min_V"])
-                    yield field("bias_max_V", "DC bias sweep max (V)", DEFAULTS["bias_max_V"])
-
-                with Collapsible(title="Lock-in filters & inputs", collapsed=False):
-                    yield field("time_constant_s", "Filter time constant (s)",
-                                DEFAULTS["time_constant_s"],
-                                hint="Bigger = quieter but slower & longer settling.",
-                                validators=[Number(minimum=1e-6, failure_description="must be > 0")])
-                    yield select_field("order", "Filter order", list(range(1, 9)),
-                                       int(DEFAULTS["order"]))
-                    yield switch_field("sinc_filter", "Sinc filter (extra harmonic rejection)",
-                                       DEFAULTS["sinc_filter"])
-                    yield field("current_input_range_A", "Current-sense input range (A)",
-                                DEFAULTS["current_input_range_A"],
-                                hint="Leader's Current Input 1 (transimpedance amp, reads amps "
-                                     "directly) — size to the actual DUT current.",
-                                validators=[Number(minimum=1e-6, failure_description="must be > 0")])
-                    yield field("voltage_input_range_V", "Voltage-sense input range (V)",
-                                DEFAULTS["voltage_input_range_V"],
-                                hint="Follower input, across the DUT.",
-                                validators=[Number(minimum=1e-6, failure_description="must be > 0")])
-                    yield field("sample_rate_Hz", "Demodulator sample rate (Sa/s)",
-                                DEFAULTS["sample_rate_Hz"],
-                                validators=[Number(minimum=1e-3, failure_description="must be > 0")])
-
-                with Collapsible(title="Acquisition timing", collapsed=False):
-                    yield field("settling_time_s", "Settling time per bias point (s)",
-                                DEFAULTS["settling_time_s"],
-                                hint="Rule of thumb: ≥ 5 × time constant.",
-                                validators=[Number(minimum=0.0, failure_description="must be ≥ 0")])
-                    yield field("n_averages", "Samples to average per point (each demod)",
-                                DEFAULTS["n_averages"], kind="integer",
-                                validators=[Number(minimum=1, failure_description="must be ≥ 1")])
-
-                with Collapsible(title="Sample & run identity", collapsed=False):
-                    yield Vertical(
-                        Label("Sample", classes="field-label"),
-                        Select(sample_options(_DATA_DIR), id="sample_select",
-                               allow_blank=False, value=TEST_SAMPLE),
-                        classes="field",
+                with Vertical(classes="param-grid"):
+                    yield card(
+                        "Devices",
+                        field("leader_device", "Leader MFLI (bias + AC excitation, I-sense)",
+                              DEFAULTS["leader_device"], kind="text"),
+                        field("follower_device", "Follower MFLI (V-sense across DUT)",
+                              DEFAULTS["follower_device"], kind="text"),
                     )
-                    yield field("device", "Device (e.g. HB3, SV2)", DEFAULTS["device"], kind="text")
-                    yield field("cooldown", "Cooldown (optional)", DEFAULTS["cooldown"], kind="text")
-                    yield field("temperature_setpoint_K", "Temperature setpoint (K, optional)",
-                                DEFAULTS["temperature_setpoint_K"], kind="number", valid_empty=True,
-                                hint="Drives only the filename's T###K token — the header's T_K "
-                                     "uses the measured temperature when available.")
+                    yield card(
+                        "Excitation",
+                        field("frequency_Hz", "AC excitation frequency (Hz)",
+                              DEFAULTS["frequency_Hz"],
+                              hint="Avoid exact multiples of 50/60 Hz (mains pickup).",
+                              validators=[Number(minimum=1e-3, failure_description="must be > 0")]),
+                        field("ac_amplitude_V", "AC excitation amplitude (V, peak)",
+                              DEFAULTS["ac_amplitude_V"],
+                              hint="Keep small vs. any bias step over which R_diff changes "
+                                   "— this is a small-signal (linear-response) measurement.",
+                              validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
+                        field("series_R_ohm", "Series resistor (Ω)",
+                              DEFAULTS["series_R_ohm"],
+                              hint="Current-limiting/protection resistor — not used to compute I, "
+                                   "the leader's Current Input reads DUT current directly.",
+                              validators=[Number(minimum=1.0, failure_description="must be > 0")]),
+                    )
+                    yield card(
+                        "Bias sweep",
+                        field("bias_min_V", "DC bias sweep min (V)", DEFAULTS["bias_min_V"]),
+                        field("bias_max_V", "DC bias sweep max (V)", DEFAULTS["bias_max_V"]),
+                        field("n_points", "Points per sweep direction",
+                              DEFAULTS["n_points"], kind="integer",
+                              hint="Bidirectional: min → max → min (reveals hysteresis).",
+                              validators=[Number(minimum=2, failure_description="must be ≥ 2")]),
+                    )
+                    yield card(
+                        "Lock-in filter",
+                        field("time_constant_s", "Filter time constant (s)",
+                              DEFAULTS["time_constant_s"],
+                              hint="Bigger = quieter but slower & longer settling.",
+                              validators=[Number(minimum=1e-6, failure_description="must be > 0")]),
+                        select_field("order", "Filter order", list(range(1, 9)),
+                                     int(DEFAULTS["order"])),
+                        switch_field("sinc_filter", "Sinc filter (extra harmonic rejection)",
+                                     DEFAULTS["sinc_filter"]),
+                    )
+                    yield card(
+                        "Input ranges",
+                        field("current_input_range_A", "Current-sense input range (A)",
+                              DEFAULTS["current_input_range_A"],
+                              hint="Leader's Current Input 1 — size to the actual DUT current.",
+                              validators=[Number(minimum=1e-6, failure_description="must be > 0")]),
+                        field("voltage_input_range_V", "Voltage-sense input range (V)",
+                              DEFAULTS["voltage_input_range_V"],
+                              hint="Follower input, across the DUT.",
+                              validators=[Number(minimum=1e-6, failure_description="must be > 0")]),
+                        field("sample_rate_Hz", "Demodulator sample rate (Sa/s)",
+                              DEFAULTS["sample_rate_Hz"],
+                              validators=[Number(minimum=1e-3, failure_description="must be > 0")]),
+                    )
+                    yield card(
+                        "Acquisition timing",
+                        field("settling_time_s", "Settling time per bias point (s)",
+                              DEFAULTS["settling_time_s"],
+                              hint="Rule of thumb: ≥ 5 × time constant.",
+                              validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
+                        field("n_averages", "Samples to average per point (each demod)",
+                              DEFAULTS["n_averages"], kind="integer",
+                              validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
+                    )
+                    yield card(
+                        "Temperature logging",
+                        switch_field("enable_temperature",
+                                     "Log temperature (Oxford Instruments MercuryiTC)",
+                                     DEFAULTS["enable_temperature"]),
+                    )
 
-                with Collapsible(title="Bias sweep", collapsed=False):
-                    yield field("n_points", "Points per sweep direction",
-                                DEFAULTS["n_points"], kind="integer",
-                                hint="Bidirectional: min → max → min (reveals hysteresis).",
-                                validators=[Number(minimum=2, failure_description="must be ≥ 2")])
-
-                with Collapsible(title="Temperature (MercuryiTC)", collapsed=False):
-                    yield switch_field("enable_temperature",
-                                        "Log temperature (Oxford Instruments MercuryiTC)",
-                                        DEFAULTS["enable_temperature"])
-                    yield field("temperature_visa_resource", "MercuryiTC VISA resource",
-                                DEFAULTS["temperature_visa_resource"], kind="text",
-                                hint="e.g. TCPIP0::<ip>::7020::SOCKET (Ethernet) or an ASRL resource.")
-                    yield field("temperature_sensor_uids", "Sensor board UID(s)",
-                                DEFAULTS["temperature_sensor_uids"], kind="text",
-                                hint="1 or 2 board UIDs, comma-separated, e.g. 'MB1.T1, DB5.T1'. "
-                                     "Not connected, or only one probe wired up? Fine either way — "
-                                     "missing readings just leave the column empty.")
+                yield Static("Instrument configuration", classes="section-title")
+                with Vertical(classes="stable-grid"):
+                    yield card(
+                        "Connection",
+                        field("daq_host", "LabOne data server host",
+                              DEFAULTS["daq_host"], kind="text"),
+                        field("daq_port", "LabOne data server port",
+                              DEFAULTS["daq_port"], kind="integer"),
+                        muted=True,
+                    )
+                    yield card(
+                        "Temperature controller",
+                        field("temperature_visa_resource", "MercuryiTC VISA resource",
+                              DEFAULTS["temperature_visa_resource"], kind="text",
+                              hint="e.g. TCPIP0::<ip>::7020::SOCKET or an ASRL resource."),
+                        field("temperature_sensor_uids", "Sensor board UID(s)",
+                              DEFAULTS["temperature_sensor_uids"], kind="text",
+                              hint="1 or 2 board UIDs, comma-separated, e.g. 'MB1.T1, DB5.T1'. "
+                                   "Missing readings just leave the column empty."),
+                        muted=True,
+                    )
 
             with Vertical(id="sidebar"):
                 yield Static("Summary", classes="sidebar-title")
@@ -998,9 +1056,15 @@ class MFLIDiffResistanceApp(App):
         state, parse_errors = self.parse_state()
         if parse_errors:
             info, warnings, errors = [], [], parse_errors
+            preview = None
         else:
             info, warnings, errors = build_summary(state)
+            preview = compute_filename_preview(state)
 
+        self.query_one("#filename_preview", Static).update(
+            f"File:  [bold]{preview}[/bold]" if preview
+            else "[dim]File:  (choose a sample and device to preview the filename)[/dim]"
+        )
         lines: list[str] = []
         if errors:
             lines.append("[bold red]Blocking issues[/bold red]")

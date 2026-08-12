@@ -39,7 +39,6 @@ from textual.screen import Screen
 from textual.validation import Number
 from textual.widgets import (
     Button,
-    Collapsible,
     DataTable,
     Footer,
     Header,
@@ -221,6 +220,28 @@ def parse_sensor_uids(raw: str) -> tuple:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Small widget-building helpers (keep compose() readable)  ── field()/
+# switch_field()/select_field() themselves live in mfli_dual_harmonic_tui.py
+# (imported above) and are already flat for the same grid-nesting reason
+# card() documents below.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def card(title: str, *groups, muted: bool = False) -> Vertical:
+    """A bordered grid cell: a title plus its fields (each a flat list from
+    field()/switch_field()/select_field(), or a single widget). `muted` =
+    stable/rarely-changed configuration, styled to recede rather than
+    compete for attention. Groups must stay flat (lists, not further
+    Verticals) -- a grid cell containing a doubly-nested auto-height
+    Vertical blows Textual 8.2.8's GridLayout.arrange() auto-row height up
+    to ~100 rows instead of the handful the content needs; one level of
+    Vertical (this card itself) is fine, a further nested one is not."""
+    children: list = [Static(title, classes="card-title")]
+    for group in groups:
+        children.extend(group) if isinstance(group, list) else children.append(group)
+    return Vertical(*children, classes="stable-card" if muted else "param-card")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Measurement plan  ── built from validated form state, executed by RunScreen
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -305,12 +326,6 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         errors.append("Choose a sample (or create a new one).")
     if not state.get("device"):
         errors.append("Device is required (e.g. HB3, SV2).")
-    if not errors:
-        preview = preview_raw_filename(
-            state["sample"], state["device"], MEASUREMENT_TYPE,
-            temperature_setpoint_K=state.get("temperature_setpoint_K"),
-        )
-        info.append(f"Will save as: {preview}_<timestamp>.csv")
 
     if state["leader_device"] == state["follower_device"]:
         errors.append("Leader and follower device IDs must be different.")
@@ -404,6 +419,18 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         info.append("Temperature logging off.")
 
     return info, warnings, errors
+
+
+def compute_filename_preview(state: dict) -> Optional[str]:
+    """Raw-file name the run will be saved as, or None until sample+device
+    are both set -- drives the identity bar's #filename_preview."""
+    if not state.get("sample") or state["sample"] == NEW_SAMPLE_SENTINEL or not state.get("device"):
+        return None
+    preview = preview_raw_filename(
+        state["sample"], state["device"], MEASUREMENT_TYPE,
+        temperature_setpoint_K=state.get("temperature_setpoint_K"),
+    )
+    return f"{preview}_<timestamp>.csv"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -760,13 +787,24 @@ class MFLIPhaseCalibrationApp(App):
     #body { height: 1fr; }
     #form { width: 1fr; padding: 1 2; }
     #sidebar { width: 48; border-left: solid $primary; padding: 1 2; overflow-y: auto; }
-    .field { margin-bottom: 1; }
     .field-label { text-style: bold; }
     .hint { text-style: italic; color: $text-muted; }
     .switch-row { height: 3; }
     .switch-row Label { margin-left: 1; content-align: left middle; height: 3; }
     .sidebar-title { text-style: bold underline; margin-bottom: 1; }
     #actionbar { height: 3; align: center middle; }
+
+    #identity_bar { border: round $accent; padding: 1 2; margin-bottom: 1; height: auto; }
+    #filename_preview { margin-bottom: 1; }
+    #identity_fields { layout: grid; grid-size: 4; grid-gutter: 1 2; height: auto; }
+    .section-title { text-style: bold underline; margin: 1 0; }
+    .param-grid { layout: grid; grid-size: 3; grid-gutter: 1 2; height: auto; }
+    .param-card { border: round $primary; padding: 1 2; height: auto; }
+    .stable-grid { layout: grid; grid-size: 3; grid-gutter: 1 2; height: auto; }
+    .stable-card { border: round $panel-darken-1; padding: 1 2; height: auto; }
+    .stable-card .card-title { color: $text-muted; text-style: bold underline; }
+    .stable-card .field-label { color: $text-muted; }
+    .card-title { text-style: bold underline; margin-bottom: 1; }
     """
 
     BINDINGS = [
@@ -778,175 +816,202 @@ class MFLIPhaseCalibrationApp(App):
         yield Header(show_clock=False)
         with Horizontal(id="body"):
             with VerticalScroll(id="form"):
-                with Collapsible(title="Devices", collapsed=False):
-                    yield field("leader_device", "Leader MFLI (current source + 1f)",
-                                DEFAULTS["leader_device"], kind="text")
-                    yield field("follower_device", "Follower MFLI (2f)",
-                                DEFAULTS["follower_device"], kind="text")
-                    with Collapsible(title="Connection (advanced)", collapsed=True):
-                        yield field("daq_host", "LabOne data server host",
-                                    DEFAULTS["daq_host"], kind="text")
-                        yield field("daq_port", "LabOne data server port",
-                                    DEFAULTS["daq_port"], kind="integer")
+                with Vertical(id="identity_bar"):
+                    yield Static(id="filename_preview")
+                    with Vertical(id="identity_fields"):
+                        yield Label("Sample", classes="field-label")
+                        yield Select(sample_options(_DATA_DIR), id="sample_select",
+                                     allow_blank=False, value=TEST_SAMPLE)
+                        yield from field("device", "Device (e.g. HB3, SV2)",
+                                         DEFAULTS["device"], kind="text")
+                        yield from field("cooldown", "Cooldown (optional)",
+                                         DEFAULTS["cooldown"], kind="text")
+                        yield from field("temperature_setpoint_K", "Temperature setpoint (K, optional)",
+                                         DEFAULTS["temperature_setpoint_K"], kind="number", valid_empty=True,
+                                         hint="Drives only the filename's T###K token — the header's "
+                                              "T_K uses the measured temperature when available.")
 
-                with Collapsible(title="Excitation (current source)", collapsed=False):
-                    yield field("frequency_Hz", "Excitation frequency (Hz)",
-                                DEFAULTS["frequency_Hz"],
-                                hint="Avoid exact multiples of 50/60 Hz (mains pickup).",
-                                validators=[Number(minimum=1e-3, failure_description="must be > 0")])
-                    yield field("amplitude_V", "Output amplitude (V, peak)",
-                                DEFAULTS["amplitude_V"],
-                                validators=[Number(minimum=0.0, failure_description="must be ≥ 0")])
-                    yield field("series_R_ohm", "Series resistor (Ω)",
-                                DEFAULTS["series_R_ohm"],
-                                hint="Sets excitation current: I ≈ V / R.",
-                                validators=[Number(minimum=1.0, failure_description="must be > 0")])
-
-                with Collapsible(title="Lock-in filters & inputs", collapsed=False):
-                    yield field("time_constant_s", "Filter time constant (s)",
-                                DEFAULTS["time_constant_s"],
-                                hint="Bigger = quieter but slower & longer settling.",
-                                validators=[Number(minimum=1e-6, failure_description="must be > 0")])
-                    yield select_field("order", "Filter order", list(range(1, 9)),
-                                       int(DEFAULTS["order"]))
-                    yield switch_field("sinc_filter", "Sinc filter (extra harmonic rejection)",
-                                       DEFAULTS["sinc_filter"])
-                    yield field("input_range_1f_V", "1f input range (V)",
-                                DEFAULTS["input_range_1f_V"],
-                                hint="Match expected 1f signal size — avoid clipping/poor resolution.",
-                                validators=[Number(minimum=1e-6, failure_description="must be > 0")])
-                    yield field("input_range_2f_V", "2f input range (V)",
-                                DEFAULTS["input_range_2f_V"],
-                                hint="2f is usually much smaller than 1f — set separately.",
-                                validators=[Number(minimum=1e-6, failure_description="must be > 0")])
-                    yield field("sample_rate_Hz", "Demodulator sample rate (Sa/s)",
-                                DEFAULTS["sample_rate_Hz"],
-                                validators=[Number(minimum=1e-3, failure_description="must be > 0")])
-
-                with Collapsible(title="Magnet", collapsed=False):
-                    yield field("visa_resource", "Magnet VISA resource",
-                                DEFAULTS["visa_resource"], kind="text")
-                    yield field("current_limit_A", "Software current limit (A)",
-                                DEFAULTS["current_limit_A"],
-                                hint="Hard safety ceiling — independent of the supply's own range.")
-                    yield field("voltage_compliance_V", "Voltage compliance (V)",
-                                DEFAULTS["voltage_compliance_V"])
-                    with Collapsible(title="Ramp safety (advanced)", collapsed=True):
-                        yield field("ramp_step_A", "Ramp step (A)", DEFAULTS["ramp_step_A"])
-                        yield field("ramp_delay_s", "Ramp delay (s)", DEFAULTS["ramp_delay_s"])
-
-                with Collapsible(title="Gaussmeter", collapsed=False):
-                    yield field("gaussmeter_visa_resource", "Gaussmeter VISA resource",
-                                DEFAULTS["gaussmeter_visa_resource"], kind="text",
-                                hint="Lake Shore 475 — measures the actual field at each point.")
-                    with Collapsible(title="Gaussmeter averaging (advanced)", collapsed=True):
-                        yield field("gaussmeter_n_averages", "Field readings averaged per point",
-                                    DEFAULTS["gaussmeter_n_averages"], kind="integer",
-                                    validators=[Number(minimum=1, failure_description="must be ≥ 1")])
-                        yield field("gaussmeter_read_delay_s", "Delay between readings (s)",
-                                    DEFAULTS["gaussmeter_read_delay_s"])
-
-                with Collapsible(title="Field sweep & calibration point", collapsed=False):
-                    yield field("calibration_current_A", "Calibration magnet current (A)",
-                                DEFAULTS["calibration_current_A"],
-                                hint="Where the 1f Y-null is performed — pick a point near "
-                                     "saturation (e.g. matching the sweep max) so the PHE/AHE "
-                                     "1f signal is large and well-behaved.")
-                    yield field("i_min_A", "Sweep current min (A)", DEFAULTS["i_min_A"])
-                    yield field("i_max_A", "Sweep current max (A)", DEFAULTS["i_max_A"])
-                    yield field("n_points", "Points per sweep direction",
-                                DEFAULTS["n_points"], kind="integer",
-                                validators=[Number(minimum=2, failure_description="must be ≥ 2")])
-                    yield field("sweep_settling_time_s", "Settling time per sweep point (s)",
-                                DEFAULTS["sweep_settling_time_s"],
-                                hint="Rule of thumb: ≥ 5 × time constant.",
-                                validators=[Number(minimum=0.0, failure_description="must be ≥ 0")])
-                    yield field("sweep_n_averages", "Samples to average per sweep point",
-                                DEFAULTS["sweep_n_averages"], kind="integer",
-                                validators=[Number(minimum=1, failure_description="must be ≥ 1")])
-                    with Collapsible(title="Hold-check tolerance (advanced)", collapsed=True):
-                        yield field("hold_tol_ratio",
-                                    "Max acceptable |Y|/R away from the calibration point",
-                                    DEFAULTS["hold_tol_ratio"],
-                                    hint="Flags drift if the null residual exceeds this "
-                                         "anywhere in the sweep.")
-
-                with Collapsible(title="Phase null", collapsed=False):
-                    yield field("null_n_averages", "Averages per phase read",
-                                DEFAULTS["null_n_averages"], kind="integer",
-                                validators=[Number(minimum=1, failure_description="must be ≥ 1")])
-                    yield field("null_max_iterations", "Max null iterations",
-                                DEFAULTS["null_max_iterations"], kind="integer",
-                                validators=[Number(minimum=1, failure_description="must be ≥ 1")])
-                    yield field("null_tol_deg", "Convergence tolerance (°)",
-                                DEFAULTS["null_tol_deg"])
-                    yield Static(
-                        "Nulls the leader's 1f Y quadrature by adjusting its demod "
-                        "phaseshift node (the same thing LabOne's \"Auto\" phase button "
-                        "does) — the resistive PHE/AHE response at 1f must be exactly in "
-                        "phase with the drive current, so any measured Y there is pure "
-                        "instrumental delay.",
-                        classes="hint",
+                with Vertical(classes="param-grid"):
+                    yield card(
+                        "Devices",
+                        field("leader_device", "Leader MFLI (current source + 1f)",
+                              DEFAULTS["leader_device"], kind="text"),
+                        field("follower_device", "Follower MFLI (2f)",
+                              DEFAULTS["follower_device"], kind="text"),
+                    )
+                    yield card(
+                        "Excitation",
+                        field("frequency_Hz", "Excitation frequency (Hz)",
+                              DEFAULTS["frequency_Hz"],
+                              hint="Avoid exact multiples of 50/60 Hz (mains pickup).",
+                              validators=[Number(minimum=1e-3, failure_description="must be > 0")]),
+                        field("amplitude_V", "Output amplitude (V, peak)",
+                              DEFAULTS["amplitude_V"],
+                              validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
+                        field("series_R_ohm", "Series resistor (Ω)",
+                              DEFAULTS["series_R_ohm"],
+                              hint="Sets excitation current: I ≈ V / R.",
+                              validators=[Number(minimum=1.0, failure_description="must be > 0")]),
+                    )
+                    yield card(
+                        "Field sweep & calibration point",
+                        field("calibration_current_A", "Calibration magnet current (A)",
+                              DEFAULTS["calibration_current_A"],
+                              hint="Where the 1f Y-null is performed — pick a point near "
+                                   "saturation (e.g. matching the sweep max) so the PHE/AHE "
+                                   "1f signal is large and well-behaved."),
+                        field("i_min_A", "Sweep current min (A)", DEFAULTS["i_min_A"]),
+                        field("i_max_A", "Sweep current max (A)", DEFAULTS["i_max_A"]),
+                        field("n_points", "Points per sweep direction",
+                              DEFAULTS["n_points"], kind="integer",
+                              validators=[Number(minimum=2, failure_description="must be ≥ 2")]),
+                    )
+                    yield card(
+                        "Phase null",
+                        field("null_n_averages", "Averages per phase read",
+                              DEFAULTS["null_n_averages"], kind="integer",
+                              validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
+                        field("null_max_iterations", "Max null iterations",
+                              DEFAULTS["null_max_iterations"], kind="integer",
+                              validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
+                        field("null_tol_deg", "Convergence tolerance (°)",
+                              DEFAULTS["null_tol_deg"],
+                              hint="Nulls the leader's 1f Y quadrature by adjusting its demod "
+                                   "phaseshift node — the resistive PHE/AHE response at 1f must "
+                                   "be exactly in phase with the drive current, so any measured "
+                                   "Y there is pure instrumental delay."),
+                    )
+                    yield card(
+                        "Amplitude check (optional)",
+                        switch_field("enable_amplitude_check",
+                                     "Run current-amplitude scaling check",
+                                     DEFAULTS["enable_amplitude_check"]),
+                        field("amplitudes_V", "Amplitudes to test (V, comma-separated)",
+                              DEFAULTS["amplitudes_V"], kind="text",
+                              hint="≥ 2 values. Checks whether the identified 2f signal "
+                                   "channel scales linearly with drive current "
+                                   "(resistive/SOT) rather than growing faster "
+                                   "(Joule-heating/ANE)."),
+                    )
+                    yield card(
+                        "Frequency check (optional)",
+                        switch_field("enable_frequency_check",
+                                     "Run frequency scaling check",
+                                     DEFAULTS["enable_frequency_check"]),
+                        field("frequencies_Hz", "Frequencies to test (Hz, comma-separated)",
+                              DEFAULTS["frequencies_Hz"], kind="text",
+                              hint="≥ 2 values. Checks whether the optimal 1f phase "
+                                   "scales linearly with frequency, consistent with a "
+                                   "fixed cable/electronics delay."),
+                    )
+                    yield card(
+                        "Temperature logging",
+                        switch_field("enable_temperature",
+                                     "Log temperature (Oxford Instruments MercuryiTC)",
+                                     DEFAULTS["enable_temperature"]),
                     )
 
-                with Collapsible(title="Optional: amplitude & frequency scaling checks",
-                                  collapsed=True):
-                    yield switch_field("enable_amplitude_check",
-                                       "Run current-amplitude scaling check",
-                                       DEFAULTS["enable_amplitude_check"])
-                    yield field("amplitudes_V", "Amplitudes to test (V, comma-separated)",
-                                DEFAULTS["amplitudes_V"], kind="text",
-                                hint="≥ 2 values. Checks whether the identified 2f signal "
-                                     "channel scales linearly with drive current "
-                                     "(resistive/SOT) rather than growing faster "
-                                     "(Joule-heating/ANE).")
-                    yield field("amp_n_averages", "Averages per amplitude point",
-                                DEFAULTS["amp_n_averages"], kind="integer",
-                                validators=[Number(minimum=1, failure_description="must be ≥ 1")])
-
-                    yield switch_field("enable_frequency_check",
-                                       "Run frequency scaling check",
-                                       DEFAULTS["enable_frequency_check"])
-                    yield field("frequencies_Hz", "Frequencies to test (Hz, comma-separated)",
-                                DEFAULTS["frequencies_Hz"], kind="text",
-                                hint="≥ 2 values. Checks whether the optimal 1f phase "
-                                     "scales linearly with frequency, consistent with a "
-                                     "fixed cable/electronics delay.")
-                    yield field("freq_n_averages", "Averages per phase read",
-                                DEFAULTS["freq_n_averages"], kind="integer",
-                                validators=[Number(minimum=1, failure_description="must be ≥ 1")])
-                    yield field("freq_max_iterations", "Max null iterations per frequency",
-                                DEFAULTS["freq_max_iterations"], kind="integer",
-                                validators=[Number(minimum=1, failure_description="must be ≥ 1")])
-                    yield field("freq_tol_deg", "Convergence tolerance per frequency (°)",
-                                DEFAULTS["freq_tol_deg"])
-
-                with Collapsible(title="Temperature (MercuryiTC)", collapsed=False):
-                    yield switch_field("enable_temperature",
-                                        "Log temperature (Oxford Instruments MercuryiTC)",
-                                        DEFAULTS["enable_temperature"])
-                    yield field("temperature_visa_resource", "MercuryiTC VISA resource",
-                                DEFAULTS["temperature_visa_resource"], kind="text",
-                                hint="e.g. TCPIP0::<ip>::7020::SOCKET (Ethernet) or an ASRL resource.")
-                    yield field("temperature_sensor_uids", "Sensor board UID(s)",
-                                DEFAULTS["temperature_sensor_uids"], kind="text",
-                                hint="1 or 2 board UIDs, comma-separated, e.g. 'MB1.T1, DB5.T1'. "
-                                     "Not connected, or only one probe wired up? Fine either way — "
-                                     "missing readings just leave the column empty.")
-
-                with Collapsible(title="Sample & run identity", collapsed=False):
-                    yield Vertical(
-                        Label("Sample", classes="field-label"),
-                        Select(sample_options(_DATA_DIR), id="sample_select",
-                               allow_blank=False, value=TEST_SAMPLE),
-                        classes="field",
+                yield Static("Instrument configuration", classes="section-title")
+                with Vertical(classes="stable-grid"):
+                    yield card(
+                        "Connection",
+                        field("daq_host", "LabOne data server host",
+                              DEFAULTS["daq_host"], kind="text"),
+                        field("daq_port", "LabOne data server port",
+                              DEFAULTS["daq_port"], kind="integer"),
+                        muted=True,
                     )
-                    yield field("device", "Device (e.g. HB3, SV2)", DEFAULTS["device"], kind="text")
-                    yield field("cooldown", "Cooldown (optional)", DEFAULTS["cooldown"], kind="text")
-                    yield field("temperature_setpoint_K", "Temperature setpoint (K, optional)",
-                                DEFAULTS["temperature_setpoint_K"], kind="number", valid_empty=True,
-                                hint="Drives only the filename's T###K token — the header's T_K "
-                                     "uses the measured temperature when available.")
+                    yield card(
+                        "Lock-in filter",
+                        field("time_constant_s", "Filter time constant (s)",
+                              DEFAULTS["time_constant_s"],
+                              hint="Bigger = quieter but slower & longer settling.",
+                              validators=[Number(minimum=1e-6, failure_description="must be > 0")]),
+                        select_field("order", "Filter order", list(range(1, 9)),
+                                     int(DEFAULTS["order"])),
+                        switch_field("sinc_filter", "Sinc filter (extra harmonic rejection)",
+                                     DEFAULTS["sinc_filter"]),
+                        field("input_range_1f_V", "1f input range (V)",
+                              DEFAULTS["input_range_1f_V"],
+                              hint="Match expected 1f signal size — avoid clipping/poor resolution.",
+                              validators=[Number(minimum=1e-6, failure_description="must be > 0")]),
+                        field("input_range_2f_V", "2f input range (V)",
+                              DEFAULTS["input_range_2f_V"],
+                              hint="2f is usually much smaller than 1f — set separately.",
+                              validators=[Number(minimum=1e-6, failure_description="must be > 0")]),
+                        field("sample_rate_Hz", "Demodulator sample rate (Sa/s)",
+                              DEFAULTS["sample_rate_Hz"],
+                              validators=[Number(minimum=1e-3, failure_description="must be > 0")]),
+                        muted=True,
+                    )
+                    yield card(
+                        "Magnet & ramp safety",
+                        field("visa_resource", "Magnet VISA resource",
+                              DEFAULTS["visa_resource"], kind="text"),
+                        field("current_limit_A", "Software current limit (A)",
+                              DEFAULTS["current_limit_A"],
+                              hint="Hard safety ceiling — independent of the supply's own range."),
+                        field("voltage_compliance_V", "Voltage compliance (V)",
+                              DEFAULTS["voltage_compliance_V"]),
+                        field("ramp_step_A", "Ramp step (A)", DEFAULTS["ramp_step_A"]),
+                        field("ramp_delay_s", "Ramp delay (s)", DEFAULTS["ramp_delay_s"]),
+                        muted=True,
+                    )
+                    yield card(
+                        "Gaussmeter",
+                        field("gaussmeter_visa_resource", "Gaussmeter VISA resource",
+                              DEFAULTS["gaussmeter_visa_resource"], kind="text",
+                              hint="Lake Shore 475 — measures the actual field at each point."),
+                        field("gaussmeter_n_averages", "Field readings averaged per point",
+                              DEFAULTS["gaussmeter_n_averages"], kind="integer",
+                              validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
+                        field("gaussmeter_read_delay_s", "Delay between readings (s)",
+                              DEFAULTS["gaussmeter_read_delay_s"]),
+                        muted=True,
+                    )
+                    yield card(
+                        "Sweep timing & hold check",
+                        field("sweep_settling_time_s", "Settling time per sweep point (s)",
+                              DEFAULTS["sweep_settling_time_s"],
+                              hint="Rule of thumb: ≥ 5 × time constant.",
+                              validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
+                        field("sweep_n_averages", "Samples to average per sweep point",
+                              DEFAULTS["sweep_n_averages"], kind="integer",
+                              validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
+                        field("hold_tol_ratio",
+                              "Max acceptable |Y|/R away from the calibration point",
+                              DEFAULTS["hold_tol_ratio"],
+                              hint="Flags drift if the null residual exceeds this "
+                                   "anywhere in the sweep."),
+                        muted=True,
+                    )
+                    yield card(
+                        "Scaling-check advanced",
+                        field("amp_n_averages", "Averages per amplitude point",
+                              DEFAULTS["amp_n_averages"], kind="integer",
+                              validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
+                        field("freq_n_averages", "Averages per phase read",
+                              DEFAULTS["freq_n_averages"], kind="integer",
+                              validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
+                        field("freq_max_iterations", "Max null iterations per frequency",
+                              DEFAULTS["freq_max_iterations"], kind="integer",
+                              validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
+                        field("freq_tol_deg", "Convergence tolerance per frequency (°)",
+                              DEFAULTS["freq_tol_deg"]),
+                        muted=True,
+                    )
+                    yield card(
+                        "Temperature controller",
+                        field("temperature_visa_resource", "MercuryiTC VISA resource",
+                              DEFAULTS["temperature_visa_resource"], kind="text",
+                              hint="e.g. TCPIP0::<ip>::7020::SOCKET (Ethernet) or an ASRL resource."),
+                        field("temperature_sensor_uids", "Sensor board UID(s)",
+                              DEFAULTS["temperature_sensor_uids"], kind="text",
+                              hint="1 or 2 board UIDs, comma-separated, e.g. 'MB1.T1, DB5.T1'. "
+                                   "Not connected, or only one probe wired up? Fine either way — "
+                                   "missing readings just leave the column empty."),
+                        muted=True,
+                    )
 
             with Vertical(id="sidebar"):
                 yield Static("Summary", classes="sidebar-title")
@@ -1097,9 +1162,15 @@ class MFLIPhaseCalibrationApp(App):
         state, parse_errors = self.parse_state()
         if parse_errors:
             info, warnings, errors = [], [], parse_errors
+            preview = None
         else:
             info, warnings, errors = build_summary(state)
+            preview = compute_filename_preview(state)
 
+        self.query_one("#filename_preview", Static).update(
+            f"File:  [bold]{preview}[/bold]" if preview
+            else "[dim]File:  (choose a sample and device to preview the filename)[/dim]"
+        )
         lines: list[str] = []
         if errors:
             lines.append("[bold red]Blocking issues[/bold red]")
