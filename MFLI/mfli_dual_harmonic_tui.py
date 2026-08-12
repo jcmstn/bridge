@@ -33,7 +33,6 @@ import multiprocessing as mp
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -90,14 +89,35 @@ from mfli.mfli_dual_harmonic import (
     shutdown_temperature_controller,
     sync_follower_oscillator,
 )
+from instruments.data_naming import (
+    TEST_SAMPLE,
+    RunContext,
+    allocate_run,
+    finalize_index_row,
+    make_incremental_writer,
+    preview_raw_filename,
+    proc_path,
+    write_record,
+)
+from instruments.tui_sample_picker import (
+    NEW_SAMPLE_SENTINEL,
+    NewSampleScreen,
+    StatusCommentScreen,
+    sample_options,
+)
 
 log = logging.getLogger("mfli_dual_harmonic_tui")
 
 # Data/settings live outside "bridge" (a sibling of it), same convention as
 # mfli_dual_harmonic.py, so nothing generated at runtime ends up in the
-# git-tracked source tree.
+# git-tracked source tree. _DATA_DIR doubles as the data-convention "data
+# root" (parent of every {sample}/ folder).
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 SETTINGS_PATH = _DATA_DIR / "mfli_dual_harmonic_tui_settings.json"
+
+# Locked type code for this measurement (see instruments/data_naming.py) —
+# never deviates.
+MEASUREMENT_TYPE = "HARM"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -122,7 +142,9 @@ DEFAULTS: dict = {
     "sample_rate_Hz": "857.0",
     "settling_time_s": "15",
     "n_averages": "50",
-    "output_name": "harmonic_hall",
+    "device": "",
+    "cooldown": "",
+    "temperature_setpoint_K": "300",
     "enable_sweep": True,
     "visa_resource": "GPIB0::6::INSTR",
     "current_limit_A": "35",
@@ -172,11 +194,12 @@ NUMERIC_FIELDS: dict = {
     "phase_cal_n_averages": int,
     "phase_cal_max_iterations": int,
 }
-TEXT_FIELDS = ["leader_device", "follower_device", "daq_host", "output_name", "visa_resource",
+TEXT_FIELDS = ["leader_device", "follower_device", "daq_host", "device", "cooldown", "visa_resource",
                "gaussmeter_visa_resource", "temperature_visa_resource", "temperature_sensor_uids"]
 # Free-text, blank-allowed: parsed to Optional[float] by hand in parse_state()
 # rather than going through NUMERIC_FIELDS' "blank is an error" casting.
 OPTIONAL_NUMERIC_FIELDS = [
+    "temperature_setpoint_K",
     "phase_cal_current_A",
     "hall_bar_length_um", "hall_bar_width_um", "hall_bar_thickness_nm",
     "field_angle_from_oop_deg",
@@ -250,10 +273,48 @@ class MeasurementPlan:
     phase_cal_n_averages: int
     phase_cal_max_iterations: int
     geometry_cfg: SampleGeometryConfig
+    run_ctx: RunContext
+    temperature_setpoint_K: Optional[float]
+    cooldown: str
+    header_extra: dict
+    series: str = ""
 
     @property
     def total_points(self) -> int:
         return len(self.currents_A) if self.currents_A is not None else 1
+
+
+def build_header_fields(plan: "MeasurementPlan", records: list[dict], *,
+                         status: str, comment: str) -> dict:
+    """
+    Universal + measurement-specific header/index fields for one run. Called
+    on every incremental write (status='in_progress', comment='') and once
+    more at end-of-run (outcome status, then again with the user's real
+    good/open/short/noisy judgement) -- see instruments/data_naming.py.
+
+    T_setpoint_K is the nominal value used to build the filename's T###K
+    token. T_K is the MEASURED mean (temperature_1_K) -- left blank (not
+    backfilled with the setpoint) whenever the MercuryiTC is disconnected
+    or hasn't produced a reading yet.
+    """
+    ctx = plan.run_ctx
+    measured = [r["temperature_1_K"] for r in records if r.get("temperature_1_K") is not None]
+    T_K = (sum(measured) / len(measured)) if measured else ""
+    fields = {
+        "run": ctx.run_number,
+        "timestamp": ctx.timestamp.isoformat(timespec="seconds"),
+        "sample": ctx.sample,
+        "device": ctx.device,
+        "type": MEASUREMENT_TYPE,
+        "T_setpoint_K": plan.temperature_setpoint_K,
+        "T_K": T_K,
+        "cooldown": plan.cooldown,
+        "status": status,
+        "comment": comment,
+        "series": plan.series,
+    }
+    fields.update(plan.header_extra)
+    return fields
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -295,6 +356,18 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     info: list[str] = []
     warnings: list[str] = []
     errors: list[str] = []
+
+    # ── Sample / run identity ───────────────────────────────────────────────
+    if not state.get("sample") or state["sample"] == NEW_SAMPLE_SENTINEL:
+        errors.append("Choose a sample (or create a new one).")
+    if not state.get("device"):
+        errors.append("Device is required (e.g. HB3, SV2).")
+    if not errors:
+        preview = preview_raw_filename(
+            state["sample"], state["device"], MEASUREMENT_TYPE,
+            temperature_setpoint_K=state.get("temperature_setpoint_K"),
+        )
+        info.append(f"Will save as: {preview}_<timestamp>.csv")
 
     if state["leader_device"] == state["follower_device"]:
         errors.append("Leader and follower device IDs must be different.")
@@ -495,9 +568,9 @@ def _live_plot_worker(queue: "mp.Queue", has_field_sweep: bool) -> None:
     plt.show()
 
 
-def _save_measurement_png(records: list[dict], csv_path: str) -> None:
-    """Save a static 1f/2f R-vs-field PNG alongside the CSV, from whatever
-    points were actually collected (including an aborted/partial run)."""
+def _save_measurement_png(records: list[dict], png_path: Path) -> None:
+    """Save a static 1f/2f R-vs-field PNG to proc/, from whatever points
+    were actually collected (including an aborted/partial run)."""
     if not records:
         return
 
@@ -521,7 +594,7 @@ def _save_measurement_png(records: list[dict], csv_path: str) -> None:
         ax.grid(True, alpha=0.3)
     fig.tight_layout()
 
-    png_path = Path(csv_path).with_suffix(".png")
+    png_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(png_path, dpi=150)
     plt.close(fig)
     log.info("Saved plot to '%s'", png_path)
@@ -658,10 +731,43 @@ class RunScreen(Screen):
         self._set_status(final_status)
         self.query_one("#back_btn", Button).disabled = False
         self.query_one("#abort_btn", Button).disabled = True
+
+        # Finalize the header/index row UNCONDITIONALLY, right now — never
+        # gated on the status/comment prompt below being answered, so a
+        # closed session never leaves the record stuck at "in_progress".
+        outcome_status = ("aborted" if self._stop_event.is_set()
+                           else "error" if final_status.startswith("ERROR") else "completed")
+        ctx = self.plan.run_ctx
+        header_fields = build_header_fields(self.plan, self._records, status=outcome_status, comment="")
         try:
-            _save_measurement_png(self._records, self.plan.acq_cfg.output_file)
+            write_record(ctx.raw_path, self._records, header_fields)
+            finalize_index_row(_DATA_DIR, ctx.sample, ctx.run_number, header_fields)
+        except Exception:
+            log.exception("Could not finalize run record")
+
+        try:
+            png_path = proc_path(_DATA_DIR, ctx.sample, ctx.run_str, ctx.device,
+                                  MEASUREMENT_TYPE, "plot")
+            _save_measurement_png(self._records, png_path)
         except Exception:
             log.exception("Could not save measurement plot PNG")
+
+        self.app.push_screen(StatusCommentScreen(), self._on_status_comment)
+
+    def _on_status_comment(self, result: Optional[tuple[str, str]]) -> None:
+        if result is None:
+            return
+        status, comment = result
+        ctx = self.plan.run_ctx
+        header_fields = build_header_fields(self.plan, self._records, status=status, comment=comment)
+        try:
+            # Never truncate an already-written raw file to an empty stub —
+            # only a run that never wrote a point gets a header-only write.
+            if self._records or not ctx.raw_path.exists():
+                write_record(ctx.raw_path, self._records, header_fields)
+            finalize_index_row(_DATA_DIR, ctx.sample, ctx.run_number, header_fields)
+        except Exception:
+            log.exception("Could not save final status/comment")
 
     def action_abort(self) -> None:
         if self._measurement_running and not self._stop_event.is_set():
@@ -756,6 +862,10 @@ class RunScreen(Screen):
                 )
 
             self._set_status_threadsafe("Running measurement …")
+            write_csv = make_incremental_writer(
+                plan.run_ctx.raw_path,
+                lambda records: build_header_fields(plan, records, status="in_progress", comment=""),
+            )
             run_measurement(
                 daq, plan.out_cfg, plan.demod1_cfg, plan.demod2_cfg, plan.acq_cfg, points,
                 stop_event=self._stop_event,
@@ -763,6 +873,7 @@ class RunScreen(Screen):
                 gaussmeter=gaussmeter, gauss_cfg=plan.gauss_cfg,
                 temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg,
                 geometry_cfg=plan.geometry_cfg, mds=mds,
+                write_csv=write_csv,
             )
             final = "Measurement aborted." if self._stop_event.is_set() else "Measurement complete."
         except Exception as exc:
@@ -885,8 +996,20 @@ class MFLIDualHarmonicApp(App):
                     yield field("n_averages", "Samples to average per point",
                                 DEFAULTS["n_averages"], kind="integer",
                                 validators=[Number(minimum=1, failure_description="must be ≥ 1")])
-                    yield field("output_name", "Output file name (prefix)",
-                                DEFAULTS["output_name"], kind="text")
+
+                with Collapsible(title="Sample & run identity", collapsed=False):
+                    yield Vertical(
+                        Label("Sample", classes="field-label"),
+                        Select(sample_options(_DATA_DIR), id="sample_select",
+                               allow_blank=False, value=TEST_SAMPLE),
+                        classes="field",
+                    )
+                    yield field("device", "Device (e.g. HB3, SV2)", DEFAULTS["device"], kind="text")
+                    yield field("cooldown", "Cooldown (optional)", DEFAULTS["cooldown"], kind="text")
+                    yield field("temperature_setpoint_K", "Temperature setpoint (K, optional)",
+                                DEFAULTS["temperature_setpoint_K"], kind="number", valid_empty=True,
+                                hint="Drives only the filename's T###K token — the header's T_K "
+                                     "uses the measured temperature when available.")
 
                 with Collapsible(title="Magnet & field sweep", collapsed=False):
                     yield switch_field("enable_sweep", "Sweep magnetic field (Kepco magnet)",
@@ -1006,6 +1129,26 @@ class MFLIDualHarmonicApp(App):
         self._load_settings()
         self.refresh_summary()
 
+    # ── Sample picker ────────────────────────────────────────────────────────
+
+    def _refresh_sample_options(self, *, select_value: Optional[str] = None) -> None:
+        select = self.query_one("#sample_select", Select)
+        options = sample_options(_DATA_DIR)
+        select.set_options(options)
+        if select_value is not None:
+            select.value = select_value
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id == "sample_select":
+            if event.value == NEW_SAMPLE_SENTINEL:
+                self.push_screen(NewSampleScreen(_DATA_DIR), self._on_new_sample_created)
+                return
+        self.refresh_summary()
+
+    def _on_new_sample_created(self, result: Optional[str]) -> None:
+        self._refresh_sample_options(select_value=result if result else TEST_SAMPLE)
+        self.refresh_summary()
+
     # ── Form state I/O ───────────────────────────────────────────────────────
 
     def _all_field_ids(self) -> list[str]:
@@ -1020,6 +1163,9 @@ class MFLIDualHarmonicApp(App):
         raw["enable_temperature"] = self.query_one("#enable_temperature", Switch).value
         raw["enable_phase_cal"] = self.query_one("#enable_phase_cal", Switch).value
         raw["order"] = self.query_one("#order", Select).value
+        sample_value = self.query_one("#sample_select", Select).value
+        if sample_value not in (None, Select.BLANK, NEW_SAMPLE_SENTINEL):
+            raw["sample"] = sample_value
         return raw
 
     def _load_settings(self) -> None:
@@ -1050,6 +1196,9 @@ class MFLIDualHarmonicApp(App):
                 self.query_one("#order", Select).value = int(saved["order"])
             except Exception:
                 pass
+        saved_sample = saved.get("sample")
+        if saved_sample and saved_sample in [v for _, v in sample_options(_DATA_DIR)]:
+            self.query_one("#sample_select", Select).value = saved_sample
 
     def _save_settings(self, raw: dict) -> None:
         try:
@@ -1087,6 +1236,8 @@ class MFLIDualHarmonicApp(App):
         state["enable_temperature"] = self.query_one("#enable_temperature", Switch).value
         state["enable_phase_cal"] = self.query_one("#enable_phase_cal", Switch).value
         state["order"] = int(self.query_one("#order", Select).value)
+        sample_value = self.query_one("#sample_select", Select).value
+        state["sample"] = sample_value if sample_value not in (None, Select.BLANK) else ""
         return state, errors
 
     # ── Reactivity ───────────────────────────────────────────────────────────
@@ -1176,10 +1327,14 @@ class MFLIDualHarmonicApp(App):
             input_range_V=state["input_range_2f_V"],
             sample_rate_Hz=state["sample_rate_Hz"], filter=filt,
         )
+        run_ctx = allocate_run(
+            _DATA_DIR, state["sample"], state["device"], MEASUREMENT_TYPE,
+            temperature_setpoint_K=state["temperature_setpoint_K"],
+        )
         acq_cfg = AcquisitionConfig(
             settling_time_s=state["settling_time_s"],
             n_averages=state["n_averages"],
-            output_file=str(_DATA_DIR / f"{state['output_name']}_{datetime.now():%Y%m%d_%H%M%S}.csv"),
+            output_file=str(run_ctx.raw_path),
         )
 
         magnet_cfg = None
@@ -1218,6 +1373,21 @@ class MFLIDualHarmonicApp(App):
             field_angle_from_oop_deg=state["field_angle_from_oop_deg"],
         )
 
+        # Geometry/dimensions are recorded per-row in the CSV (via
+        # build_run_metadata) and belong in sample.yaml long-term — they are
+        # deliberately NOT duplicated into header_extra/index.csv here.
+        header_extra = {
+            "excitation_frequency_Hz": state["frequency_Hz"],
+            "excitation_amplitude_V": state["amplitude_V"],
+            "series_R_ohm": state["series_R_ohm"],
+            "demod_time_constant_s": state["time_constant_s"],
+            "demod_order": state["order"],
+            "n_averages": state["n_averages"],
+            "settling_time_s": state["settling_time_s"],
+        }
+        if state["enable_sweep"]:
+            header_extra["field_sweep_A"] = [state["i_min_A"], state["i_max_A"], state["n_points"]]
+
         return MeasurementPlan(
             daq_host=state["daq_host"], daq_port=state["daq_port"],
             leader=state["leader_device"], follower=state["follower_device"],
@@ -1229,6 +1399,9 @@ class MFLIDualHarmonicApp(App):
             phase_cal_n_averages=state["phase_cal_n_averages"],
             phase_cal_max_iterations=state["phase_cal_max_iterations"],
             geometry_cfg=geometry_cfg,
+            run_ctx=run_ctx,
+            temperature_setpoint_K=state["temperature_setpoint_K"],
+            cooldown=state["cooldown"], header_extra=header_extra,
         )
 
 

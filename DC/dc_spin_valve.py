@@ -157,6 +157,7 @@ def run_measurement(
     gate_voltage_V: Optional[float] = None,
     temp_ctrl: Optional[MercuryITC] = None,
     temp_cfg:  Optional[TemperatureControllerConfig] = None,
+    write_csv: Optional[Callable[[List[dict]], None]] = None,
 ) -> pd.DataFrame:
     """
     Iterate over `points`, acquire the reversal-averaged voltage at each,
@@ -268,8 +269,11 @@ def run_measurement(
             on_point(record)
 
         # ── 6. Write incrementally (never lose data on a crash) ────────────
-        Path(acq_cfg.output_file).parent.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame(records).to_csv(acq_cfg.output_file, index=False)
+        if write_csv is not None:
+            write_csv(records)
+        else:
+            Path(acq_cfg.output_file).parent.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame(records).to_csv(acq_cfg.output_file, index=False)
 
         if stop_event is not None and stop_event.is_set():
             log.info("User aborted measurement mid-point.")

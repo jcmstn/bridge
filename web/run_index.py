@@ -49,28 +49,51 @@ CREATE INDEX IF NOT EXISTS idx_runs_suite      ON runs(suite);
 """
 
 
+# Added when bridge moved to the per-sample data convention (see
+# instruments/data_naming.py) -- nullable, so old rows just show blank.
+_MIGRATION_COLUMNS = [
+    ("sample", "TEXT"),
+    ("device", "TEXT"),
+    ("run_number", "TEXT"),
+]
+
+
 def _connect() -> sqlite3.Connection:
     _DATA_DIR.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(_DB_PATH, timeout=10.0)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(_SCHEMA)
+    for name, sql_type in _MIGRATION_COLUMNS:
+        try:
+            conn.execute(f"ALTER TABLE runs ADD COLUMN {name} {sql_type}")
+        except sqlite3.OperationalError:
+            pass  # already migrated -- idempotent, same style as CREATE TABLE IF NOT EXISTS
     return conn
 
 
 def start_run(suite: str, measurement: str, parameters: dict, data_dir: str,
-              output_paths: list[str]) -> int:
+              output_paths: list[str], *,
+              sample: Optional[str] = None, device: Optional[str] = None,
+              run_number: Optional[int] = None) -> int:
     """
     Insert a 'running' row and return its id. Called before the first
     connect_*() call, so a connection failure is still captured as an
     'error' row rather than lost entirely.
+
+    `sample`/`device`/`run_number` are the data-convention identity for
+    this run (see instruments/data_naming.py's allocate_run()) -- optional
+    only because this module predates that convention; every migrated page
+    passes them.
     """
     with _connect() as conn:
         cur = conn.execute(
             "INSERT INTO runs (started_at, suite, measurement, status, "
-            "parameters_json, data_dir, output_paths_json, point_count) "
-            "VALUES (datetime('now'), ?, ?, 'running', ?, ?, ?, 0)",
+            "parameters_json, data_dir, output_paths_json, point_count, "
+            "sample, device, run_number) "
+            "VALUES (datetime('now'), ?, ?, 'running', ?, ?, ?, 0, ?, ?, ?)",
             (suite, measurement, json.dumps(parameters), data_dir,
-             json.dumps(output_paths)),
+             json.dumps(output_paths), sample, device,
+             None if run_number is None else str(run_number)),
         )
         return int(cur.lastrowid)
 

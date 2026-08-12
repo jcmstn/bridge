@@ -30,7 +30,6 @@ import math
 import multiprocessing as mp
 import threading
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -79,14 +78,35 @@ from mfli.mfli_diff_resistance_vs_bias import (
     shutdown_temperature_controller,
     sync_follower_oscillator,
 )
+from instruments.data_naming import (
+    TEST_SAMPLE,
+    RunContext,
+    allocate_run,
+    finalize_index_row,
+    make_incremental_writer,
+    preview_raw_filename,
+    proc_path,
+    write_record,
+)
+from instruments.tui_sample_picker import (
+    NEW_SAMPLE_SENTINEL,
+    NewSampleScreen,
+    StatusCommentScreen,
+    sample_options,
+)
 
 log = logging.getLogger("mfli_diff_resistance_tui")
 
 # Data/settings live outside "bridge" (a sibling of it), same convention as
 # mfli_diff_resistance_vs_bias.py, so nothing generated at runtime ends up
-# in the git-tracked source tree.
+# in the git-tracked source tree. _DATA_DIR doubles as the data-convention
+# "data root" (parent of every {sample}/ folder).
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 SETTINGS_PATH = _DATA_DIR / "mfli_diff_resistance_tui_settings.json"
+
+# Locked type code for this measurement (see instruments/data_naming.py) —
+# never deviates.
+MEASUREMENT_TYPE = "DIFFR"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -111,7 +131,9 @@ DEFAULTS: dict = {
     "sample_rate_Hz": "857.0",
     "settling_time_s": "1.5",
     "n_averages": "50",
-    "output_name": "diff_resistance_vs_bias",
+    "device": "",
+    "cooldown": "",
+    "temperature_setpoint_K": "300",
     "n_points": "41",
     "enable_temperature": True,
     "temperature_visa_resource": "TCPIP0::192.168.1.5::7020::SOCKET",
@@ -134,8 +156,11 @@ NUMERIC_FIELDS: dict = {
     "n_averages": int,
     "n_points": int,
 }
-TEXT_FIELDS = ["leader_device", "follower_device", "daq_host", "output_name",
+TEXT_FIELDS = ["leader_device", "follower_device", "daq_host", "device", "cooldown",
                "temperature_visa_resource", "temperature_sensor_uids"]
+# Free-text, blank-allowed: parsed to Optional[float] by hand in parse_state()
+# rather than going through NUMERIC_FIELDS' "blank is an error" casting.
+OPTIONAL_NUMERIC_FIELDS = ["temperature_setpoint_K"]
 
 
 def parse_sensor_uids(raw: str) -> tuple:
@@ -191,11 +216,49 @@ class MeasurementPlan:
     voltage_cfg: DemodConfig
     acq_cfg: AcquisitionConfig
     biases_V: np.ndarray
+    run_ctx: RunContext
+    temperature_setpoint_K: Optional[float]
+    cooldown: str
+    header_extra: dict
     temp_cfg: Optional[TemperatureControllerConfig] = None
+    series: str = ""
 
     @property
     def total_points(self) -> int:
         return len(self.biases_V)
+
+
+def build_header_fields(plan: "MeasurementPlan", records: list[dict], *,
+                         status: str, comment: str) -> dict:
+    """
+    Universal + measurement-specific header/index fields for one run. Called
+    on every incremental write (status='in_progress', comment='') and once
+    more at end-of-run (outcome status, then again with the user's real
+    good/open/short/noisy judgement) -- see instruments/data_naming.py.
+
+    T_setpoint_K is the nominal value used to build the filename's T###K
+    token. T_K is the MEASURED mean (temperature_1_K) -- left blank (not
+    backfilled with the setpoint) whenever the MercuryiTC is disconnected
+    or hasn't produced a reading yet.
+    """
+    ctx = plan.run_ctx
+    measured = [r["temperature_1_K"] for r in records if r.get("temperature_1_K") is not None]
+    T_K = (sum(measured) / len(measured)) if measured else ""
+    fields = {
+        "run": ctx.run_number,
+        "timestamp": ctx.timestamp.isoformat(timespec="seconds"),
+        "sample": ctx.sample,
+        "device": ctx.device,
+        "type": MEASUREMENT_TYPE,
+        "T_setpoint_K": plan.temperature_setpoint_K,
+        "T_K": T_K,
+        "cooldown": plan.cooldown,
+        "status": status,
+        "comment": comment,
+        "series": plan.series,
+    }
+    fields.update(plan.header_extra)
+    return fields
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -203,10 +266,10 @@ class MeasurementPlan:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def field(field_id: str, label_text: str, default: str, *, kind: str = "number",
-          hint: str = "", validators=None) -> Vertical:
+          hint: str = "", validators=None, valid_empty: bool = False) -> Vertical:
     children = [Label(label_text, classes="field-label"),
                 Input(value=default, id=field_id, type=kind, validators=validators,
-                      valid_empty=False)]
+                      valid_empty=valid_empty)]
     if hint:
         children.append(Label(hint, classes="hint"))
     return Vertical(*children, classes="field")
@@ -237,6 +300,18 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     info: list[str] = []
     warnings: list[str] = []
     errors: list[str] = []
+
+    # ── Sample / run identity ───────────────────────────────────────────────
+    if not state.get("sample") or state["sample"] == NEW_SAMPLE_SENTINEL:
+        errors.append("Choose a sample (or create a new one).")
+    if not state.get("device"):
+        errors.append("Device is required (e.g. HB3, SV2).")
+    if not errors:
+        preview = preview_raw_filename(
+            state["sample"], state["device"], MEASUREMENT_TYPE,
+            temperature_setpoint_K=state.get("temperature_setpoint_K"),
+        )
+        info.append(f"Will save as: {preview}_<timestamp>.csv")
 
     if state["leader_device"] == state["follower_device"]:
         errors.append("Leader and follower device IDs must be different.")
@@ -384,10 +459,10 @@ def _live_plot_worker(queue: "mp.Queue") -> None:
     plt.show()
 
 
-def _save_measurement_png(records: list[dict], csv_path: str) -> None:
-    """Save a static R_diff/reactive/phase-vs-bias PNG alongside the CSV,
-    from whatever points were actually collected (including an
-    aborted/partial run)."""
+def _save_measurement_png(records: list[dict], png_path: Path) -> None:
+    """Save a static R_diff/reactive/phase-vs-bias PNG to proc/, from
+    whatever points were actually collected (including an aborted/partial
+    run)."""
     if not records:
         return
 
@@ -414,7 +489,7 @@ def _save_measurement_png(records: list[dict], csv_path: str) -> None:
         ax.grid(True, alpha=0.3)
     fig.tight_layout()
 
-    png_path = Path(csv_path).with_suffix(".png")
+    png_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(png_path, dpi=150)
     plt.close(fig)
     log.info("Saved plot to '%s'", png_path)
@@ -550,10 +625,43 @@ class RunScreen(Screen):
         self._set_status(final_status)
         self.query_one("#back_btn", Button).disabled = False
         self.query_one("#abort_btn", Button).disabled = True
+
+        # Finalize the header/index row UNCONDITIONALLY, right now — never
+        # gated on the status/comment prompt below being answered, so a
+        # closed session never leaves the record stuck at "in_progress".
+        outcome_status = ("aborted" if self._stop_event.is_set()
+                           else "error" if final_status.startswith("ERROR") else "completed")
+        ctx = self.plan.run_ctx
+        header_fields = build_header_fields(self.plan, self._records, status=outcome_status, comment="")
         try:
-            _save_measurement_png(self._records, self.plan.acq_cfg.output_file)
+            write_record(ctx.raw_path, self._records, header_fields)
+            finalize_index_row(_DATA_DIR, ctx.sample, ctx.run_number, header_fields)
+        except Exception:
+            log.exception("Could not finalize run record")
+
+        try:
+            png_path = proc_path(_DATA_DIR, ctx.sample, ctx.run_str, ctx.device,
+                                  MEASUREMENT_TYPE, "plot")
+            _save_measurement_png(self._records, png_path)
         except Exception:
             log.exception("Could not save measurement plot PNG")
+
+        self.app.push_screen(StatusCommentScreen(), self._on_status_comment)
+
+    def _on_status_comment(self, result: Optional[tuple[str, str]]) -> None:
+        if result is None:
+            return
+        status, comment = result
+        ctx = self.plan.run_ctx
+        header_fields = build_header_fields(self.plan, self._records, status=status, comment=comment)
+        try:
+            # Never truncate an already-written raw file to an empty stub —
+            # only a run that never wrote a point gets a header-only write.
+            if self._records or not ctx.raw_path.exists():
+                write_record(ctx.raw_path, self._records, header_fields)
+            finalize_index_row(_DATA_DIR, ctx.sample, ctx.run_number, header_fields)
+        except Exception:
+            log.exception("Could not save final status/comment")
 
     def action_abort(self) -> None:
         if self._measurement_running and not self._stop_event.is_set():
@@ -601,11 +709,16 @@ class RunScreen(Screen):
             points = [BiasPoint(bias_V=float(v)) for v in plan.biases_V]
 
             self._set_status_threadsafe("Running measurement …")
+            write_csv = make_incremental_writer(
+                plan.run_ctx.raw_path,
+                lambda records: build_header_fields(plan, records, status="in_progress", comment=""),
+            )
             run_measurement(
                 daq, plan.out_cfg, plan.current_cfg, plan.voltage_cfg, plan.acq_cfg, points,
                 stop_event=self._stop_event,
                 on_point=lambda record: self.app.call_from_thread(self._on_point, record),
                 temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg,
+                write_csv=write_csv,
             )
             final = "Measurement aborted." if self._stop_event.is_set() else "Measurement complete."
         except Exception as exc:
@@ -722,8 +835,20 @@ class MFLIDiffResistanceApp(App):
                     yield field("n_averages", "Samples to average per point (each demod)",
                                 DEFAULTS["n_averages"], kind="integer",
                                 validators=[Number(minimum=1, failure_description="must be ≥ 1")])
-                    yield field("output_name", "Output file name (prefix)",
-                                DEFAULTS["output_name"], kind="text")
+
+                with Collapsible(title="Sample & run identity", collapsed=False):
+                    yield Vertical(
+                        Label("Sample", classes="field-label"),
+                        Select(sample_options(_DATA_DIR), id="sample_select",
+                               allow_blank=False, value=TEST_SAMPLE),
+                        classes="field",
+                    )
+                    yield field("device", "Device (e.g. HB3, SV2)", DEFAULTS["device"], kind="text")
+                    yield field("cooldown", "Cooldown (optional)", DEFAULTS["cooldown"], kind="text")
+                    yield field("temperature_setpoint_K", "Temperature setpoint (K, optional)",
+                                DEFAULTS["temperature_setpoint_K"], kind="number", valid_empty=True,
+                                hint="Drives only the filename's T###K token — the header's T_K "
+                                     "uses the measured temperature when available.")
 
                 with Collapsible(title="Bias sweep", collapsed=False):
                     yield field("n_points", "Points per sweep direction",
@@ -763,16 +888,39 @@ class MFLIDiffResistanceApp(App):
         self._load_settings()
         self.refresh_summary()
 
+    # ── Sample picker ────────────────────────────────────────────────────────
+
+    def _refresh_sample_options(self, *, select_value: Optional[str] = None) -> None:
+        select = self.query_one("#sample_select", Select)
+        options = sample_options(_DATA_DIR)
+        select.set_options(options)
+        if select_value is not None:
+            select.value = select_value
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id == "sample_select":
+            if event.value == NEW_SAMPLE_SENTINEL:
+                self.push_screen(NewSampleScreen(_DATA_DIR), self._on_new_sample_created)
+                return
+        self.refresh_summary()
+
+    def _on_new_sample_created(self, result: Optional[str]) -> None:
+        self._refresh_sample_options(select_value=result if result else TEST_SAMPLE)
+        self.refresh_summary()
+
     # ── Form state I/O ───────────────────────────────────────────────────────
 
     def _all_field_ids(self) -> list[str]:
-        return list(NUMERIC_FIELDS) + TEXT_FIELDS
+        return list(NUMERIC_FIELDS) + TEXT_FIELDS + OPTIONAL_NUMERIC_FIELDS
 
     def collect_raw(self) -> dict:
         raw: dict = {fid: self.query_one(f"#{fid}", Input).value for fid in self._all_field_ids()}
         raw["sinc_filter"] = self.query_one("#sinc_filter", Switch).value
         raw["order"] = self.query_one("#order", Select).value
         raw["enable_temperature"] = self.query_one("#enable_temperature", Switch).value
+        sample_value = self.query_one("#sample_select", Select).value
+        if sample_value not in (None, Select.BLANK, NEW_SAMPLE_SENTINEL):
+            raw["sample"] = sample_value
         return raw
 
     def _load_settings(self) -> None:
@@ -795,6 +943,9 @@ class MFLIDiffResistanceApp(App):
                 pass
         if "enable_temperature" in saved:
             self.query_one("#enable_temperature", Switch).value = bool(saved["enable_temperature"])
+        saved_sample = saved.get("sample")
+        if saved_sample and saved_sample in [v for _, v in sample_options(_DATA_DIR)]:
+            self.query_one("#sample_select", Select).value = saved_sample
 
     def _save_settings(self, raw: dict) -> None:
         try:
@@ -815,9 +966,21 @@ class MFLIDiffResistanceApp(App):
                 state[fid] = 0
         for fid in TEXT_FIELDS:
             state[fid] = self.query_one(f"#{fid}", Input).value.strip()
+        for fid in OPTIONAL_NUMERIC_FIELDS:
+            raw = self.query_one(f"#{fid}", Input).value.strip()
+            if raw:
+                try:
+                    state[fid] = float(raw)
+                except ValueError:
+                    errors.append(f"'{fid}' is not a valid number: {raw!r}")
+                    state[fid] = None
+            else:
+                state[fid] = None
         state["sinc_filter"] = self.query_one("#sinc_filter", Switch).value
         state["order"] = int(self.query_one("#order", Select).value)
         state["enable_temperature"] = self.query_one("#enable_temperature", Switch).value
+        sample_value = self.query_one("#sample_select", Select).value
+        state["sample"] = sample_value if sample_value not in (None, Select.BLANK) else ""
         return state, errors
 
     # ── Reactivity ───────────────────────────────────────────────────────────
@@ -898,10 +1061,14 @@ class MFLIDiffResistanceApp(App):
             input_range=state["voltage_input_range_V"],
             sample_rate_Hz=state["sample_rate_Hz"], filter=filt,
         )
+        run_ctx = allocate_run(
+            _DATA_DIR, state["sample"], state["device"], MEASUREMENT_TYPE,
+            temperature_setpoint_K=state["temperature_setpoint_K"],
+        )
         acq_cfg = AcquisitionConfig(
             settling_time_s=state["settling_time_s"],
             n_averages=state["n_averages"],
-            output_file=str(_DATA_DIR / f"{state['output_name']}_{datetime.now():%Y%m%d_%H%M%S}.csv"),
+            output_file=str(run_ctx.raw_path),
         )
 
         biases_V = bidirectional_bias_sweep(
@@ -917,11 +1084,24 @@ class MFLIDiffResistanceApp(App):
                     sensor_uids=uids,
                 )
 
+        header_extra = {
+            "excitation_frequency_Hz": state["frequency_Hz"],
+            "ac_amplitude_V": state["ac_amplitude_V"],
+            "series_R_ohm": state["series_R_ohm"],
+            "bias_sweep_V": [state["bias_min_V"], state["bias_max_V"], state["n_points"]],
+            "demod_time_constant_s": state["time_constant_s"],
+            "demod_order": state["order"],
+            "n_averages": state["n_averages"],
+            "settling_time_s": state["settling_time_s"],
+        }
+
         return MeasurementPlan(
             daq_host=state["daq_host"], daq_port=state["daq_port"],
             leader=state["leader_device"], follower=state["follower_device"],
             out_cfg=out_cfg, current_cfg=current_cfg, voltage_cfg=voltage_cfg,
             acq_cfg=acq_cfg, biases_V=biases_V,
+            run_ctx=run_ctx, temperature_setpoint_K=state["temperature_setpoint_K"],
+            cooldown=state["cooldown"], header_extra=header_extra,
             temp_cfg=temp_cfg,
         )
 

@@ -7,6 +7,7 @@ license = "MIT"
 authors = [{ name = "Joacim Stenlund", email = "joacim.stenlund@physics.uu.se" }]
 requires-python = ">=3.14"
 dependencies = [
+    "filelock>=3.16",
     "gpib-ctypes>=0.3.0",
     "ipykernel>=7.3.0",
     "matplotlib>=3.11.1",
@@ -22,6 +23,9 @@ dependencies = [
     "scipy>=1.18.0",
     "nicegui[plotly]>=3.15.0",
 ]
+
+[dependency-groups]
+dev = ["pytest>=8"]
 
 [build-system]
 requires = ["setuptools>=68"]

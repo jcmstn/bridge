@@ -15,14 +15,11 @@ layout (NiceGUI instead of Textual widgets) and plan-building (a free-choice
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-import numpy as np
 import plotly.graph_objects as go
-from nicegui import ui
+from nicegui import background_tasks, ui
 
 from dc.dc_hall_measurement import (
     AcquisitionConfig, FieldPoint, GaussmeterConfig, MagnetConfig, SourceConfig,
@@ -31,37 +28,27 @@ from dc.dc_hall_measurement import (
     connect_voltmeter, run_measurement, set_magnet_current, shutdown_gaussmeter,
     shutdown_magnet, shutdown_source, shutdown_temperature_controller,
 )
-from dc.dc_sweep_utils import build_output_path, linear_sweep
+from dc.dc_sweep_utils import linear_sweep
 from dc.dc_hall_measurement_tui import (
-    DEFAULTS, NUMERIC_FIELDS, TEXT_FIELDS, DC_HALL_DESCRIPTION,
-    build_summary, parse_sensor_uids,
+    DEFAULTS, NUMERIC_FIELDS, TEXT_FIELDS, OPTIONAL_NUMERIC_FIELDS, DC_HALL_DESCRIPTION,
+    MEASUREMENT_TYPE, MeasurementPlan, build_header_fields, build_summary, parse_sensor_uids,
+)
+from instruments.data_naming import (
+    TEST_SAMPLE, allocate_run, finalize_index_row, make_incremental_writer,
+    preview_raw_filename, proc_path, write_record,
 )
 from web.run_controller import (
-    RunController, RunCallbacks, FinalStatus, num_field, text_field, bool_switch,
-    render_summary, busy_banner, is_busy, format_duration,
+    RunController, RunCallbacks, FinalStatus, num_field, optional_num_field, text_field,
+    bool_switch, render_summary, busy_banner, is_busy, format_duration,
 )
 from web.directory_picker import directory_field, validate_directory
+from web.sample_picker import NEW_SAMPLE_SENTINEL, sample_select, status_comment_dialog
 
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data"
 _SETTINGS_PATH = _DATA_DIR / "web_settings" / "dc_hall_web_settings.json"
 
 PAGE_TITLE = "DC Hall Measurement"
 SUITE = "DC"
-
-
-@dataclass
-class MeasurementPlan:
-    src_cfg: SourceConfig
-    volt_cfg: VoltmeterConfig
-    acq_cfg: AcquisitionConfig
-    magnet_cfg: Optional[MagnetConfig]
-    gauss_cfg: Optional[GaussmeterConfig]
-    currents_A: Optional[np.ndarray]
-    temp_cfg: Optional[TemperatureControllerConfig]
-
-    @property
-    def total_points(self) -> int:
-        return len(self.currents_A) if self.currents_A is not None else 1
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -100,13 +87,14 @@ def build_plan(state: dict) -> MeasurementPlan:
         nplc=state["nplc"],
         auto_range=state["auto_range"],
     )
+    run_ctx = allocate_run(
+        Path(state["data_dir"]), state["sample"], state["device"], MEASUREMENT_TYPE,
+        temperature_setpoint_K=state["temperature_setpoint_K"],
+    )
     acq_cfg = AcquisitionConfig(
         settling_time_s=state["settling_time_s"],
         n_reversals=int(state["n_reversals"]),
-        output_file=str(build_output_path(
-            Path(state["data_dir"]), state["output_subdir"], state["output_name"],
-            f"{datetime.now():%Y%m%d_%H%M%S}",
-        )),
+        output_file=str(run_ctx.raw_path),
     )
 
     magnet_cfg = None
@@ -139,18 +127,30 @@ def build_plan(state: dict) -> MeasurementPlan:
                 sensor_uids=uids,
             )
 
+    header_extra = {
+        "sense_current_A": state["sense_current_A"],
+        "compliance_V": state["compliance_V"],
+        "n_reversals": int(state["n_reversals"]),
+        "settling_time_s": state["settling_time_s"],
+    }
+    if state["enable_sweep"]:
+        header_extra["field_sweep_A"] = [state["i_min_A"], state["i_max_A"], state["step_A"]]
+
     return MeasurementPlan(
         src_cfg=src_cfg, volt_cfg=volt_cfg, acq_cfg=acq_cfg,
         magnet_cfg=magnet_cfg, gauss_cfg=gauss_cfg, currents_A=currents_A,
-        temp_cfg=temp_cfg,
+        temp_cfg=temp_cfg, run_ctx=run_ctx,
+        temperature_setpoint_K=state["temperature_setpoint_K"],
+        cooldown=state["cooldown"], header_extra=header_extra,
     )
 
 
-def _save_measurement_png(records: list[dict], csv_path: str) -> list[str]:
-    """Headless (Agg) final plot, same look as dc_hall_measurement_tui.py's
-    _save_measurement_png -- called from the worker thread, no UI access."""
+def _save_measurement_png(records: list[dict], png_path: Path) -> None:
+    """Headless (Agg) final plot into proc/, same look as
+    dc_hall_measurement_tui.py's _save_measurement_png -- called from the
+    worker thread, no UI access."""
     if not records:
-        return [csv_path]
+        return
 
     import matplotlib
     matplotlib.use("Agg")
@@ -168,10 +168,9 @@ def _save_measurement_png(records: list[dict], csv_path: str) -> list[str]:
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
 
-    png_path = Path(csv_path).with_suffix(".png")
+    png_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(png_path, dpi=150)
     plt.close(fig)
-    return [csv_path, str(png_path)]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -231,11 +230,21 @@ def page() -> None:
                     "+I/-I reversal pairs averaged per point", float(d("n_reversals")), integer=True,
                     hint="Splits each point into (V(+I)-V(-I))/2 [reported R] and "
                          "(V(+I)+V(-I))/2 [recorded, not discarded].")
-                inputs["output_name"] = text_field("Output file name (prefix)", d("output_name"))
-                inputs["output_subdir"] = text_field(
-                    "Data sub-directory (optional)", d("output_subdir"),
-                    hint="Saved to <save directory>/<sub-directory>/<prefix>_<timestamp>.csv")
-                data_dir_input = directory_field("Save directory", saved.get("data_dir") or str(_DATA_DIR))
+
+            with ui.expansion("Sample & run identity", value=True, icon="science").classes("w-full"):
+                data_dir_input = directory_field(
+                    "Data root directory", saved.get("data_dir") or str(_DATA_DIR))
+                sample_dropdown, refresh_sample_options = sample_select(
+                    lambda: data_dir_input.value, default=saved.get("sample") or TEST_SAMPLE)
+                data_dir_input.on_value_change(lambda: refresh_sample_options())
+                inputs["device"] = text_field("Device (e.g. HB3, SV2)", d("device"))
+                inputs["cooldown"] = text_field("Cooldown (optional)", d("cooldown"))
+                _t_default = d("temperature_setpoint_K")
+                inputs["temperature_setpoint_K"] = optional_num_field(
+                    "Temperature setpoint (K, optional)",
+                    float(_t_default) if _t_default not in ("", None) else None,
+                    hint="Drives only the filename's T###K token — the header's T_K uses the "
+                         "measured temperature when available.")
 
             with ui.expansion("Magnet & field sweep", value=True, icon="explore").classes("w-full") as magnet_section:
                 switches["enable_sweep"] = bool_switch(
@@ -312,6 +321,9 @@ def page() -> None:
         for fid, sw in switches.items():
             raw[fid] = sw.value
         raw["data_dir"] = data_dir_input.value
+        sample_value = sample_dropdown.value
+        if sample_value not in (None, NEW_SAMPLE_SENTINEL):
+            raw["sample"] = sample_value
         return raw
 
     def parse_state() -> tuple[dict, list[str]]:
@@ -326,8 +338,12 @@ def page() -> None:
                 state[fid] = 0
         for fid in TEXT_FIELDS:
             state[fid] = (inputs[fid].value or "").strip()
+        for fid in OPTIONAL_NUMERIC_FIELDS:
+            state[fid] = inputs[fid].value
         for fid, sw in switches.items():
             state[fid] = sw.value
+        sample_value = sample_dropdown.value
+        state["sample"] = sample_value if sample_value not in (None, NEW_SAMPLE_SENTINEL) else ""
         return state, errors
 
     @ui.refreshable
@@ -349,7 +365,7 @@ def page() -> None:
         magnet_section.set_text(
             "Magnet & field sweep" + ("" if switches["enable_sweep"].value else " (disabled)"))
 
-    for inp in list(inputs.values()) + [data_dir_input]:
+    for inp in list(inputs.values()) + [data_dir_input, sample_dropdown]:
         inp.on_value_change(refresh_summary.refresh)
     for sw in switches.values():
         sw.on_value_change(refresh_summary.refresh)
@@ -383,13 +399,45 @@ def page() -> None:
     def on_log(text: str, level: int) -> None:
         log_area.push(text)
 
-    def on_finished(final: FinalStatus, result) -> None:
-        label = {"completed": "Measurement complete.", "aborted": "Measurement aborted.",
-                  "error": f"ERROR: {final.error}"}[final.status]
-        status_label.set_text(label)
-        abort_btn.set_visibility(False)
-        start_btn.set_enabled(not is_busy())
-        refresh_summary.refresh()
+    async def _prompt_status_comment(plan: MeasurementPlan, records: list[dict]) -> None:
+        result = await status_comment_dialog()
+        if result is None:
+            return
+        status, comment = result
+        ctx = plan.run_ctx
+        header_fields = build_header_fields(plan, records, status=status, comment=comment)
+        try:
+            write_record(ctx.raw_path, records, header_fields)
+            finalize_index_row(ctx.sample_dir.parent, ctx.sample, ctx.run_number, header_fields)
+        except Exception:
+            ui.notify("Could not save final status/comment.", type="negative")
+
+    def make_on_finished(plan: MeasurementPlan):
+        def on_finished(final: FinalStatus, result) -> None:
+            label = {"completed": "Measurement complete.", "aborted": "Measurement aborted.",
+                      "error": f"ERROR: {final.error}"}[final.status]
+            status_label.set_text(label)
+            abort_btn.set_visibility(False)
+            start_btn.set_enabled(not is_busy())
+            refresh_summary.refresh()
+            records = result.to_dict("records") if result is not None else []
+            background_tasks.create(_prompt_status_comment(plan, records), name="status_comment_prompt")
+        return on_finished
+
+    def _finalize(plan: MeasurementPlan, records: list[dict], result, status: str) -> list[str]:
+        """save_artifacts -- runs on the worker thread, right after run_fn
+        returns/raises. Writes the outcome-derived header/index row
+        UNCONDITIONALLY (never gated on the status/comment dialog above,
+        which only runs if/when the UI thread gets to it) and the final
+        PNG into proc/."""
+        ctx = plan.run_ctx
+        data_root = ctx.sample_dir.parent
+        header_fields = build_header_fields(plan, records, status=status, comment="")
+        write_record(ctx.raw_path, records, header_fields)
+        finalize_index_row(data_root, ctx.sample, ctx.run_number, header_fields)
+        png_path = proc_path(data_root, ctx.sample, ctx.run_str, ctx.device, MEASUREMENT_TYPE, "plot")
+        _save_measurement_png(records, png_path)
+        return [str(ctx.raw_path), str(png_path)]
 
     def make_run_fn(plan: MeasurementPlan):
         def run_fn(stop_event, cb: RunCallbacks):
@@ -417,11 +465,16 @@ def page() -> None:
                     points = [FieldPoint()]
 
                 cb.on_status("Running measurement …")
+                write_csv = make_incremental_writer(
+                    plan.run_ctx.raw_path,
+                    lambda records: build_header_fields(plan, records, status="in_progress", comment=""),
+                )
                 return run_measurement(
                     source, voltmeter, plan.src_cfg, plan.acq_cfg, points,
                     stop_event=stop_event, on_point=cb.on_point,
                     gaussmeter=gaussmeter, gauss_cfg=plan.gauss_cfg,
                     temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg,
+                    write_csv=write_csv,
                 )
             finally:
                 if magnet is not None:
@@ -454,10 +507,13 @@ def page() -> None:
 
         rc = RunController(
             suite=SUITE, measurement=PAGE_TITLE, run_fn=make_run_fn(plan),
-            save_artifacts=lambda records, result: _save_measurement_png(records, plan.acq_cfg.output_file),
+            save_artifacts=lambda records, result, status: _finalize(plan, records, result, status),
             parameters=state, data_dir=state["data_dir"],
             planned_output_paths=[plan.acq_cfg.output_file],
-            on_record=on_record, on_status=on_status, on_log=on_log, on_finished=on_finished,
+            on_record=on_record, on_status=on_status, on_log=on_log,
+            on_finished=make_on_finished(plan),
+            sample=plan.run_ctx.sample, device=plan.run_ctx.device,
+            run_number=plan.run_ctx.run_number,
         )
         if not rc.try_start():
             ui.notify("Another measurement is already running — see the banner above.", type="warning")

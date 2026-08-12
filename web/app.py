@@ -90,6 +90,9 @@ def _card(title: str, description: str, route: str) -> None:
 def _recent_runs_table() -> None:
     columns = [
         {"name": "started_at", "label": "Started", "field": "started_at", "sortable": True},
+        {"name": "sample", "label": "Sample", "field": "sample"},
+        {"name": "device", "label": "Device", "field": "device"},
+        {"name": "run_number", "label": "Run #", "field": "run_number"},
         {"name": "suite", "label": "Suite", "field": "suite"},
         {"name": "measurement", "label": "Measurement", "field": "measurement"},
         {"name": "status", "label": "Status", "field": "status"},
@@ -110,6 +113,8 @@ def _recent_runs_table() -> None:
             "status": r["status"], "point_count": r["point_count"],
             "duration_s": f"{r['duration_s']:.1f}" if r["duration_s"] is not None else "—",
             "data_dir": r["data_dir"],
+            "sample": r.get("sample") or "—", "device": r.get("device") or "—",
+            "run_number": r.get("run_number") or "—",
         } for r in runs]
         ui.table(columns=columns, rows=rows, row_key="started_at").classes("w-full").props("dense")
 

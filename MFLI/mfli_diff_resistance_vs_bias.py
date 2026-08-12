@@ -116,8 +116,10 @@ from instruments.mercury_itc import (
     shutdown_temperature_controller,
 )
 
-# Data lives outside the source tree, same convention as mfli_dual_harmonic.py
-_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+# Data lives outside "bridge" (a sibling of it) so measurement output never
+# ends up inside the git-tracked source tree, same convention as
+# mfli_dual_harmonic.py.
+_DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Logging
@@ -373,6 +375,7 @@ def run_measurement(
     temp_ctrl: Optional[MercuryITC] = None,
     temp_cfg:  Optional[TemperatureControllerConfig] = None,
     mds=None,
+    write_csv: Optional[Callable[[List[dict]], None]] = None,
 ) -> pd.DataFrame:
     """
     Iterate over `points`, set each DC bias, acquire the current-sense and
@@ -485,8 +488,11 @@ def run_measurement(
             on_point(record)
 
         # ── 6. Write incrementally (never lose data on a crash) ────────────
-        Path(acq_cfg.output_file).parent.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame(records).to_csv(acq_cfg.output_file, index=False)
+        if write_csv is not None:
+            write_csv(records)
+        else:
+            Path(acq_cfg.output_file).parent.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame(records).to_csv(acq_cfg.output_file, index=False)
 
     log.info("Measurement complete. %d points saved to '%s'.", len(records), acq_cfg.output_file)
     return pd.DataFrame(records)

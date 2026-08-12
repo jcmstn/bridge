@@ -596,6 +596,7 @@ def run_measurement(
     temp_cfg:  Optional[TemperatureControllerConfig] = None,
     geometry_cfg: Optional[SampleGeometryConfig] = None,
     mds=None,
+    write_csv: Optional[Callable[[List[dict]], None]] = None,
 ) -> pd.DataFrame:
     """
     Iterate over `points`, acquire 1f and 2f at each, log to CSV.
@@ -742,8 +743,11 @@ def run_measurement(
             on_point(record)
 
         # ── 6. Write incrementally (never lose data on a crash) ────────────
-        Path(acq_cfg.output_file).parent.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame(records).to_csv(acq_cfg.output_file, index=False)
+        if write_csv is not None:
+            write_csv(records)
+        else:
+            Path(acq_cfg.output_file).parent.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame(records).to_csv(acq_cfg.output_file, index=False)
 
     log.info("Measurement complete. %d points saved to '%s'.", len(records), acq_cfg.output_file)
     return pd.DataFrame(records)

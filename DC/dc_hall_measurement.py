@@ -153,6 +153,7 @@ def run_measurement(
     gauss_cfg:  Optional[GaussmeterConfig] = None,
     temp_ctrl: Optional[MercuryITC] = None,
     temp_cfg:  Optional[TemperatureControllerConfig] = None,
+    write_csv: Optional[Callable[[List[dict]], None]] = None,
 ) -> pd.DataFrame:
     """
     Iterate over `points`, acquire the reversal-averaged Hall voltage at
@@ -180,6 +181,13 @@ def run_measurement(
     MercuryiTC controller (see mercury_itc.py). Passing `temp_ctrl=None`
     (e.g. because the MercuryiTC isn't connected) simply leaves those
     columns empty — it's never a reason to stop the measurement.
+
+    `write_csv`, if given, replaces the plain
+    `pd.DataFrame(records).to_csv(acq_cfg.output_file, index=False)` write
+    with a caller-supplied writer (see instruments.data_naming) — used by
+    the TUI/web layer to write the sample-convention header alongside the
+    data. Omit it (the default) to keep writing a plain headerless CSV to
+    acq_cfg.output_file, unchanged from before.
     """
     records: List[dict] = []
 
@@ -243,8 +251,11 @@ def run_measurement(
             on_point(record)
 
         # ── 6. Write incrementally (never lose data on a crash) ────────────
-        Path(acq_cfg.output_file).parent.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame(records).to_csv(acq_cfg.output_file, index=False)
+        if write_csv is not None:
+            write_csv(records)
+        else:
+            Path(acq_cfg.output_file).parent.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame(records).to_csv(acq_cfg.output_file, index=False)
 
         if stop_event is not None and stop_event.is_set():
             log.info("User aborted measurement mid-point.")

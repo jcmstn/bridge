@@ -58,6 +58,7 @@ import logging
 import numpy as np
 import pandas as pd
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict, Tuple
 
@@ -79,6 +80,23 @@ from instruments.mercury_itc import (
     read_temperature,
     shutdown_temperature_controller,
 )
+from instruments.data_naming import (
+    RunContext,
+    allocate_run,
+    ensure_sample,
+    finalize_index_row,
+    proc_path,
+    write_record,
+)
+
+# Data lives outside "bridge" (a sibling of it), same convention as every
+# other script in this repo, so nothing generated at runtime ends up in the
+# git-tracked source tree.
+_DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
+
+# Locked type code for this measurement (see instruments/data_naming.py) —
+# never deviates.
+MEASUREMENT_TYPE = "NOISE"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Logging
@@ -459,11 +477,36 @@ def _slug(s: str) -> str:
     return "".join(c if c.isalnum() else "_" for c in s).strip("_").lower()
 
 
-def save_results_csv(results: Dict[Tuple[str, str], dict], out_dir: Path) -> None:
+def save_results(
+    results: Dict[Tuple[str, str], dict], *,
+    sample: str, device: str, temperature_setpoint_K: Optional[float],
+    cooldown: str, series: str, status: str = "completed",
+) -> List[RunContext]:
+    """
+    Write one raw file per (condition, channel) pair via allocate_run() +
+    write_record() — single-shot, matching this script's existing
+    no-incremental-write behavior (a noise recording is one long acquisition
+    per pair, not a point-by-point sweep, so there's nothing to write until
+    the whole spectrum for that pair is ready). All pairs share one
+    `series` tag so they're recognizable as one session in index.csv.
+
+    `status` should be "completed" only if the whole session ran to
+    completion; pass "error" (or similar) when saving a partial result set
+    collected before an exception — see main()'s try/except, which calls
+    this unconditionally so a failed session never loses already-recorded
+    spectra.
+
+    Returns the allocated RunContexts in the order written, so the caller
+    can build the combined plot's run-range label from the first/last one.
+    """
+    contexts: List[RunContext] = []
     for (cond, label), spec in results.items():
-        fname = out_dir / f"psd_{_slug(cond)}__{_slug(label)}.csv"
+        ctx = allocate_run(
+            _DATA_DIR, sample, device, MEASUREMENT_TYPE,
+            temperature_setpoint_K=temperature_setpoint_K, series=series,
+        )
         n = len(spec["freq_Hz"])
-        pd.DataFrame({
+        records = pd.DataFrame({
             "frequency_Hz":        spec["freq_Hz"],
             "asd_x_V_per_rtHz":    spec["asd_x_V_rthz"],
             "asd_y_V_per_rtHz":    spec["asd_y_V_rthz"],
@@ -475,12 +518,39 @@ def save_results_csv(results: Dict[Tuple[str, str], dict], out_dir: Path) -> Non
             "temperature_2_K":    [spec.get("temperature_2_K")] * n,
             "overload_detected":  [spec.get("overload_detected")] * n,
             "mds_synced":         [spec.get("mds_synced")] * n,
-        }).to_csv(fname, index=False)
-        log.info("Saved spectrum data: %s", fname)
+        }).to_dict("records")
+
+        measured = [r["temperature_1_K"] for r in records if r.get("temperature_1_K") is not None]
+        T_K = (sum(measured) / len(measured)) if measured else ""
+        header_fields = {
+            "run": ctx.run_number,
+            "timestamp": ctx.timestamp.isoformat(timespec="seconds"),
+            "sample": ctx.sample,
+            "device": ctx.device,
+            "type": MEASUREMENT_TYPE,
+            "T_setpoint_K": temperature_setpoint_K,
+            "T_K": T_K,
+            "cooldown": cooldown,
+            "status": status,
+            "comment": "",
+            "series": series,
+            "condition": cond,
+            "channel_label": label,
+            "white_floor_V_rthz": spec["white_floor_V_rthz"],
+            "corner_freq_Hz": spec["corner_freq_Hz"],
+            "rms_V": spec["rms_V"],
+            "overload_detected": spec["overload_detected"],
+            "mds_synced": spec["mds_synced"],
+        }
+        write_record(ctx.raw_path, records, header_fields)
+        finalize_index_row(_DATA_DIR, ctx.sample, ctx.run_number, header_fields)
+        contexts.append(ctx)
+        log.info("Saved spectrum data: %s", ctx.raw_path)
+    return contexts
 
 
 def plot_results(results: Dict[Tuple[str, str], dict], demod_cfgs: List[NoiseDemodConfig],
-                  ref_cfg: ReferenceConfig, out_dir: Path) -> Path:
+                  ref_cfg: ReferenceConfig, out_path: Path) -> Path:
     """One log-log subplot per demodulator channel, one colored trace per condition."""
     plt.rcParams.update({
         "figure.facecolor": "#fcfcfb",
@@ -546,7 +616,7 @@ def plot_results(results: Dict[Tuple[str, str], dict], demod_cfgs: List[NoiseDem
     fig.suptitle("Dual-MFLI Voltage Noise Spectral Density", fontsize=13)
     fig.tight_layout(rect=(0, 0, 1, 0.95))
 
-    out_path = out_dir / "noise_spectrum.png"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=150)
     log.info("Saved plot: %s", out_path)
     return out_path
@@ -561,6 +631,17 @@ def main() -> None:
     LEADER   = "dev7885"    # Current source + 1f measurement
     FOLLOWER = "dev7886"    # 2f measurement
     USE_MDS  = True         # Keep True to reproduce the real experiment's clocking condition
+
+    # ── Sample / run identity (see instruments/data_naming.py) ───────────────
+    # No TUI/web front end for this script — set these by hand, same place
+    # every other hardware parameter for this script already lives.
+    SAMPLE = "_test"                  # ← real sample name, or "_test" for a smoke test
+    DEVICE = "noise_check"            # ← e.g. HB3, SV2
+    COOLDOWN = ""                     # ← optional
+    TEMPERATURE_SETPOINT_K: Optional[float] = 293.0
+    # create=True only stubs sample.yaml/notes.md/raw//proc//index.csv the
+    # first time SAMPLE is used — never overwrites an existing sample.
+    ensure_sample(_DATA_DIR, SAMPLE, create=True)
 
     # ── Connect ─────────────────────────────────────────────────────────────
     daq = connect("localhost", 8004)
@@ -640,12 +721,10 @@ def main() -> None:
         Condition("Excitation OFF", excitation_on=False),
     ]
 
-    out_dir = Path(acq_cfg.output_dir)
-    out_dir.mkdir(exist_ok=True)
-
     results: Dict[Tuple[str, str], dict] = {}
     total_steps = len(conditions) * len(demod_cfgs)
     step = 0
+    error: Optional[BaseException] = None
 
     try:
         for cond in conditions:
@@ -672,6 +751,9 @@ def main() -> None:
                 log.info("   → white floor %.3e V/√Hz | 1/f corner %s | RMS(%.2f–%.0f Hz) %.3e V",
                           spec["white_floor_V_rthz"], corner_str, spec["freq_Hz"][1],
                           spec["nyquist_Hz"], spec["rms_V"])
+    except BaseException as exc:  # noqa: BLE001 — re-raised below, after saving what we have
+        log.exception("Noise spectrum measurement failed — saving whatever was collected before re-raising")
+        error = exc
     finally:
         # Leave the excitation in its normal ON state regardless of how the loop ended.
         set_output_enabled(daq, out_cfg, True)
@@ -679,11 +761,25 @@ def main() -> None:
 
     if not results:
         log.warning("No results collected — nothing to save or plot.")
+        if error is not None:
+            raise error
         return
 
-    save_results_csv(results, out_dir)
+    # Save unconditionally — even a partial result set from a failed/aborted
+    # session is worth keeping, and this must not be skipped by the
+    # exception path above (see the try/except this sits after).
+    series = f"{SAMPLE}_{DEVICE}_{MEASUREMENT_TYPE}_{datetime.now():%Y%m%dT%H%M%S}"
+    run_contexts = save_results(
+        results, sample=SAMPLE, device=DEVICE,
+        temperature_setpoint_K=TEMPERATURE_SETPOINT_K, cooldown=COOLDOWN, series=series,
+        status="completed" if error is None else "error",
+    )
     report_mains_peaks(results, ref_cfg)
-    plot_results(results, demod_cfgs, ref_cfg, out_dir)
+
+    first, last = run_contexts[0], run_contexts[-1]
+    run_label = first.run_str if first is last else f"{first.run_str}-{last.run_str}"
+    png_path = proc_path(_DATA_DIR, SAMPLE, run_label, DEVICE, MEASUREMENT_TYPE, "combined", combined=True)
+    plot_results(results, demod_cfgs, ref_cfg, png_path)
 
     # ── Console summary ────────────────────────────────────────────────────
     log.info("═" * 78)
@@ -697,7 +793,13 @@ def main() -> None:
             i_noise = spec["white_floor_V_rthz"] / ref_cfg.thermal_R_ohm
             log.info("      input-referred current noise (via R=%.2e Ω): %.3e A/√Hz",
                       ref_cfg.thermal_R_ohm, i_noise)
-    log.info("Results saved in '%s' (CSV per condition/channel + noise_spectrum.png).", out_dir)
+    log.info("Results saved under '%s' (raw CSV per condition/channel in raw/, combined plot in proc/).",
+              _DATA_DIR / SAMPLE)
+
+    if error is not None:
+        # Already saved what we collected above — re-raise now so the
+        # caller/console still sees this run did not complete cleanly.
+        raise error
 
     plt.show()
 

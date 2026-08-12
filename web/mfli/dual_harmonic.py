@@ -19,14 +19,11 @@ from __future__ import annotations
 import json
 import logging
 import time
-from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-import numpy as np
 from plotly.subplots import make_subplots
-from nicegui import ui
+from nicegui import background_tasks, ui
 
 from mfli.mfli_dual_harmonic import (
     AcquisitionConfig, DemodConfig, FilterConfig, GaussmeterConfig, MagnetConfig,
@@ -37,16 +34,20 @@ from mfli.mfli_dual_harmonic import (
     shutdown_gaussmeter, shutdown_magnet, shutdown_output, shutdown_temperature_controller,
     sync_follower_oscillator,
 )
-from instruments.output_paths import build_output_path
 from mfli.mfli_dual_harmonic_tui import (
     DEFAULTS, NUMERIC_FIELDS, TEXT_FIELDS, OPTIONAL_NUMERIC_FIELDS,
-    build_summary, parse_sensor_uids,
+    MEASUREMENT_TYPE, MeasurementPlan, build_header_fields, build_summary, parse_sensor_uids,
+)
+from instruments.data_naming import (
+    TEST_SAMPLE, allocate_run, finalize_index_row, make_incremental_writer,
+    preview_raw_filename, proc_path, write_record,
 )
 from web.run_controller import (
     RunController, RunCallbacks, FinalStatus, num_field, text_field, bool_switch,
     optional_num_field, render_summary, busy_banner, is_busy,
 )
 from web.directory_picker import directory_field, validate_directory
+from web.sample_picker import NEW_SAMPLE_SENTINEL, sample_select, status_comment_dialog
 
 log = logging.getLogger("web.mfli.dual_harmonic")
 
@@ -63,31 +64,6 @@ MFLI_DUAL_HARMONIC_DESCRIPTION = (
     "sweeps a Kepco electromagnet's field (bidirectionally, for hysteresis) with "
     "the field measured live via a Lake Shore 475 Gaussmeter at every point."
 )
-
-
-@dataclass
-class MeasurementPlan:
-    daq_host: str
-    daq_port: int
-    leader: str
-    follower: str
-    out_cfg: OutputConfig
-    demod1_cfg: DemodConfig
-    demod2_cfg: DemodConfig
-    acq_cfg: AcquisitionConfig
-    magnet_cfg: Optional[MagnetConfig]
-    gauss_cfg: Optional[GaussmeterConfig]
-    currents_A: Optional[np.ndarray]
-    temp_cfg: Optional[TemperatureControllerConfig]
-    phase_cal_enabled: bool
-    phase_cal_current_A: Optional[float]
-    phase_cal_n_averages: int
-    phase_cal_max_iterations: int
-    geometry_cfg: SampleGeometryConfig
-
-    @property
-    def total_points(self) -> int:
-        return len(self.currents_A) if self.currents_A is not None else 1
 
 
 def _load_settings() -> dict:
@@ -122,10 +98,13 @@ def build_plan(state: dict) -> MeasurementPlan:
         device=state["follower_device"], demod_index=0, harmonic=2,
         input_range_V=state["input_range_2f_V"], sample_rate_Hz=state["sample_rate_Hz"], filter=filt,
     )
+    run_ctx = allocate_run(
+        Path(state["data_dir"]), state["sample"], state["device"], MEASUREMENT_TYPE,
+        temperature_setpoint_K=state["temperature_setpoint_K"],
+    )
     acq_cfg = AcquisitionConfig(
         settling_time_s=state["settling_time_s"], n_averages=int(state["n_averages"]),
-        output_file=str(build_output_path(
-            Path(state["data_dir"]), "", state["output_name"], f"{datetime.now():%Y%m%d_%H%M%S}")),
+        output_file=str(run_ctx.raw_path),
     )
 
     magnet_cfg = None
@@ -157,6 +136,21 @@ def build_plan(state: dict) -> MeasurementPlan:
         field_angle_from_oop_deg=state["field_angle_from_oop_deg"],
     )
 
+    # Geometry/dimensions are recorded per-row in the CSV (via
+    # build_run_metadata) and belong in sample.yaml long-term — they are
+    # deliberately NOT duplicated into header_extra/index.csv here.
+    header_extra = {
+        "excitation_frequency_Hz": state["frequency_Hz"],
+        "excitation_amplitude_V": state["amplitude_V"],
+        "series_R_ohm": state["series_R_ohm"],
+        "demod_time_constant_s": state["time_constant_s"],
+        "demod_order": int(state["order"]),
+        "n_averages": int(state["n_averages"]),
+        "settling_time_s": state["settling_time_s"],
+    }
+    if state["enable_sweep"]:
+        header_extra["field_sweep_A"] = [state["i_min_A"], state["i_max_A"], int(state["n_points"])]
+
     return MeasurementPlan(
         daq_host=state["daq_host"], daq_port=int(state["daq_port"]),
         leader=state["leader_device"], follower=state["follower_device"],
@@ -165,12 +159,14 @@ def build_plan(state: dict) -> MeasurementPlan:
         phase_cal_enabled=state["enable_phase_cal"], phase_cal_current_A=state["phase_cal_current_A"],
         phase_cal_n_averages=int(state["phase_cal_n_averages"]),
         phase_cal_max_iterations=int(state["phase_cal_max_iterations"]), geometry_cfg=geometry_cfg,
+        run_ctx=run_ctx, temperature_setpoint_K=state["temperature_setpoint_K"],
+        cooldown=state["cooldown"], header_extra=header_extra,
     )
 
 
-def _save_measurement_png(records: list[dict], csv_path: str) -> list[str]:
+def _save_measurement_png(records: list[dict], png_path: Path) -> None:
     if not records:
-        return [csv_path]
+        return
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -190,10 +186,9 @@ def _save_measurement_png(records: list[dict], csv_path: str) -> list[str]:
         ax.grid(True, alpha=0.3)
     fig.tight_layout()
 
-    png_path = Path(csv_path).with_suffix(".png")
+    png_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(png_path, dpi=150)
     plt.close(fig)
-    return [csv_path, str(png_path)]
 
 
 def page() -> None:
@@ -255,8 +250,21 @@ def page() -> None:
                     "Settling time per point (s)", float(d("settling_time_s")),
                     hint="Rule of thumb: ≥ 5 × time constant.")
                 inputs["n_averages"] = num_field("Samples to average per point", float(d("n_averages")), integer=True)
-                inputs["output_name"] = text_field("Output file name (prefix)", d("output_name"))
-                data_dir_input = directory_field("Save directory", saved.get("data_dir") or str(_DATA_DIR))
+
+            with ui.expansion("Sample & run identity", value=True, icon="science").classes("w-full"):
+                data_dir_input = directory_field(
+                    "Data root directory", saved.get("data_dir") or str(_DATA_DIR))
+                sample_dropdown, refresh_sample_options = sample_select(
+                    lambda: data_dir_input.value, default=saved.get("sample") or TEST_SAMPLE)
+                data_dir_input.on_value_change(lambda: refresh_sample_options())
+                inputs["device"] = text_field("Device (e.g. HB3, SV2)", d("device"))
+                inputs["cooldown"] = text_field("Cooldown (optional)", d("cooldown"))
+                _t_default = d("temperature_setpoint_K")
+                optional_inputs["temperature_setpoint_K"] = optional_num_field(
+                    "Temperature setpoint (K, optional)",
+                    float(_t_default) if _t_default not in ("", None) else None,
+                    hint="Drives only the filename's T###K token — the header's T_K uses the "
+                         "measured temperature when available.")
 
             with ui.expansion("Magnet & field sweep", value=True, icon="explore").classes("w-full"):
                 switches["enable_sweep"] = bool_switch("Sweep magnetic field (Kepco magnet)", d("enable_sweep"))
@@ -364,6 +372,8 @@ def page() -> None:
         for fid, sw in switches.items():
             state[fid] = sw.value
         state["order"] = int(order_select.value)
+        sample_value = sample_dropdown.value
+        state["sample"] = sample_value if sample_value not in (None, NEW_SAMPLE_SENTINEL) else ""
         return state, errors
 
     def collect_raw() -> dict:
@@ -374,6 +384,9 @@ def page() -> None:
             raw[fid] = sw.value
         raw["order"] = order_select.value
         raw["data_dir"] = data_dir_input.value
+        sample_value = sample_dropdown.value
+        if sample_value not in (None, NEW_SAMPLE_SENTINEL):
+            raw["sample"] = sample_value
         return raw
 
     @ui.refreshable
@@ -393,7 +406,7 @@ def page() -> None:
             render_summary(info, warnings, errors)
         start_btn.set_enabled(not errors and not is_busy())
 
-    for inp in list(inputs.values()) + list(optional_inputs.values()) + [data_dir_input]:
+    for inp in list(inputs.values()) + list(optional_inputs.values()) + [data_dir_input, sample_dropdown]:
         inp.on_value_change(refresh_summary.refresh)
     for sw in switches.values():
         sw.on_value_change(refresh_summary.refresh)
@@ -428,13 +441,49 @@ def page() -> None:
     def on_log(text: str, level: int) -> None:
         log_area.push(text)
 
-    def on_finished(final: FinalStatus, result) -> None:
-        label = {"completed": "Measurement complete.", "aborted": "Measurement aborted.",
-                  "error": f"ERROR: {final.error}"}[final.status]
-        status_label.set_text(label)
-        abort_btn.set_visibility(False)
-        start_btn.set_enabled(not is_busy())
-        refresh_summary.refresh()
+    async def _prompt_status_comment(plan: MeasurementPlan, records: list[dict]) -> None:
+        result = await status_comment_dialog()
+        if result is None:
+            return
+        status, comment = result
+        ctx = plan.run_ctx
+        header_fields = build_header_fields(plan, records, status=status, comment=comment)
+        try:
+            # Never truncate an already-written raw file to an empty stub —
+            # only a run that never wrote a point gets a header-only write.
+            if records or not ctx.raw_path.exists():
+                write_record(ctx.raw_path, records, header_fields)
+            finalize_index_row(ctx.sample_dir.parent, ctx.sample, ctx.run_number, header_fields)
+        except Exception:
+            ui.notify("Could not save final status/comment.", type="negative")
+
+    def make_on_finished(plan: MeasurementPlan):
+        def on_finished(final: FinalStatus, result) -> None:
+            label = {"completed": "Measurement complete.", "aborted": "Measurement aborted.",
+                      "error": f"ERROR: {final.error}"}[final.status]
+            status_label.set_text(label)
+            abort_btn.set_visibility(False)
+            start_btn.set_enabled(not is_busy())
+            refresh_summary.refresh()
+            handle = controller["c"].handle if controller["c"] is not None else None
+            records = list(handle.records) if handle is not None else []
+            background_tasks.create(
+                _prompt_status_comment(plan, records), name="status_comment_prompt")
+        return on_finished
+
+    def _finalize(plan: MeasurementPlan, records: list[dict], result, status: str) -> list[str]:
+        """save_artifacts -- runs on the worker thread, right after run_fn
+        returns/raises. Writes the outcome-derived header/index row
+        UNCONDITIONALLY (never gated on the status/comment dialog above) and
+        the final PNG into proc/."""
+        ctx = plan.run_ctx
+        data_root = ctx.sample_dir.parent
+        header_fields = build_header_fields(plan, records, status=status, comment="")
+        write_record(ctx.raw_path, records, header_fields)
+        finalize_index_row(data_root, ctx.sample, ctx.run_number, header_fields)
+        png_path = proc_path(data_root, ctx.sample, ctx.run_str, ctx.device, MEASUREMENT_TYPE, "plot")
+        _save_measurement_png(records, png_path)
+        return [str(ctx.raw_path), str(png_path)]
 
     def make_run_fn(plan: MeasurementPlan):
         def run_fn(stop_event, cb: RunCallbacks):
@@ -496,11 +545,16 @@ def page() -> None:
                     )
 
                 cb.on_status("Running measurement …")
+                write_csv = make_incremental_writer(
+                    plan.run_ctx.raw_path,
+                    lambda records: build_header_fields(plan, records, status="in_progress", comment=""),
+                )
                 return run_measurement(
                     daq, plan.out_cfg, plan.demod1_cfg, plan.demod2_cfg, plan.acq_cfg, points,
                     stop_event=stop_event, on_point=cb.on_point,
                     gaussmeter=gaussmeter, gauss_cfg=plan.gauss_cfg,
                     temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg, geometry_cfg=plan.geometry_cfg,
+                    write_csv=write_csv,
                 )
             finally:
                 if magnet is not None:
@@ -532,9 +586,12 @@ def page() -> None:
 
         rc = RunController(
             suite=SUITE, measurement=PAGE_TITLE, run_fn=make_run_fn(plan),
-            save_artifacts=lambda records, result: _save_measurement_png(records, plan.acq_cfg.output_file),
+            save_artifacts=lambda records, result, status: _finalize(plan, records, result, status),
             parameters=state, data_dir=state["data_dir"], planned_output_paths=[plan.acq_cfg.output_file],
-            on_record=on_record, on_status=on_status, on_log=on_log, on_finished=on_finished,
+            on_record=on_record, on_status=on_status, on_log=on_log,
+            on_finished=make_on_finished(plan),
+            sample=plan.run_ctx.sample, device=plan.run_ctx.device,
+            run_number=plan.run_ctx.run_number,
         )
         if not rc.try_start():
             ui.notify("Another measurement is already running — see the banner above.", type="warning")

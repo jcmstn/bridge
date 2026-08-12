@@ -52,6 +52,7 @@ from textual.widgets import (
     Label,
     ProgressBar,
     RichLog,
+    Select,
     Static,
     Switch,
 )
@@ -80,13 +81,33 @@ from dc.dc_spin_valve import (
     shutdown_source,
     shutdown_temperature_controller,
 )
-from dc.dc_sweep_utils import build_output_path, linear_sweep, parse_value_list
+from dc.dc_sweep_utils import linear_sweep, parse_value_list
+from instruments.data_naming import (
+    TEST_SAMPLE,
+    RunContext,
+    allocate_run,
+    finalize_index_row,
+    make_incremental_writer,
+    preview_raw_filename,
+    proc_path,
+    write_record,
+)
+from instruments.tui_sample_picker import (
+    NEW_SAMPLE_SENTINEL,
+    NewSampleScreen,
+    StatusCommentScreen,
+    sample_options,
+)
 
 log = logging.getLogger("dc_spin_valve_tui")
 
-# Data/settings live outside "bridge" (a sibling of it).
+# Data/settings live outside "bridge" (a sibling of it). _DATA_DIR doubles
+# as the data-convention "data root" -- see dc_hall_measurement_tui.py.
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 SETTINGS_PATH = _DATA_DIR / "dc_spin_valve_tui_settings.json"
+
+# Locked type code (see instruments/data_naming.py) — never deviates.
+MEASUREMENT_TYPE = "BSWP"
 
 DC_SPIN_VALVE_DESCRIPTION = (
     "Sources a fixed DC sense current with a Keithley 6221 and reads the "
@@ -122,8 +143,9 @@ DEFAULTS: dict = {
     "settling_time_s": "1.0",
     "reversal_enabled": True,
     "n_averages": "5",
-    "output_name": "dc_spin_valve",
-    "output_subdir": "",
+    "device": "",
+    "cooldown": "",
+    "temperature_setpoint_K": "300",
     "enable_gate": False,
     "gate_voltage_limit_V": "20.0",
     "gate_compliance_current_A": "0.000001",
@@ -165,9 +187,10 @@ NUMERIC_FIELDS: dict = {
     "gaussmeter_read_delay_s": float,
 }
 TEXT_FIELDS = ["source_visa_resource", "voltmeter_visa_resource", "gate_visa_resource",
-               "output_name", "output_subdir", "magnet_visa_resource",
+               "device", "cooldown", "magnet_visa_resource",
                "gaussmeter_visa_resource", "gate_voltage_values",
                "temperature_visa_resource", "temperature_sensor_uids"]
+OPTIONAL_NUMERIC_FIELDS = ["temperature_setpoint_K"]
 GATE_FIELD_IDS = ["gate_visa_resource", "gate_voltage_limit_V",
                    "gate_compliance_current_A", "gate_voltage_values"]
 TEMPERATURE_FIELD_IDS = ["temperature_visa_resource", "temperature_sensor_uids"]
@@ -220,8 +243,12 @@ class MeasurementPlan:
     gauss_cfg: GaussmeterConfig
     acq_cfg: AcquisitionConfig
     currents_A: np.ndarray
-    output_subdir: str
-    output_prefix: str
+    sample: str
+    device: str
+    temperature_setpoint_K: Optional[float]
+    cooldown: str
+    header_extra: dict
+    series: str
     gate_cfg: Optional[GateConfig] = None
     gate_voltages_V: Optional[List[float]] = None
     temp_cfg: Optional[TemperatureControllerConfig] = None
@@ -236,15 +263,50 @@ class MeasurementPlan:
         return len(self.currents_A) * len(self.series_values)
 
 
+def build_header_fields(plan: "MeasurementPlan", ctx: RunContext, records: list[dict], *,
+                         status: str, comment: str, extra: Optional[dict] = None) -> dict:
+    """
+    Universal + measurement-specific header/index fields for ONE run within
+    this (possibly multi-file, one-per-gate-voltage) session -- `ctx` is
+    that particular iteration's RunContext, not a single plan-wide one (see
+    instruments/data_naming.py's allocate_run() -- called fresh per
+    iteration for this suite). `extra` carries this iteration's own values
+    (gate_voltage_V) on top of the plan-wide header_extra.
+
+    T_setpoint_K is the nominal value used to build the filename's T###K
+    token; T_K is the MEASURED mean (temperature_1_K), left blank rather
+    than backfilled with the setpoint when nothing was actually measured.
+    """
+    measured = [r["temperature_1_K"] for r in records if r.get("temperature_1_K") is not None]
+    T_K = (sum(measured) / len(measured)) if measured else ""
+    fields = {
+        "run": ctx.run_number,
+        "timestamp": ctx.timestamp.isoformat(timespec="seconds"),
+        "sample": ctx.sample,
+        "device": ctx.device,
+        "type": MEASUREMENT_TYPE,
+        "T_setpoint_K": plan.temperature_setpoint_K,
+        "T_K": T_K,
+        "cooldown": plan.cooldown,
+        "status": status,
+        "comment": comment,
+        "series": plan.series,
+    }
+    fields.update(plan.header_extra)
+    if extra:
+        fields.update(extra)
+    return fields
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Small widget-building helpers (keep compose() readable)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def field(field_id: str, label_text: str, default: str, *, kind: str = "number",
-          hint: str = "", validators=None) -> Vertical:
+          hint: str = "", validators=None, valid_empty: bool = False) -> Vertical:
     children = [Label(label_text, classes="field-label"),
                 Input(value=default, id=field_id, type=kind, validators=validators,
-                      valid_empty=False)]
+                      valid_empty=valid_empty)]
     if hint:
         children.append(Label(hint, classes="hint"))
     return Vertical(*children, classes="field")
@@ -266,6 +328,20 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     info: list[str] = []
     warnings: list[str] = []
     errors: list[str] = []
+
+    # ── Sample / run identity ───────────────────────────────────────────────
+    if not state.get("sample") or state["sample"] == NEW_SAMPLE_SENTINEL:
+        errors.append("Choose a sample (or create a new one).")
+    if not state.get("device"):
+        errors.append("Device is required (e.g. HB3, SV2).")
+    if not errors:
+        preview = preview_raw_filename(
+            state["sample"], state["device"], MEASUREMENT_TYPE,
+            temperature_setpoint_K=state.get("temperature_setpoint_K"),
+        )
+        info.append(f"Will save as: {preview}_<timestamp>.csv"
+                     + (" (one file per gate voltage)" if state.get("enable_gate") and
+                        len(state.get("gate_voltage_list", [])) > 1 else ""))
 
     resources = [state["source_visa_resource"], state["voltmeter_visa_resource"]]
     if state["enable_gate"]:
@@ -497,7 +573,9 @@ class RunScreen(Screen):
         self._records: list[dict] = []
         self._plot_queue: Optional["mp.Queue"] = None
         self._plot_process: Optional[mp.Process] = None
-        self._session_timestamp = f"{datetime.now():%Y%m%d_%H%M%S}"
+        # One RunContext per iteration of the gate-voltage series -- each
+        # gets its own run number/file (see allocate_run() in do_run below).
+        self._run_contexts: list[RunContext] = []
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -577,11 +655,40 @@ class RunScreen(Screen):
         self.query_one("#back_btn", Button).disabled = False
         self.query_one("#abort_btn", Button).disabled = True
         try:
-            out_dir = _DATA_DIR / self.plan.output_subdir if self.plan.output_subdir else _DATA_DIR
-            png_path = out_dir / f"{self.plan.output_prefix}_{self._session_timestamp}_combined.png"
-            _save_measurement_png(self._records, png_path)
+            if self._run_contexts:
+                first, last = self._run_contexts[0], self._run_contexts[-1]
+                run_label = first.run_str if first is last else f"{first.run_str}-{last.run_str}"
+                png_path = proc_path(_DATA_DIR, self.plan.sample, run_label, self.plan.device,
+                                      MEASUREMENT_TYPE, "combined", combined=True)
+                _save_measurement_png(self._records, png_path)
         except Exception:
             log.exception("Could not save measurement plot PNG")
+
+        # One status/comment prompt for the whole session -- applied to
+        # every file in the gate-voltage series (asking once per file would
+        # be needless friction; they're one physical measurement session).
+        self.app.push_screen(StatusCommentScreen(), self._on_status_comment)
+
+    def _on_status_comment(self, result: Optional[tuple[str, str]]) -> None:
+        if result is None:
+            return
+        status, comment = result
+        for series_idx, ctx in enumerate(self._run_contexts):
+            iter_records = [r for r in self._records if r.get("series_index", 0) == series_idx]
+            header_fields = build_header_fields(
+                self.plan, ctx, iter_records, status=status, comment=comment,
+                extra={"gate_voltage_V": iter_records[0].get("gate_voltage_V")} if iter_records else None,
+            )
+            try:
+                # Never truncate an already-written raw file to an empty stub —
+                # a run with data must always keep it; only a run that never
+                # wrote a point (ctx.raw_path doesn't exist yet) gets a fresh
+                # header-only write here.
+                if iter_records or not ctx.raw_path.exists():
+                    write_record(ctx.raw_path, iter_records, header_fields)
+                finalize_index_row(_DATA_DIR, ctx.sample, ctx.run_number, header_fields)
+            except Exception:
+                log.exception("Could not save final status/comment for run %d", ctx.run_number)
 
     def action_abort(self) -> None:
         if self._measurement_running and not self._stop_event.is_set():
@@ -639,17 +746,31 @@ class RunScreen(Screen):
                     break
 
                 label = None
-                suffix = ""
+                key_axis = None
                 if gate_V is not None:
                     label = f"Vg={gate_V:g}V"
-                    suffix = f"_Vg{gate_V:g}V"
+                    key_axis = ("gate_V", gate_V)
                     self._set_status_threadsafe(f"Setting gate to {gate_V:g} V …")
                     set_gate_voltage(gate, plan.gate_cfg, gate_V)
 
-                plan.acq_cfg.output_file = str(build_output_path(
-                    _DATA_DIR, plan.output_subdir, plan.output_prefix,
-                    self._session_timestamp, suffix,
-                ))
+                # A fresh RunContext (own run number, own file) EVERY
+                # iteration -- never reuse one across the gate-voltage
+                # series, or every file silently inherits the first
+                # iteration's run number.
+                ctx = allocate_run(
+                    _DATA_DIR, plan.sample, plan.device, MEASUREMENT_TYPE,
+                    temperature_setpoint_K=plan.temperature_setpoint_K,
+                    key_axis=key_axis, series=plan.series,
+                )
+                self._run_contexts.append(ctx)
+                plan.acq_cfg.output_file = str(ctx.raw_path)
+                write_csv = make_incremental_writer(
+                    ctx.raw_path,
+                    lambda records, _ctx=ctx, _gate_V=gate_V: build_header_fields(
+                        plan, _ctx, records, status="in_progress", comment="",
+                        extra={"gate_voltage_V": _gate_V} if _gate_V is not None else None,
+                    ),
+                )
 
                 points = [
                     FieldPoint(
@@ -662,14 +783,36 @@ class RunScreen(Screen):
                 status = "Running field sweep …" if gate_V is None \
                     else f"Running field sweep (Vg={gate_V:g} V) …"
                 self._set_status_threadsafe(status)
-                run_measurement(
-                    source, voltmeter, plan.src_cfg, plan.acq_cfg, points,
-                    stop_event=self._stop_event,
-                    on_point=self._make_on_point(series_idx, label),
-                    gaussmeter=gaussmeter, gauss_cfg=plan.gauss_cfg,
-                    gate_voltage_V=gate_V,
-                    temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg,
+                iter_error: Optional[BaseException] = None
+                try:
+                    run_measurement(
+                        source, voltmeter, plan.src_cfg, plan.acq_cfg, points,
+                        stop_event=self._stop_event,
+                        on_point=self._make_on_point(series_idx, label),
+                        gaussmeter=gaussmeter, gauss_cfg=plan.gauss_cfg,
+                        gate_voltage_V=gate_V,
+                        temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg,
+                        write_csv=write_csv,
+                    )
+                except Exception as exc:
+                    iter_error = exc
+
+                # Finalize THIS iteration's header/index row UNCONDITIONALLY,
+                # right now -- never gated on the end-of-session status/
+                # comment prompt, so an aborted/crashed session never leaves
+                # a file stuck at "in_progress".
+                iter_status = "error" if iter_error is not None \
+                    else ("aborted" if self._stop_event.is_set() else "completed")
+                iter_records = [r for r in self._records if r.get("series_index", 0) == series_idx]
+                header_fields = build_header_fields(
+                    plan, ctx, iter_records, status=iter_status, comment="",
+                    extra={"gate_voltage_V": gate_V} if gate_V is not None else None,
                 )
+                write_record(ctx.raw_path, iter_records, header_fields)
+                finalize_index_row(_DATA_DIR, ctx.sample, ctx.run_number, header_fields)
+
+                if iter_error is not None:
+                    raise iter_error
 
             final = "Measurement aborted." if self._stop_event.is_set() else "Measurement complete."
         except Exception as exc:
@@ -790,11 +933,19 @@ class DCSpinValveApp(App):
                                      "so can genuine even-in-I physics]. Reversal off: plain "
                                      "voltage samples at the fixed sense current.",
                                 validators=[Number(minimum=1, failure_description="must be ≥ 1")])
-                    yield field("output_name", "Output file name (prefix)",
-                                DEFAULTS["output_name"], kind="text")
-                    yield field("output_subdir", "Data sub-directory (optional)",
-                                DEFAULTS["output_subdir"], kind="text",
-                                hint="Saved to data/<sub-directory>/<prefix>_<timestamp>.csv")
+                with Collapsible(title="Sample & run identity", collapsed=False):
+                    yield Vertical(
+                        Label("Sample", classes="field-label"),
+                        Select(sample_options(_DATA_DIR), id="sample_select",
+                               allow_blank=False, value=TEST_SAMPLE),
+                        classes="field",
+                    )
+                    yield field("device", "Device (e.g. HB3, SV2)", DEFAULTS["device"], kind="text")
+                    yield field("cooldown", "Cooldown (optional)", DEFAULTS["cooldown"], kind="text")
+                    yield field("temperature_setpoint_K", "Temperature setpoint (K, optional)",
+                                DEFAULTS["temperature_setpoint_K"], kind="number", valid_empty=True,
+                                hint="Drives only the filename's T###K token — the header's T_K "
+                                     "uses the measured temperature when available.")
 
                 with Collapsible(title="Gate voltage (Keithley 2400, optional)", collapsed=False):
                     yield switch_field("enable_gate", "Enable gate (Keithley 2400)",
@@ -870,10 +1021,30 @@ class DCSpinValveApp(App):
         self._set_temperature_fields_enabled(self.query_one("#enable_temperature", Switch).value)
         self.refresh_summary()
 
+    # ── Sample picker ────────────────────────────────────────────────────────
+
+    def _refresh_sample_options(self, *, select_value: Optional[str] = None) -> None:
+        select = self.query_one("#sample_select", Select)
+        select.set_options(sample_options(_DATA_DIR))
+        if select_value is not None:
+            select.value = select_value
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id != "sample_select":
+            return
+        if event.value == NEW_SAMPLE_SENTINEL:
+            self.push_screen(NewSampleScreen(_DATA_DIR), self._on_new_sample_created)
+            return
+        self.refresh_summary()
+
+    def _on_new_sample_created(self, result: Optional[str]) -> None:
+        self._refresh_sample_options(select_value=result if result else TEST_SAMPLE)
+        self.refresh_summary()
+
     # ── Form state I/O ───────────────────────────────────────────────────────
 
     def _all_field_ids(self) -> list[str]:
-        return list(NUMERIC_FIELDS) + TEXT_FIELDS
+        return list(NUMERIC_FIELDS) + TEXT_FIELDS + OPTIONAL_NUMERIC_FIELDS
 
     def collect_raw(self) -> dict:
         raw: dict = {fid: self.query_one(f"#{fid}", Input).value for fid in self._all_field_ids()}
@@ -882,6 +1053,9 @@ class DCSpinValveApp(App):
         raw["reversal_enabled"] = self.query_one("#reversal_enabled", Switch).value
         raw["enable_gate"] = self.query_one("#enable_gate", Switch).value
         raw["enable_temperature"] = self.query_one("#enable_temperature", Switch).value
+        sample_value = self.query_one("#sample_select", Select).value
+        if sample_value not in (None, Select.BLANK, NEW_SAMPLE_SENTINEL):
+            raw["sample"] = sample_value
         return raw
 
     def _load_settings(self) -> None:
@@ -905,6 +1079,9 @@ class DCSpinValveApp(App):
             self.query_one("#enable_gate", Switch).value = bool(saved["enable_gate"])
         if "enable_temperature" in saved:
             self.query_one("#enable_temperature", Switch).value = bool(saved["enable_temperature"])
+        saved_sample = saved.get("sample")
+        if saved_sample and saved_sample in [v for _, v in sample_options(_DATA_DIR)]:
+            self.query_one("#sample_select", Select).value = saved_sample
 
     def _save_settings(self, raw: dict) -> None:
         try:
@@ -925,11 +1102,23 @@ class DCSpinValveApp(App):
                 state[fid] = 0
         for fid in TEXT_FIELDS:
             state[fid] = self.query_one(f"#{fid}", Input).value.strip()
+        for fid in OPTIONAL_NUMERIC_FIELDS:
+            raw = self.query_one(f"#{fid}", Input).value.strip()
+            if raw:
+                try:
+                    state[fid] = float(raw)
+                except ValueError:
+                    errors.append(f"'{fid}' is not a valid number: {raw!r}")
+                    state[fid] = None
+            else:
+                state[fid] = None
         state["auto_range"] = self.query_one("#auto_range", Switch).value
         state["bidirectional_sweep"] = self.query_one("#bidirectional_sweep", Switch).value
         state["reversal_enabled"] = self.query_one("#reversal_enabled", Switch).value
         state["enable_gate"] = self.query_one("#enable_gate", Switch).value
         state["enable_temperature"] = self.query_one("#enable_temperature", Switch).value
+        sample_value = self.query_one("#sample_select", Select).value
+        state["sample"] = sample_value if sample_value not in (None, Select.BLANK) else ""
 
         state["gate_voltage_list"] = []
         state["gate_parse_error"] = None
@@ -1056,11 +1245,28 @@ class DCSpinValveApp(App):
                     sensor_uids=uids,
                 )
 
+        header_extra = {
+            "sense_current_A": state["sense_current_A"],
+            "compliance_V": state["compliance_V"],
+            "reversal_enabled": state["reversal_enabled"],
+            "n_averages": state["n_averages"],
+            "settling_time_s": state["settling_time_s"],
+            "field_sweep_A": [state["i_min_A"], state["i_max_A"], state["step_A"]],
+        }
+        # A "series" tag only means something for an actual family of runs
+        # (>1 gate voltage) -- a single/gate-less run gets no series tag.
+        series = ""
+        if len(gate_voltages_V or []) > 1:
+            series = (f"{state['sample']}_{state['device']}_{MEASUREMENT_TYPE}_"
+                      f"{datetime.now():%Y%m%dT%H%M%S}")
+
         return MeasurementPlan(
             src_cfg=src_cfg, volt_cfg=volt_cfg,
             magnet_cfg=magnet_cfg, gauss_cfg=gauss_cfg, acq_cfg=acq_cfg,
             currents_A=currents_A,
-            output_subdir=state["output_subdir"], output_prefix=state["output_name"],
+            sample=state["sample"], device=state["device"],
+            temperature_setpoint_K=state["temperature_setpoint_K"],
+            cooldown=state["cooldown"], header_extra=header_extra, series=series,
             gate_cfg=gate_cfg, gate_voltages_V=gate_voltages_V,
             temp_cfg=temp_cfg,
         )

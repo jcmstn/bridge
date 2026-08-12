@@ -19,13 +19,11 @@ dedicated Report panel in addition to the log.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 from plotly.subplots import make_subplots
-from nicegui import ui
+from nicegui import background_tasks, ui
 
 from mfli.mfli_dual_harmonic import (
     DemodConfig, FilterConfig, GaussmeterConfig, MagnetConfig, OutputConfig,
@@ -38,15 +36,20 @@ from mfli.mfli_phase_calibration import (
     AmplitudeCheckConfig, FrequencyCheckConfig, PhaseCalibrationReport, SweepConfig,
     format_report, run_phase_calibration,
 )
-from instruments.output_paths import build_output_path
 from mfli.mfli_phase_calibration_tui import (
-    DEFAULTS, NUMERIC_FIELDS, TEXT_FIELDS, LIST_FIELDS, build_summary, parse_sensor_uids,
+    DEFAULTS, NUMERIC_FIELDS, TEXT_FIELDS, LIST_FIELDS, OPTIONAL_NUMERIC_FIELDS,
+    MEASUREMENT_TYPE, CalibrationPlan, build_header_fields, build_summary, parse_sensor_uids,
+)
+from instruments.data_naming import (
+    TEST_SAMPLE, allocate_run, finalize_index_row, make_incremental_writer,
+    preview_raw_filename, proc_path, write_record,
 )
 from web.run_controller import (
     RunController, RunCallbacks, FinalStatus, num_field, text_field, bool_switch,
-    render_summary, busy_banner, is_busy,
+    optional_num_field, render_summary, busy_banner, is_busy,
 )
 from web.directory_picker import directory_field, validate_directory
+from web.sample_picker import NEW_SAMPLE_SENTINEL, sample_select, status_comment_dialog
 
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data"
 _SETTINGS_PATH = _DATA_DIR / "web_settings" / "mfli_phase_calibration_web_settings.json"
@@ -63,33 +66,6 @@ MFLI_PHASE_CALIBRATION_DESCRIPTION = (
     "resistive/SOT signal from Joule-heating/anomalous-Nernst contamination. Run "
     "this before Dual-Harmonic Measurement, using the same wiring."
 )
-
-
-@dataclass
-class CalibrationPlan:
-    daq_host: str
-    daq_port: int
-    leader: str
-    follower: str
-    out_cfg: OutputConfig
-    demod1_cfg: DemodConfig
-    demod2_cfg: DemodConfig
-    magnet_cfg: MagnetConfig
-    gauss_cfg: GaussmeterConfig
-    sweep_cfg: SweepConfig
-    calibration_current_A: float
-    null_n_averages: int
-    null_max_iterations: int
-    null_tol_deg: float
-    hold_tol_ratio: float
-    amplitude_check_cfg: Optional[AmplitudeCheckConfig]
-    frequency_check_cfg: Optional[FrequencyCheckConfig]
-    output_csv: str
-    temp_cfg: Optional[TemperatureControllerConfig] = None
-
-    @property
-    def total_points(self) -> int:
-        return max(0, 2 * self.sweep_cfg.n_points - 1)
 
 
 def _load_settings() -> dict:
@@ -146,8 +122,11 @@ def build_plan(state: dict) -> CalibrationPlan:
         n_averages=int(state["freq_n_averages"]), max_iterations=int(state["freq_max_iterations"]),
         tol_deg=state["freq_tol_deg"],
     )
-    output_csv = str(build_output_path(
-        Path(state["data_dir"]), "", state["output_name"], f"{datetime.now():%Y%m%d_%H%M%S}"))
+    run_ctx = allocate_run(
+        Path(state["data_dir"]), state["sample"], state["device"], MEASUREMENT_TYPE,
+        temperature_setpoint_K=state["temperature_setpoint_K"],
+    )
+    output_csv = str(run_ctx.raw_path)
 
     temp_cfg = None
     if state["enable_temperature"]:
@@ -155,6 +134,16 @@ def build_plan(state: dict) -> CalibrationPlan:
         if uids:
             temp_cfg = TemperatureControllerConfig(
                 visa_resource=state["temperature_visa_resource"], sensor_uids=uids)
+
+    header_extra = {
+        "excitation_frequency_Hz": state["frequency_Hz"],
+        "excitation_amplitude_V": state["amplitude_V"],
+        "series_R_ohm": state["series_R_ohm"],
+        "calibration_current_A": state["calibration_current_A"],
+        "field_sweep_A": [state["i_min_A"], state["i_max_A"], int(state["n_points"])],
+        "demod_time_constant_s": state["time_constant_s"],
+        "demod_order": int(state["order"]),
+    }
 
     return CalibrationPlan(
         daq_host=state["daq_host"], daq_port=int(state["daq_port"]),
@@ -165,13 +154,14 @@ def build_plan(state: dict) -> CalibrationPlan:
         null_n_averages=int(state["null_n_averages"]), null_max_iterations=int(state["null_max_iterations"]),
         null_tol_deg=state["null_tol_deg"], hold_tol_ratio=state["hold_tol_ratio"],
         amplitude_check_cfg=amplitude_check_cfg, frequency_check_cfg=frequency_check_cfg,
-        output_csv=output_csv, temp_cfg=temp_cfg,
+        output_csv=output_csv, run_ctx=run_ctx, temperature_setpoint_K=state["temperature_setpoint_K"],
+        cooldown=state["cooldown"], header_extra=header_extra, temp_cfg=temp_cfg,
     )
 
 
-def _save_diagnostic_png(records: list[dict], csv_path: str) -> list[str]:
+def _save_diagnostic_png(records: list[dict], png_path: Path) -> None:
     if not records:
-        return [csv_path]
+        return
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -196,10 +186,9 @@ def _save_diagnostic_png(records: list[dict], csv_path: str) -> list[str]:
         ax.grid(True, alpha=0.3)
     fig.tight_layout()
 
-    png_path = Path(csv_path).with_suffix(".png")
+    png_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(png_path, dpi=150)
     plt.close(fig)
-    return [csv_path, str(png_path)]
 
 
 def _parse_float_list(raw: str) -> tuple[list[float], list[str]]:
@@ -235,6 +224,7 @@ def page() -> None:
 
     inputs: dict = {}
     switches: dict = {}
+    optional_inputs: dict = {}
     controller: dict[str, Optional[RunController]] = {"c": None}
 
     with ui.row().classes("w-full gap-4 items-start no-wrap"):
@@ -332,9 +322,20 @@ def page() -> None:
                 inputs["temperature_visa_resource"] = text_field("MercuryiTC VISA resource", d("temperature_visa_resource"))
                 inputs["temperature_sensor_uids"] = text_field("Sensor board UID(s)", d("temperature_sensor_uids"))
 
-            with ui.expansion("Output", value=True, icon="save").classes("w-full"):
-                inputs["output_name"] = text_field("Output file name (prefix)", d("output_name"))
-                data_dir_input = directory_field("Save directory", saved.get("data_dir") or str(_DATA_DIR))
+            with ui.expansion("Sample & run identity", value=True, icon="science").classes("w-full"):
+                data_dir_input = directory_field(
+                    "Data root directory", saved.get("data_dir") or str(_DATA_DIR))
+                sample_dropdown, refresh_sample_options = sample_select(
+                    lambda: data_dir_input.value, default=saved.get("sample") or TEST_SAMPLE)
+                data_dir_input.on_value_change(lambda: refresh_sample_options())
+                inputs["device"] = text_field("Device (e.g. HB3, SV2)", d("device"))
+                inputs["cooldown"] = text_field("Cooldown (optional)", d("cooldown"))
+                _t_default = d("temperature_setpoint_K")
+                optional_inputs["temperature_setpoint_K"] = optional_num_field(
+                    "Temperature setpoint (K, optional)",
+                    float(_t_default) if _t_default not in ("", None) else None,
+                    hint="Drives only the filename's T###K token — the header's T_K uses the "
+                         "measured temperature when available.")
 
         with ui.column().classes("w-96 gap-2"):
             ui.label("Summary").classes("text-lg font-bold")
@@ -388,17 +389,27 @@ def page() -> None:
             values, list_errors = _parse_float_list(inputs[fid].value or "")
             state[fid] = values
             errors += [f"'{fid}': {e}" for e in list_errors]
+        for fid in OPTIONAL_NUMERIC_FIELDS:
+            v = optional_inputs[fid].value
+            state[fid] = float(v) if v is not None else None
         for fid, sw in switches.items():
             state[fid] = sw.value
         state["order"] = int(order_select.value)
+        sample_value = sample_dropdown.value
+        state["sample"] = sample_value if sample_value not in (None, NEW_SAMPLE_SENTINEL) else ""
         return state, errors
 
     def collect_raw() -> dict:
         raw = {fid: inp.value for fid, inp in inputs.items()}
+        for fid, inp in optional_inputs.items():
+            raw[fid] = inp.value if inp.value is not None else ""
         for fid, sw in switches.items():
             raw[fid] = sw.value
         raw["order"] = order_select.value
         raw["data_dir"] = data_dir_input.value
+        sample_value = sample_dropdown.value
+        if sample_value not in (None, NEW_SAMPLE_SENTINEL):
+            raw["sample"] = sample_value
         return raw
 
     @ui.refreshable
@@ -418,7 +429,7 @@ def page() -> None:
             render_summary(info, warnings, errors)
         start_btn.set_enabled(not errors and not is_busy())
 
-    for inp in list(inputs.values()) + [data_dir_input]:
+    for inp in list(inputs.values()) + list(optional_inputs.values()) + [data_dir_input, sample_dropdown]:
         inp.on_value_change(refresh_summary.refresh)
     for sw in switches.values():
         sw.on_value_change(refresh_summary.refresh)
@@ -453,16 +464,52 @@ def page() -> None:
     def on_log(text: str, level: int) -> None:
         log_area.push(text)
 
-    def on_finished(final: FinalStatus, result: Optional[PhaseCalibrationReport]) -> None:
-        label = {"completed": "Calibration complete — see report below.",
-                  "aborted": "Calibration aborted.",
-                  "error": f"ERROR: {final.error}"}[final.status]
-        status_label.set_text(label)
-        abort_btn.set_visibility(False)
-        start_btn.set_enabled(not is_busy())
-        if result is not None:
-            report_area.set_text(format_report(result))
-        refresh_summary.refresh()
+    async def _prompt_status_comment(plan: CalibrationPlan, records: list[dict]) -> None:
+        result = await status_comment_dialog()
+        if result is None:
+            return
+        status, comment = result
+        ctx = plan.run_ctx
+        header_fields = build_header_fields(plan, records, status=status, comment=comment)
+        try:
+            # Never truncate an already-written raw file to an empty stub —
+            # only a run that never wrote a point gets a header-only write.
+            if records or not ctx.raw_path.exists():
+                write_record(ctx.raw_path, records, header_fields)
+            finalize_index_row(ctx.sample_dir.parent, ctx.sample, ctx.run_number, header_fields)
+        except Exception:
+            ui.notify("Could not save final status/comment.", type="negative")
+
+    def make_on_finished(plan: CalibrationPlan):
+        def on_finished(final: FinalStatus, result: Optional[PhaseCalibrationReport]) -> None:
+            label = {"completed": "Calibration complete — see report below.",
+                      "aborted": "Calibration aborted.",
+                      "error": f"ERROR: {final.error}"}[final.status]
+            status_label.set_text(label)
+            abort_btn.set_visibility(False)
+            start_btn.set_enabled(not is_busy())
+            if result is not None:
+                report_area.set_text(format_report(result))
+            refresh_summary.refresh()
+            handle = controller["c"].handle if controller["c"] is not None else None
+            records = list(handle.records) if handle is not None else []
+            background_tasks.create(
+                _prompt_status_comment(plan, records), name="status_comment_prompt")
+        return on_finished
+
+    def _finalize(plan: CalibrationPlan, records: list[dict], result, status: str) -> list[str]:
+        """save_artifacts -- runs on the worker thread, right after run_fn
+        returns/raises. Writes the outcome-derived header/index row
+        UNCONDITIONALLY (never gated on the status/comment dialog above) and
+        the final PNG into proc/."""
+        ctx = plan.run_ctx
+        data_root = ctx.sample_dir.parent
+        header_fields = build_header_fields(plan, records, status=status, comment="")
+        write_record(ctx.raw_path, records, header_fields)
+        finalize_index_row(data_root, ctx.sample, ctx.run_number, header_fields)
+        png_path = proc_path(data_root, ctx.sample, ctx.run_str, ctx.device, MEASUREMENT_TYPE, "plot")
+        _save_diagnostic_png(records, png_path)
+        return [str(ctx.raw_path), str(png_path)]
 
     def make_run_fn(plan: CalibrationPlan):
         def run_fn(stop_event, cb: RunCallbacks):
@@ -491,6 +538,10 @@ def page() -> None:
                     cb.on_status("Connecting to MercuryiTC (temperature) …")
                     temp_ctrl = connect_temperature_controller(plan.temp_cfg)
 
+                writer = make_incremental_writer(
+                    plan.run_ctx.raw_path,
+                    lambda records: build_header_fields(plan, records, status="in_progress", comment=""),
+                )
                 return run_phase_calibration(
                     daq, plan.leader, plan.follower, plan.out_cfg, plan.demod1_cfg, plan.demod2_cfg,
                     plan.sweep_cfg, magnet, plan.magnet_cfg,
@@ -501,6 +552,7 @@ def page() -> None:
                     amplitude_check_cfg=plan.amplitude_check_cfg, frequency_check_cfg=plan.frequency_check_cfg,
                     stop_event=stop_event, on_point=cb.on_point, on_status=cb.on_status,
                     temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg,
+                    write_csv=lambda df: writer(df.to_dict("records")),
                 )
             finally:
                 if magnet is not None:
@@ -532,9 +584,12 @@ def page() -> None:
 
         rc = RunController(
             suite=SUITE, measurement=PAGE_TITLE, run_fn=make_run_fn(plan),
-            save_artifacts=lambda records, result: _save_diagnostic_png(records, plan.output_csv),
+            save_artifacts=lambda records, result, status: _finalize(plan, records, result, status),
             parameters=state, data_dir=state["data_dir"], planned_output_paths=[plan.output_csv],
-            on_record=on_record, on_status=on_status, on_log=on_log, on_finished=on_finished,
+            on_record=on_record, on_status=on_status, on_log=on_log,
+            on_finished=make_on_finished(plan),
+            sample=plan.run_ctx.sample, device=plan.run_ctx.device,
+            run_number=plan.run_ctx.run_number,
         )
         if not rc.try_start():
             ui.notify("Another measurement is already running — see the banner above.", type="warning")

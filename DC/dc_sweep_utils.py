@@ -8,17 +8,11 @@ Created: 2026-08-05
 Small, pure-function utilities used by every DC measurement script so the
 step-size/bidirectional sweep logic and the "single value or
 comma-separated list" parsing are each implemented exactly once.
-
-build_output_path() is re-exported from instruments.output_paths so every
-existing `from dc.dc_sweep_utils import build_output_path, ...` keeps
-working unchanged.
 """
 
 from __future__ import annotations
 
 import numpy as np
-
-from instruments.output_paths import build_output_path  # noqa: F401  (re-exported)
 
 
 def linear_sweep(start: float, stop: float, step: float, bidirectional: bool = True) -> np.ndarray:

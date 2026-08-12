@@ -489,6 +489,7 @@ def run_phase_calibration(
     on_status: Optional[Callable[[str], None]] = None,
     temp_ctrl: Optional[MercuryITC] = None,
     temp_cfg: Optional[TemperatureControllerConfig] = None,
+    write_csv: Optional[Callable[[pd.DataFrame], None]] = None,
 ) -> PhaseCalibrationReport:
     """
     Run the full phase-calibration procedure end to end:
@@ -536,8 +537,11 @@ def run_phase_calibration(
         stop_event=stop_event, on_point=on_point,
         temp_ctrl=temp_ctrl, temp_cfg=temp_cfg,
     )
-    Path(output_csv).parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(output_csv, index=False)
+    if write_csv is not None:
+        write_csv(df)
+    else:
+        Path(output_csv).parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(output_csv, index=False)
 
     hold_check = evaluate_hold_check(df, tol_ratio=hold_tol_ratio)
     if hold_check.drift_flag:

@@ -19,15 +19,14 @@ drain tick) alongside the raw I-V trace.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from nicegui import ui
+from nicegui import background_tasks, ui
 
 from dc.dc_iv_curve import (
     AcquisitionConfig, CurrentPoint, GateConfig, SourceConfig,
@@ -36,43 +35,27 @@ from dc.dc_iv_curve import (
     ramp_current_to_zero, run_measurement, set_gate_voltage, shutdown_gate,
     shutdown_source, shutdown_temperature_controller,
 )
-from dc.dc_sweep_utils import build_output_path, linear_sweep, parse_value_list
+from dc.dc_sweep_utils import linear_sweep, parse_value_list
 from dc.dc_iv_curve_tui import (
-    DEFAULTS, NUMERIC_FIELDS, TEXT_FIELDS, DC_IV_DESCRIPTION,
-    build_summary, parse_sensor_uids,
+    DEFAULTS, NUMERIC_FIELDS, TEXT_FIELDS, OPTIONAL_NUMERIC_FIELDS, MEASUREMENT_TYPE,
+    DC_IV_DESCRIPTION, MeasurementPlan, build_header_fields, build_summary, parse_sensor_uids,
+)
+from instruments.data_naming import (
+    TEST_SAMPLE, RunContext, allocate_run, finalize_index_row,
+    make_incremental_writer, preview_raw_filename, proc_path, write_record,
 )
 from web.run_controller import (
-    RunController, RunCallbacks, FinalStatus, num_field, text_field, bool_switch,
-    render_summary, busy_banner, is_busy,
+    RunController, RunCallbacks, FinalStatus, num_field, optional_num_field, text_field,
+    bool_switch, render_summary, busy_banner, is_busy,
 )
 from web.directory_picker import directory_field, validate_directory
+from web.sample_picker import NEW_SAMPLE_SENTINEL, sample_select, status_comment_dialog
 
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data"
 _SETTINGS_PATH = _DATA_DIR / "web_settings" / "dc_iv_curve_web_settings.json"
 
 PAGE_TITLE = "DC I-V Curve"
 SUITE = "DC"
-
-
-@dataclass
-class MeasurementPlan:
-    src_cfg: SourceConfig
-    volt_cfg: VoltmeterConfig
-    acq_cfg: AcquisitionConfig
-    currents_A: np.ndarray
-    output_subdir: str
-    output_prefix: str
-    gate_cfg: Optional[GateConfig] = None
-    gate_voltages: Optional[List[float]] = None
-    temp_cfg: Optional[TemperatureControllerConfig] = None
-
-    @property
-    def series_values(self) -> List[Optional[float]]:
-        return list(self.gate_voltages) if self.gate_voltages else [None]
-
-    @property
-    def total_points(self) -> int:
-        return len(self.currents_A) * len(self.series_values)
 
 
 def _load_settings() -> dict:
@@ -130,21 +113,28 @@ def build_plan(state: dict) -> MeasurementPlan:
             temp_cfg = TemperatureControllerConfig(
                 visa_resource=state["temperature_visa_resource"], sensor_uids=uids)
 
+    header_extra = {
+        "compliance_V": state["compliance_V"],
+        "n_averages": int(state["n_averages"]),
+        "settling_time_s": state["settling_time_s"],
+        "current_sweep_A": [state["current_min_A"], state["current_max_A"], state["step_A"]],
+    }
+    series = ""
+    if len(gate_voltages or []) > 1:
+        series = (f"{state['sample']}_{state['device']}_{MEASUREMENT_TYPE}_"
+                  f"{datetime.now():%Y%m%dT%H%M%S}")
+
     return MeasurementPlan(
         src_cfg=src_cfg, volt_cfg=volt_cfg, acq_cfg=acq_cfg, currents_A=currents_A,
-        output_subdir=state["output_subdir"], output_prefix=state["output_name"],
+        sample=state["sample"], device=state["device"],
+        temperature_setpoint_K=state["temperature_setpoint_K"],
+        cooldown=state["cooldown"], header_extra=header_extra, series=series,
         gate_cfg=gate_cfg, gate_voltages=gate_voltages, temp_cfg=temp_cfg,
     )
 
 
 def series_label(gate_V: Optional[float]) -> Optional[str]:
     return f"Vg={gate_V:g}V" if gate_V is not None else None
-
-
-def output_path_for_series(plan: MeasurementPlan, data_dir: str, session_ts: str,
-                            gate_V: Optional[float]) -> str:
-    suffix = f"_Vg{gate_V:g}V" if gate_V is not None else ""
-    return str(build_output_path(Path(data_dir), plan.output_subdir, plan.output_prefix, session_ts, suffix))
 
 
 def _save_combined_png(records: list[dict], png_path: Path) -> None:
@@ -215,12 +205,24 @@ def page() -> None:
                 inputs["nplc"] = num_field("NPLC (integration time)", float(d("nplc")))
                 switches["auto_range"] = bool_switch("Auto-range", d("auto_range"))
 
-            with ui.expansion("Acquisition & output", value=True, icon="save").classes("w-full"):
+            with ui.expansion("Acquisition timing", value=True, icon="save").classes("w-full"):
                 inputs["settling_time_s"] = num_field("Settling time per current step (s)", float(d("settling_time_s")))
                 inputs["n_averages"] = num_field("Voltage samples averaged per point", float(d("n_averages")), integer=True)
-                inputs["output_name"] = text_field("Output file name (prefix)", d("output_name"))
-                inputs["output_subdir"] = text_field("Data sub-directory (optional)", d("output_subdir"))
-                data_dir_input = directory_field("Save directory", saved.get("data_dir") or str(_DATA_DIR))
+
+            with ui.expansion("Sample & run identity", value=True, icon="science").classes("w-full"):
+                data_dir_input = directory_field(
+                    "Data root directory", saved.get("data_dir") or str(_DATA_DIR))
+                sample_dropdown, refresh_sample_options = sample_select(
+                    lambda: data_dir_input.value, default=saved.get("sample") or TEST_SAMPLE)
+                data_dir_input.on_value_change(lambda: refresh_sample_options())
+                inputs["device"] = text_field("Device (e.g. HB3, SV2)", d("device"))
+                inputs["cooldown"] = text_field("Cooldown (optional)", d("cooldown"))
+                _t_default = d("temperature_setpoint_K")
+                inputs["temperature_setpoint_K"] = optional_num_field(
+                    "Temperature setpoint (K, optional)",
+                    float(_t_default) if _t_default not in ("", None) else None,
+                    hint="Drives only the filename's T###K token — the header's T_K uses the "
+                         "measured temperature when available.")
 
             with ui.expansion("Sweep resolution", value=True, icon="tune").classes("w-full"):
                 inputs["step_A"] = num_field("Sweep step size (A)", float(d("step_A")))
@@ -285,8 +287,12 @@ def page() -> None:
                 state[fid] = 0
         for fid in TEXT_FIELDS:
             state[fid] = (inputs[fid].value or "").strip()
+        for fid in OPTIONAL_NUMERIC_FIELDS:
+            state[fid] = inputs[fid].value
         for fid, sw in switches.items():
             state[fid] = sw.value
+        sample_value = sample_dropdown.value
+        state["sample"] = sample_value if sample_value not in (None, NEW_SAMPLE_SENTINEL) else ""
         state["gate_voltage_list"] = []
         state["gate_parse_error"] = None
         if state["enable_gate"]:
@@ -301,6 +307,9 @@ def page() -> None:
         for fid, sw in switches.items():
             raw[fid] = sw.value
         raw["data_dir"] = data_dir_input.value
+        sample_value = sample_dropdown.value
+        if sample_value not in (None, NEW_SAMPLE_SENTINEL):
+            raw["sample"] = sample_value
         return raw
 
     @ui.refreshable
@@ -320,7 +329,7 @@ def page() -> None:
             render_summary([i for i in info if i], warnings, errors)
         start_btn.set_enabled(not errors and not is_busy())
 
-    for inp in list(inputs.values()) + [data_dir_input]:
+    for inp in list(inputs.values()) + [data_dir_input, sample_dropdown]:
         inp.on_value_change(refresh_summary.refresh)
     for sw in switches.values():
         sw.on_value_change(refresh_summary.refresh)
@@ -380,15 +389,45 @@ def page() -> None:
     def on_log(text: str, level: int) -> None:
         log_area.push(text)
 
-    def on_finished(final: FinalStatus, result) -> None:
-        label = {"completed": "Measurement complete.", "aborted": "Measurement aborted.",
-                  "error": f"ERROR: {final.error}"}[final.status]
-        status_label.set_text(label)
-        abort_btn.set_visibility(False)
-        start_btn.set_enabled(not is_busy())
-        refresh_summary.refresh()
+    async def _prompt_status_comment(plan: MeasurementPlan, run_contexts: list[RunContext],
+                                      data_root: str, records: list[dict]) -> None:
+        result = await status_comment_dialog()
+        if result is None:
+            return
+        status, comment = result
+        for series_idx, ctx in enumerate(run_contexts):
+            iter_records = [r for r in records if r.get("series_index", 0) == series_idx]
+            gate_V = iter_records[0].get("gate_voltage_V") if iter_records else None
+            header_fields = build_header_fields(
+                plan, ctx, iter_records, status=status, comment=comment,
+                extra={"gate_voltage_V": gate_V} if gate_V is not None else None,
+            )
+            try:
+                # Never truncate an already-written raw file to an empty stub —
+                # only a run that never wrote a point gets a header-only write.
+                if iter_records or not ctx.raw_path.exists():
+                    write_record(ctx.raw_path, iter_records, header_fields)
+                finalize_index_row(Path(data_root), ctx.sample, ctx.run_number, header_fields)
+            except Exception:
+                ui.notify("Could not save final status/comment.", type="negative")
 
-    def make_run_fn(plan: MeasurementPlan, data_dir: str, session_ts: str):
+    def make_on_finished(plan: MeasurementPlan, run_contexts: list[RunContext], data_root: str):
+        def on_finished(final: FinalStatus, result) -> None:
+            label = {"completed": "Measurement complete.", "aborted": "Measurement aborted.",
+                      "error": f"ERROR: {final.error}"}[final.status]
+            status_label.set_text(label)
+            abort_btn.set_visibility(False)
+            start_btn.set_enabled(not is_busy())
+            refresh_summary.refresh()
+            handle = controller["c"].handle if controller["c"] is not None else None
+            records = list(handle.records) if handle is not None else []
+            background_tasks.create(
+                _prompt_status_comment(plan, run_contexts, data_root, records),
+                name="status_comment_prompt",
+            )
+        return on_finished
+
+    def make_run_fn(plan: MeasurementPlan, data_root: str, run_contexts: list[RunContext]):
         def run_fn(stop_event, cb: RunCallbacks):
             source = voltmeter = gate = temp_ctrl = None
             try:
@@ -412,21 +451,56 @@ def page() -> None:
                         cb.on_status(f"Setting gate to {gate_V:g} V …")
                         set_gate_voltage(gate, plan.gate_cfg, gate_V)
 
-                    plan.acq_cfg.output_file = output_path_for_series(plan, data_dir, session_ts, gate_V)
+                    key_axis = ("gate_V", gate_V) if gate_V is not None else None
+                    ctx = allocate_run(
+                        Path(data_root), plan.sample, plan.device, MEASUREMENT_TYPE,
+                        temperature_setpoint_K=plan.temperature_setpoint_K,
+                        key_axis=key_axis, series=plan.series,
+                    )
+                    run_contexts.append(ctx)
+                    plan.acq_cfg.output_file = str(ctx.raw_path)
+                    write_csv = make_incremental_writer(
+                        ctx.raw_path,
+                        lambda records, _ctx=ctx, _gv=gate_V: build_header_fields(
+                            plan, _ctx, records, status="in_progress", comment="",
+                            extra={"gate_voltage_V": _gv} if _gv is not None else None,
+                        ),
+                    )
                     points = [CurrentPoint(current_A=float(i)) for i in plan.currents_A]
 
-                    def tagged_on_point(record: dict, _idx=series_idx, _label=label) -> None:
+                    iter_records: list[dict] = []
+
+                    def tagged_on_point(record: dict, _idx=series_idx, _label=label,
+                                         _iter=iter_records) -> None:
                         record["series_index"] = _idx
                         record["series_label"] = _label
+                        _iter.append(record)
                         cb.on_point(record)
 
                     status = "Running measurement …" if gate_V is None else f"Running measurement (Vg={gate_V:g} V) …"
                     cb.on_status(status)
-                    run_measurement(
-                        source, voltmeter, plan.src_cfg, plan.acq_cfg, points,
-                        stop_event=stop_event, on_point=tagged_on_point,
-                        gate_voltage_V=gate_V, temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg,
+                    iter_error: Optional[BaseException] = None
+                    try:
+                        run_measurement(
+                            source, voltmeter, plan.src_cfg, plan.acq_cfg, points,
+                            stop_event=stop_event, on_point=tagged_on_point,
+                            gate_voltage_V=gate_V, temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg,
+                            write_csv=write_csv,
+                        )
+                    except Exception as exc:
+                        iter_error = exc
+
+                    iter_status = "error" if iter_error is not None \
+                        else ("aborted" if stop_event.is_set() else "completed")
+                    header_fields = build_header_fields(
+                        plan, ctx, iter_records, status=iter_status, comment="",
+                        extra={"gate_voltage_V": gate_V} if gate_V is not None else None,
                     )
+                    write_record(ctx.raw_path, iter_records, header_fields)
+                    finalize_index_row(Path(data_root), ctx.sample, ctx.run_number, header_fields)
+
+                    if iter_error is not None:
+                        raise iter_error
                 return None
             finally:
                 if gate is not None:
@@ -437,6 +511,20 @@ def page() -> None:
                     ramp_current_to_zero(source)
                     shutdown_source(source)
         return run_fn
+
+    def _finish_artifacts(records: list[dict], run_contexts: list[RunContext], data_root: str) -> list[str]:
+        output_paths = [str(c.raw_path) for c in run_contexts]
+        if not run_contexts:
+            return output_paths
+        first, last = run_contexts[0], run_contexts[-1]
+        run_label = first.run_str if first is last else f"{first.run_str}-{last.run_str}"
+        png_path = proc_path(Path(data_root), first.sample, run_label, first.device,
+                              MEASUREMENT_TYPE, "combined", combined=True)
+        try:
+            _save_combined_png(records, png_path)
+            return output_paths + [str(png_path)]
+        except Exception:
+            return output_paths
 
     def on_start() -> None:
         state, parse_errors = parse_state()
@@ -454,17 +542,18 @@ def page() -> None:
 
         plan = build_plan(state)
         Path(state["data_dir"]).mkdir(parents=True, exist_ok=True)
-        session_ts = f"{datetime.now():%Y%m%d_%H%M%S}"
         labels = [series_label(v) for v in plan.series_values]
-        output_paths = [output_path_for_series(plan, state["data_dir"], session_ts, v) for v in plan.series_values]
+        run_contexts: list[RunContext] = []
 
         rc = RunController(
             suite=SUITE, measurement=PAGE_TITLE,
-            run_fn=make_run_fn(plan, state["data_dir"], session_ts),
-            save_artifacts=lambda records, result: _finish_artifacts(records, output_paths, state["data_dir"],
-                                                                       plan.output_prefix, session_ts),
-            parameters=state, data_dir=state["data_dir"], planned_output_paths=output_paths,
-            on_record=on_record, on_status=on_status, on_log=on_log, on_finished=on_finished,
+            run_fn=make_run_fn(plan, state["data_dir"], run_contexts),
+            save_artifacts=lambda records, result, status: _finish_artifacts(
+                records, run_contexts, state["data_dir"]),
+            parameters=state, data_dir=state["data_dir"], planned_output_paths=[],
+            on_record=on_record, on_status=on_status, on_log=on_log,
+            on_finished=make_on_finished(plan, run_contexts, state["data_dir"]),
+            sample=plan.sample, device=plan.device,
         )
         if not rc.try_start():
             ui.notify("Another measurement is already running — see the banner above.", type="warning")
@@ -478,16 +567,6 @@ def page() -> None:
         log_area.clear()
         abort_btn.set_visibility(True)
         start_btn.set_enabled(False)
-
-    def _finish_artifacts(records: list[dict], csv_paths: list[str], data_dir: str,
-                           prefix: str, session_ts: str) -> list[str]:
-        out_dir = Path(data_dir)
-        png_path = out_dir / f"{prefix}_{session_ts}_combined.png"
-        try:
-            _save_combined_png(records, png_path)
-            return csv_paths + [str(png_path)]
-        except Exception:
-            return csv_paths
 
     def on_abort() -> None:
         if controller["c"] is not None:

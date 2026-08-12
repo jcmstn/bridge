@@ -199,20 +199,26 @@ class RunController:
     bracketing is page-specific (which instruments, in which order) and
     isn't further shared here.
 
-    `save_artifacts(records, result) -> list[str]` runs on the WORKER
-    thread (no UI access) immediately after run_fn returns/raises -- this
-    is where a page saves its final headless-matplotlib PNG, mirroring
-    each *_tui.py's _save_measurement_png/plot_results.
+    `save_artifacts(records, result, status) -> list[str]` runs on the
+    WORKER thread (no UI access) immediately after run_fn returns/raises --
+    this is where a page saves its final headless-matplotlib PNG (mirroring
+    each *_tui.py's _save_measurement_png/plot_results) and, since the data
+    convention migration, unconditionally writes the raw-file header +
+    index.csv row with the outcome-derived `status`
+    ("completed"/"aborted"/"error" -- not yet a physical good/open/short/
+    noisy judgement, see instruments/data_naming.py).
     """
 
     def __init__(self, *, suite: str, measurement: str,
                  run_fn: Callable[[threading.Event, RunCallbacks], Any],
-                 save_artifacts: Callable[[list[dict], Any], list[str]],
+                 save_artifacts: Callable[[list[dict], Any, str], list[str]],
                  parameters: dict, data_dir: str, planned_output_paths: list[str],
                  on_record: Callable[[dict], None],
                  on_status: Callable[[str], None],
                  on_log: Callable[[str, int], None],
-                 on_finished: Callable[["FinalStatus", Any], None]) -> None:
+                 on_finished: Callable[["FinalStatus", Any], None],
+                 sample: Optional[str] = None, device: Optional[str] = None,
+                 run_number: Optional[int] = None) -> None:
         self.suite = suite
         self.measurement = measurement
         self.run_fn = run_fn
@@ -220,6 +226,9 @@ class RunController:
         self.parameters = parameters
         self.data_dir = data_dir
         self.planned_output_paths = planned_output_paths
+        self.sample = sample
+        self.device = device
+        self.run_number = run_number
         self.on_record = on_record
         self.on_status = on_status
         self.on_log = on_log
@@ -249,6 +258,7 @@ class RunController:
         handle.run_id = run_index.start_run(
             self.suite, self.measurement, self.parameters, self.data_dir,
             self.planned_output_paths,
+            sample=self.sample, device=self.device, run_number=self.run_number,
         )
         self._start_time = time.monotonic()
 
@@ -288,7 +298,7 @@ class RunController:
             status = "aborted" if self.handle.stop_event.is_set() else \
                      ("error" if error is not None else "completed")
             try:
-                output_paths = self.save_artifacts(self._worker_records, result)
+                output_paths = self.save_artifacts(self._worker_records, result, status)
             except Exception:
                 log.exception("Could not save final artifacts")
                 output_paths = self.planned_output_paths

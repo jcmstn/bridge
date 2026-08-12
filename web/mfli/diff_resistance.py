@@ -17,14 +17,11 @@ hard jump to 0 V.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-import numpy as np
 from plotly.subplots import make_subplots
-from nicegui import ui
+from nicegui import background_tasks, ui
 
 from mfli.mfli_diff_resistance_vs_bias import (
     AcquisitionConfig, BiasPoint, DemodConfig, FilterConfig, OutputConfig,
@@ -33,15 +30,20 @@ from mfli.mfli_diff_resistance_vs_bias import (
     ramp_bias_to_zero, run_measurement, setup_mds, shutdown_output,
     shutdown_temperature_controller, sync_follower_oscillator,
 )
-from instruments.output_paths import build_output_path
 from mfli.mfli_diff_resistance_tui import (
-    DEFAULTS, NUMERIC_FIELDS, TEXT_FIELDS, build_summary, parse_sensor_uids,
+    DEFAULTS, NUMERIC_FIELDS, TEXT_FIELDS, OPTIONAL_NUMERIC_FIELDS,
+    MEASUREMENT_TYPE, MeasurementPlan, build_header_fields, build_summary, parse_sensor_uids,
+)
+from instruments.data_naming import (
+    TEST_SAMPLE, allocate_run, finalize_index_row, make_incremental_writer,
+    preview_raw_filename, proc_path, write_record,
 )
 from web.run_controller import (
     RunController, RunCallbacks, FinalStatus, num_field, text_field, bool_switch,
-    render_summary, busy_banner, is_busy,
+    optional_num_field, render_summary, busy_banner, is_busy,
 )
 from web.directory_picker import directory_field, validate_directory
+from web.sample_picker import NEW_SAMPLE_SENTINEL, sample_select, status_comment_dialog
 
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data"
 _SETTINGS_PATH = _DATA_DIR / "web_settings" / "mfli_diff_resistance_web_settings.json"
@@ -57,24 +59,6 @@ MFLI_DIFF_RESISTANCE_DESCRIPTION = (
     "diodes, gated 2D systems). No magnet is involved; the bias sweep is the "
     "whole measurement."
 )
-
-
-@dataclass
-class MeasurementPlan:
-    daq_host: str
-    daq_port: int
-    leader: str
-    follower: str
-    out_cfg: OutputConfig
-    current_cfg: DemodConfig
-    voltage_cfg: DemodConfig
-    acq_cfg: AcquisitionConfig
-    biases_V: np.ndarray
-    temp_cfg: Optional[TemperatureControllerConfig] = None
-
-    @property
-    def total_points(self) -> int:
-        return len(self.biases_V)
 
 
 def _load_settings() -> dict:
@@ -111,10 +95,13 @@ def build_plan(state: dict) -> MeasurementPlan:
         device=state["follower_device"], label="V (across DUT)", demod_index=0, harmonic=1,
         input_range=state["voltage_input_range_V"], sample_rate_Hz=state["sample_rate_Hz"], filter=filt,
     )
+    run_ctx = allocate_run(
+        Path(state["data_dir"]), state["sample"], state["device"], MEASUREMENT_TYPE,
+        temperature_setpoint_K=state["temperature_setpoint_K"],
+    )
     acq_cfg = AcquisitionConfig(
         settling_time_s=state["settling_time_s"], n_averages=int(state["n_averages"]),
-        output_file=str(build_output_path(
-            Path(state["data_dir"]), "", state["output_name"], f"{datetime.now():%Y%m%d_%H%M%S}")),
+        output_file=str(run_ctx.raw_path),
     )
 
     biases_V = bidirectional_bias_sweep(
@@ -127,17 +114,30 @@ def build_plan(state: dict) -> MeasurementPlan:
             temp_cfg = TemperatureControllerConfig(
                 visa_resource=state["temperature_visa_resource"], sensor_uids=uids)
 
+    header_extra = {
+        "excitation_frequency_Hz": state["frequency_Hz"],
+        "ac_amplitude_V": state["ac_amplitude_V"],
+        "series_R_ohm": state["series_R_ohm"],
+        "bias_sweep_V": [state["bias_min_V"], state["bias_max_V"], int(state["n_points"])],
+        "demod_time_constant_s": state["time_constant_s"],
+        "demod_order": int(state["order"]),
+        "n_averages": int(state["n_averages"]),
+        "settling_time_s": state["settling_time_s"],
+    }
+
     return MeasurementPlan(
         daq_host=state["daq_host"], daq_port=int(state["daq_port"]),
         leader=state["leader_device"], follower=state["follower_device"],
         out_cfg=out_cfg, current_cfg=current_cfg, voltage_cfg=voltage_cfg,
         acq_cfg=acq_cfg, biases_V=biases_V, temp_cfg=temp_cfg,
+        run_ctx=run_ctx, temperature_setpoint_K=state["temperature_setpoint_K"],
+        cooldown=state["cooldown"], header_extra=header_extra,
     )
 
 
-def _save_measurement_png(records: list[dict], csv_path: str) -> list[str]:
+def _save_measurement_png(records: list[dict], png_path: Path) -> None:
     if not records:
-        return [csv_path]
+        return
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -159,10 +159,9 @@ def _save_measurement_png(records: list[dict], csv_path: str) -> list[str]:
         ax.grid(True, alpha=0.3)
     fig.tight_layout()
 
-    png_path = Path(csv_path).with_suffix(".png")
+    png_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(png_path, dpi=150)
     plt.close(fig)
-    return [csv_path, str(png_path)]
 
 
 def page() -> None:
@@ -181,6 +180,7 @@ def page() -> None:
 
     inputs: dict = {}
     switches: dict = {}
+    optional_inputs: dict = {}
     controller: dict[str, Optional[RunController]] = {"c": None}
 
     with ui.row().classes("w-full gap-4 items-start no-wrap"):
@@ -225,8 +225,21 @@ def page() -> None:
                     hint="Rule of thumb: ≥ 5 × time constant.")
                 inputs["n_averages"] = num_field(
                     "Samples to average per point (each demod)", float(d("n_averages")), integer=True)
-                inputs["output_name"] = text_field("Output file name (prefix)", d("output_name"))
-                data_dir_input = directory_field("Save directory", saved.get("data_dir") or str(_DATA_DIR))
+
+            with ui.expansion("Sample & run identity", value=True, icon="science").classes("w-full"):
+                data_dir_input = directory_field(
+                    "Data root directory", saved.get("data_dir") or str(_DATA_DIR))
+                sample_dropdown, refresh_sample_options = sample_select(
+                    lambda: data_dir_input.value, default=saved.get("sample") or TEST_SAMPLE)
+                data_dir_input.on_value_change(lambda: refresh_sample_options())
+                inputs["device"] = text_field("Device (e.g. HB3, SV2)", d("device"))
+                inputs["cooldown"] = text_field("Cooldown (optional)", d("cooldown"))
+                _t_default = d("temperature_setpoint_K")
+                optional_inputs["temperature_setpoint_K"] = optional_num_field(
+                    "Temperature setpoint (K, optional)",
+                    float(_t_default) if _t_default not in ("", None) else None,
+                    hint="Drives only the filename's T###K token — the header's T_K uses the "
+                         "measured temperature when available.")
 
             with ui.expansion("Bias sweep", value=True, icon="tune").classes("w-full"):
                 inputs["n_points"] = num_field(
@@ -287,17 +300,27 @@ def page() -> None:
                 state[fid] = 0
         for fid in TEXT_FIELDS:
             state[fid] = (inputs[fid].value or "").strip()
+        for fid in OPTIONAL_NUMERIC_FIELDS:
+            v = optional_inputs[fid].value
+            state[fid] = float(v) if v is not None else None
         for fid, sw in switches.items():
             state[fid] = sw.value
         state["order"] = int(order_select.value)
+        sample_value = sample_dropdown.value
+        state["sample"] = sample_value if sample_value not in (None, NEW_SAMPLE_SENTINEL) else ""
         return state, errors
 
     def collect_raw() -> dict:
         raw = {fid: inp.value for fid, inp in inputs.items()}
+        for fid, inp in optional_inputs.items():
+            raw[fid] = inp.value if inp.value is not None else ""
         for fid, sw in switches.items():
             raw[fid] = sw.value
         raw["order"] = order_select.value
         raw["data_dir"] = data_dir_input.value
+        sample_value = sample_dropdown.value
+        if sample_value not in (None, NEW_SAMPLE_SENTINEL):
+            raw["sample"] = sample_value
         return raw
 
     @ui.refreshable
@@ -317,7 +340,7 @@ def page() -> None:
             render_summary(info, warnings, errors)
         start_btn.set_enabled(not errors and not is_busy())
 
-    for inp in list(inputs.values()) + [data_dir_input]:
+    for inp in list(inputs.values()) + list(optional_inputs.values()) + [data_dir_input, sample_dropdown]:
         inp.on_value_change(refresh_summary.refresh)
     for sw in switches.values():
         sw.on_value_change(refresh_summary.refresh)
@@ -351,13 +374,49 @@ def page() -> None:
     def on_log(text: str, level: int) -> None:
         log_area.push(text)
 
-    def on_finished(final: FinalStatus, result) -> None:
-        label = {"completed": "Measurement complete.", "aborted": "Measurement aborted.",
-                  "error": f"ERROR: {final.error}"}[final.status]
-        status_label.set_text(label)
-        abort_btn.set_visibility(False)
-        start_btn.set_enabled(not is_busy())
-        refresh_summary.refresh()
+    async def _prompt_status_comment(plan: MeasurementPlan, records: list[dict]) -> None:
+        result = await status_comment_dialog()
+        if result is None:
+            return
+        status, comment = result
+        ctx = plan.run_ctx
+        header_fields = build_header_fields(plan, records, status=status, comment=comment)
+        try:
+            # Never truncate an already-written raw file to an empty stub —
+            # only a run that never wrote a point gets a header-only write.
+            if records or not ctx.raw_path.exists():
+                write_record(ctx.raw_path, records, header_fields)
+            finalize_index_row(ctx.sample_dir.parent, ctx.sample, ctx.run_number, header_fields)
+        except Exception:
+            ui.notify("Could not save final status/comment.", type="negative")
+
+    def make_on_finished(plan: MeasurementPlan):
+        def on_finished(final: FinalStatus, result) -> None:
+            label = {"completed": "Measurement complete.", "aborted": "Measurement aborted.",
+                      "error": f"ERROR: {final.error}"}[final.status]
+            status_label.set_text(label)
+            abort_btn.set_visibility(False)
+            start_btn.set_enabled(not is_busy())
+            refresh_summary.refresh()
+            handle = controller["c"].handle if controller["c"] is not None else None
+            records = list(handle.records) if handle is not None else []
+            background_tasks.create(
+                _prompt_status_comment(plan, records), name="status_comment_prompt")
+        return on_finished
+
+    def _finalize(plan: MeasurementPlan, records: list[dict], result, status: str) -> list[str]:
+        """save_artifacts -- runs on the worker thread, right after run_fn
+        returns/raises. Writes the outcome-derived header/index row
+        UNCONDITIONALLY (never gated on the status/comment dialog above) and
+        the final PNG into proc/."""
+        ctx = plan.run_ctx
+        data_root = ctx.sample_dir.parent
+        header_fields = build_header_fields(plan, records, status=status, comment="")
+        write_record(ctx.raw_path, records, header_fields)
+        finalize_index_row(data_root, ctx.sample, ctx.run_number, header_fields)
+        png_path = proc_path(data_root, ctx.sample, ctx.run_str, ctx.device, MEASUREMENT_TYPE, "plot")
+        _save_measurement_png(records, png_path)
+        return [str(ctx.raw_path), str(png_path)]
 
     def make_run_fn(plan: MeasurementPlan):
         def run_fn(stop_event, cb: RunCallbacks):
@@ -387,10 +446,15 @@ def page() -> None:
                 points = [BiasPoint(bias_V=float(v)) for v in plan.biases_V]
 
                 cb.on_status("Running measurement …")
+                write_csv = make_incremental_writer(
+                    plan.run_ctx.raw_path,
+                    lambda records: build_header_fields(plan, records, status="in_progress", comment=""),
+                )
                 return run_measurement(
                     daq, plan.out_cfg, plan.current_cfg, plan.voltage_cfg, plan.acq_cfg, points,
                     stop_event=stop_event, on_point=cb.on_point,
                     temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg,
+                    write_csv=write_csv,
                 )
             finally:
                 if daq is not None and output_configured:
@@ -419,9 +483,12 @@ def page() -> None:
 
         rc = RunController(
             suite=SUITE, measurement=PAGE_TITLE, run_fn=make_run_fn(plan),
-            save_artifacts=lambda records, result: _save_measurement_png(records, plan.acq_cfg.output_file),
+            save_artifacts=lambda records, result, status: _finalize(plan, records, result, status),
             parameters=state, data_dir=state["data_dir"], planned_output_paths=[plan.acq_cfg.output_file],
-            on_record=on_record, on_status=on_status, on_log=on_log, on_finished=on_finished,
+            on_record=on_record, on_status=on_status, on_log=on_log,
+            on_finished=make_on_finished(plan),
+            sample=plan.run_ctx.sample, device=plan.run_ctx.device,
+            run_number=plan.run_ctx.run_number,
         )
         if not rc.try_start():
             ui.notify("Another measurement is already running — see the banner above.", type="warning")

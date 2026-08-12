@@ -26,7 +26,6 @@ import multiprocessing as mp
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -45,6 +44,7 @@ from textual.widgets import (
     Footer,
     Header,
     Input,
+    Label,
     ProgressBar,
     RichLog,
     Select,
@@ -90,13 +90,35 @@ from mfli.mfli_phase_calibration import (
     format_report,
     run_phase_calibration,
 )
+from instruments.data_naming import (
+    TEST_SAMPLE,
+    RunContext,
+    allocate_run,
+    finalize_index_row,
+    make_incremental_writer,
+    preview_raw_filename,
+    proc_path,
+    write_record,
+)
+from instruments.tui_sample_picker import (
+    NEW_SAMPLE_SENTINEL,
+    NewSampleScreen,
+    StatusCommentScreen,
+    sample_options,
+)
 
 log = logging.getLogger("mfli_phase_calibration_tui")
 
 # Same convention as mfli_dual_harmonic_tui.py: data/settings live outside
-# "bridge" so nothing generated at runtime ends up in the git-tracked source tree.
+# "bridge" so nothing generated at runtime ends up in the git-tracked source
+# tree. _DATA_DIR doubles as the data-convention "data root" (parent of
+# every {sample}/ folder).
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 SETTINGS_PATH = _DATA_DIR / "mfli_phase_calibration_tui_settings.json"
+
+# Locked type code for this measurement (see instruments/data_naming.py) —
+# never deviates.
+MEASUREMENT_TYPE = "PHCAL"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -143,7 +165,9 @@ DEFAULTS: dict = {
     "freq_n_averages": "20",
     "freq_max_iterations": "5",
     "freq_tol_deg": "0.02",
-    "output_name": "phase_calibration",
+    "device": "",
+    "cooldown": "",
+    "temperature_setpoint_K": "300",
     "enable_temperature": True,
     "temperature_visa_resource": "TCPIP0::192.168.1.5::7020::SOCKET",
     "temperature_sensor_uids": "MB1.T1",
@@ -181,10 +205,13 @@ NUMERIC_FIELDS: dict = {
     "freq_tol_deg": float,
 }
 TEXT_FIELDS = ["leader_device", "follower_device", "daq_host", "visa_resource",
-               "gaussmeter_visa_resource", "output_name",
+               "gaussmeter_visa_resource", "device", "cooldown",
                "temperature_visa_resource", "temperature_sensor_uids"]
 # Free-text, comma-separated floats — parsed to List[float] by hand in parse_state()
 LIST_FIELDS = ["amplitudes_V", "frequencies_Hz"]
+# Free-text, blank-allowed: parsed to Optional[float] by hand in parse_state()
+# rather than going through NUMERIC_FIELDS' "blank is an error" casting.
+OPTIONAL_NUMERIC_FIELDS = ["temperature_setpoint_K"]
 
 
 def parse_sensor_uids(raw: str) -> tuple:
@@ -217,11 +244,50 @@ class CalibrationPlan:
     amplitude_check_cfg: Optional[AmplitudeCheckConfig]
     frequency_check_cfg: Optional[FrequencyCheckConfig]
     output_csv: str
+    run_ctx: RunContext
+    temperature_setpoint_K: Optional[float]
+    cooldown: str
+    header_extra: dict
     temp_cfg: Optional[TemperatureControllerConfig] = None
+    series: str = ""
 
     @property
     def total_points(self) -> int:
         return max(0, 2 * self.sweep_cfg.n_points - 1)
+
+
+def build_header_fields(plan: "CalibrationPlan", records: list[dict], *,
+                         status: str, comment: str) -> dict:
+    """
+    Universal + measurement-specific header/index fields for one run. Called
+    once with the complete sweep DataFrame's records (this suite writes in
+    a single shot, not incrementally) and once more at end-of-run with the
+    user's real good/open/short/noisy judgement -- see
+    instruments/data_naming.py.
+
+    T_setpoint_K is the nominal value used to build the filename's T###K
+    token. T_K is the MEASURED mean (temperature_1_K) -- left blank (not
+    backfilled with the setpoint) whenever the MercuryiTC is disconnected
+    or hasn't produced a reading yet.
+    """
+    ctx = plan.run_ctx
+    measured = [r["temperature_1_K"] for r in records if r.get("temperature_1_K") is not None]
+    T_K = (sum(measured) / len(measured)) if measured else ""
+    fields = {
+        "run": ctx.run_number,
+        "timestamp": ctx.timestamp.isoformat(timespec="seconds"),
+        "sample": ctx.sample,
+        "device": ctx.device,
+        "type": MEASUREMENT_TYPE,
+        "T_setpoint_K": plan.temperature_setpoint_K,
+        "T_K": T_K,
+        "cooldown": plan.cooldown,
+        "status": status,
+        "comment": comment,
+        "series": plan.series,
+    }
+    fields.update(plan.header_extra)
+    return fields
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -233,6 +299,18 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     info: list[str] = []
     warnings: list[str] = []
     errors: list[str] = []
+
+    # ── Sample / run identity ───────────────────────────────────────────────
+    if not state.get("sample") or state["sample"] == NEW_SAMPLE_SENTINEL:
+        errors.append("Choose a sample (or create a new one).")
+    if not state.get("device"):
+        errors.append("Device is required (e.g. HB3, SV2).")
+    if not errors:
+        preview = preview_raw_filename(
+            state["sample"], state["device"], MEASUREMENT_TYPE,
+            temperature_setpoint_K=state.get("temperature_setpoint_K"),
+        )
+        info.append(f"Will save as: {preview}_<timestamp>.csv")
 
     if state["leader_device"] == state["follower_device"]:
         errors.append("Leader and follower device IDs must be different.")
@@ -386,8 +464,8 @@ def _live_plot_worker(queue: "mp.Queue") -> None:
     plt.show()
 
 
-def _save_diagnostic_png(records: list[dict], csv_path: str) -> None:
-    """Save a static hold-check / channel-ID PNG alongside the CSV, from whatever
+def _save_diagnostic_png(records: list[dict], png_path: Path) -> None:
+    """Save a static hold-check / channel-ID PNG to proc/, from whatever
     sweep points were actually collected (including an aborted/partial run)."""
     if not records:
         return
@@ -416,7 +494,7 @@ def _save_diagnostic_png(records: list[dict], csv_path: str) -> None:
         ax.grid(True, alpha=0.3)
     fig.tight_layout()
 
-    png_path = Path(csv_path).with_suffix(".png")
+    png_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(png_path, dpi=150)
     plt.close(fig)
     log.info("Saved plot to '%s'", png_path)
@@ -528,10 +606,43 @@ class RunScreen(Screen):
         self._set_status(final_status)
         self.query_one("#back_btn", Button).disabled = False
         self.query_one("#abort_btn", Button).disabled = True
+
+        # Finalize the header/index row UNCONDITIONALLY, right now — never
+        # gated on the status/comment prompt below being answered, so a
+        # closed session never leaves the record stuck at "in_progress".
+        outcome_status = ("aborted" if self._stop_event.is_set()
+                           else "error" if final_status.startswith("ERROR") else "completed")
+        ctx = self.plan.run_ctx
+        header_fields = build_header_fields(self.plan, self._records, status=outcome_status, comment="")
         try:
-            _save_diagnostic_png(self._records, self.plan.output_csv)
+            write_record(ctx.raw_path, self._records, header_fields)
+            finalize_index_row(_DATA_DIR, ctx.sample, ctx.run_number, header_fields)
+        except Exception:
+            log.exception("Could not finalize run record")
+
+        try:
+            png_path = proc_path(_DATA_DIR, ctx.sample, ctx.run_str, ctx.device,
+                                  MEASUREMENT_TYPE, "plot")
+            _save_diagnostic_png(self._records, png_path)
         except Exception:
             log.exception("Could not save diagnostic plot PNG")
+
+        self.app.push_screen(StatusCommentScreen(), self._on_status_comment)
+
+    def _on_status_comment(self, result: Optional[tuple[str, str]]) -> None:
+        if result is None:
+            return
+        status, comment = result
+        ctx = self.plan.run_ctx
+        header_fields = build_header_fields(self.plan, self._records, status=status, comment=comment)
+        try:
+            # Never truncate an already-written raw file to an empty stub —
+            # only a run that never wrote a point gets a header-only write.
+            if self._records or not ctx.raw_path.exists():
+                write_record(ctx.raw_path, self._records, header_fields)
+            finalize_index_row(_DATA_DIR, ctx.sample, ctx.run_number, header_fields)
+        except Exception:
+            log.exception("Could not save final status/comment")
 
     def action_abort(self) -> None:
         if self._measurement_running and not self._stop_event.is_set():
@@ -581,6 +692,10 @@ class RunScreen(Screen):
                 self._set_status_threadsafe("Connecting to MercuryiTC (temperature) …")
                 temp_ctrl = connect_temperature_controller(plan.temp_cfg)
 
+            writer = make_incremental_writer(
+                plan.run_ctx.raw_path,
+                lambda records: build_header_fields(plan, records, status="in_progress", comment=""),
+            )
             report = run_phase_calibration(
                 daq, plan.leader, plan.follower, plan.out_cfg, plan.demod1_cfg, plan.demod2_cfg,
                 plan.sweep_cfg, magnet, plan.magnet_cfg,
@@ -597,6 +712,7 @@ class RunScreen(Screen):
                 on_point=lambda record: self.app.call_from_thread(self._on_point, record),
                 on_status=self._set_status_threadsafe,
                 temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg,
+                write_csv=lambda df: writer(df.to_dict("records")),
             )
             for line in format_report(report).splitlines():
                 log.info(line)
@@ -818,9 +934,19 @@ class MFLIPhaseCalibrationApp(App):
                                      "Not connected, or only one probe wired up? Fine either way — "
                                      "missing readings just leave the column empty.")
 
-                with Collapsible(title="Output", collapsed=False):
-                    yield field("output_name", "Output file name (prefix)",
-                                DEFAULTS["output_name"], kind="text")
+                with Collapsible(title="Sample & run identity", collapsed=False):
+                    yield Vertical(
+                        Label("Sample", classes="field-label"),
+                        Select(sample_options(_DATA_DIR), id="sample_select",
+                               allow_blank=False, value=TEST_SAMPLE),
+                        classes="field",
+                    )
+                    yield field("device", "Device (e.g. HB3, SV2)", DEFAULTS["device"], kind="text")
+                    yield field("cooldown", "Cooldown (optional)", DEFAULTS["cooldown"], kind="text")
+                    yield field("temperature_setpoint_K", "Temperature setpoint (K, optional)",
+                                DEFAULTS["temperature_setpoint_K"], kind="number", valid_empty=True,
+                                hint="Drives only the filename's T###K token — the header's T_K "
+                                     "uses the measured temperature when available.")
 
             with Vertical(id="sidebar"):
                 yield Static("Summary", classes="sidebar-title")
@@ -841,10 +967,30 @@ class MFLIPhaseCalibrationApp(App):
         self._load_settings()
         self.refresh_summary()
 
+    # ── Sample picker ────────────────────────────────────────────────────────
+
+    def _refresh_sample_options(self, *, select_value: Optional[str] = None) -> None:
+        select = self.query_one("#sample_select", Select)
+        options = sample_options(_DATA_DIR)
+        select.set_options(options)
+        if select_value is not None:
+            select.value = select_value
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id == "sample_select":
+            if event.value == NEW_SAMPLE_SENTINEL:
+                self.push_screen(NewSampleScreen(_DATA_DIR), self._on_new_sample_created)
+                return
+        self.refresh_summary()
+
+    def _on_new_sample_created(self, result: Optional[str]) -> None:
+        self._refresh_sample_options(select_value=result if result else TEST_SAMPLE)
+        self.refresh_summary()
+
     # ── Form state I/O ───────────────────────────────────────────────────────
 
     def _all_field_ids(self) -> list[str]:
-        return list(NUMERIC_FIELDS) + TEXT_FIELDS + LIST_FIELDS
+        return list(NUMERIC_FIELDS) + TEXT_FIELDS + LIST_FIELDS + OPTIONAL_NUMERIC_FIELDS
 
     def collect_raw(self) -> dict:
         raw: dict = {fid: self.query_one(f"#{fid}", Input).value for fid in self._all_field_ids()}
@@ -853,6 +999,9 @@ class MFLIPhaseCalibrationApp(App):
         raw["enable_frequency_check"] = self.query_one("#enable_frequency_check", Switch).value
         raw["enable_temperature"] = self.query_one("#enable_temperature", Switch).value
         raw["order"] = self.query_one("#order", Select).value
+        sample_value = self.query_one("#sample_select", Select).value
+        if sample_value not in (None, Select.BLANK, NEW_SAMPLE_SENTINEL):
+            raw["sample"] = sample_value
         return raw
 
     def _load_settings(self) -> None:
@@ -879,6 +1028,9 @@ class MFLIPhaseCalibrationApp(App):
                 self.query_one("#order", Select).value = int(saved["order"])
             except Exception:
                 pass
+        saved_sample = saved.get("sample")
+        if saved_sample and saved_sample in [v for _, v in sample_options(_DATA_DIR)]:
+            self.query_one("#sample_select", Select).value = saved_sample
 
     def _save_settings(self, raw: dict) -> None:
         try:
@@ -911,11 +1063,23 @@ class MFLIPhaseCalibrationApp(App):
                 except ValueError:
                     errors.append(f"'{fid}' contains a value that isn't a number: {part!r}")
             state[fid] = values
+        for fid in OPTIONAL_NUMERIC_FIELDS:
+            raw = self.query_one(f"#{fid}", Input).value.strip()
+            if raw:
+                try:
+                    state[fid] = float(raw)
+                except ValueError:
+                    errors.append(f"'{fid}' is not a valid number: {raw!r}")
+                    state[fid] = None
+            else:
+                state[fid] = None
         state["sinc_filter"] = self.query_one("#sinc_filter", Switch).value
         state["enable_amplitude_check"] = self.query_one("#enable_amplitude_check", Switch).value
         state["enable_frequency_check"] = self.query_one("#enable_frequency_check", Switch).value
         state["enable_temperature"] = self.query_one("#enable_temperature", Switch).value
         state["order"] = int(self.query_one("#order", Select).value)
+        sample_value = self.query_one("#sample_select", Select).value
+        state["sample"] = sample_value if sample_value not in (None, Select.BLANK) else ""
         return state, errors
 
     # ── Reactivity ───────────────────────────────────────────────────────────
@@ -1019,7 +1183,11 @@ class MFLIPhaseCalibrationApp(App):
             max_iterations=state["freq_max_iterations"],
             tol_deg=state["freq_tol_deg"],
         )
-        output_csv = str(_DATA_DIR / f"{state['output_name']}_{datetime.now():%Y%m%d_%H%M%S}.csv")
+        run_ctx = allocate_run(
+            _DATA_DIR, state["sample"], state["device"], MEASUREMENT_TYPE,
+            temperature_setpoint_K=state["temperature_setpoint_K"],
+        )
+        output_csv = str(run_ctx.raw_path)
 
         temp_cfg = None
         if state["enable_temperature"]:
@@ -1029,6 +1197,16 @@ class MFLIPhaseCalibrationApp(App):
                     visa_resource=state["temperature_visa_resource"],
                     sensor_uids=uids,
                 )
+
+        header_extra = {
+            "excitation_frequency_Hz": state["frequency_Hz"],
+            "excitation_amplitude_V": state["amplitude_V"],
+            "series_R_ohm": state["series_R_ohm"],
+            "calibration_current_A": state["calibration_current_A"],
+            "field_sweep_A": [state["i_min_A"], state["i_max_A"], state["n_points"]],
+            "demod_time_constant_s": state["time_constant_s"],
+            "demod_order": state["order"],
+        }
 
         return CalibrationPlan(
             daq_host=state["daq_host"], daq_port=state["daq_port"],
@@ -1043,6 +1221,8 @@ class MFLIPhaseCalibrationApp(App):
             amplitude_check_cfg=amplitude_check_cfg,
             frequency_check_cfg=frequency_check_cfg,
             output_csv=output_csv,
+            run_ctx=run_ctx, temperature_setpoint_K=state["temperature_setpoint_K"],
+            cooldown=state["cooldown"], header_extra=header_extra,
             temp_cfg=temp_cfg,
         )
 
