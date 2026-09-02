@@ -104,8 +104,9 @@ uniformly. Non-integer values replace `.` with `p`.
 ## The raw CSV header
 
 Every file in `raw/` starts with a `# key: value` comment block (one line
-per key, in insertion order), a blank separator line, then the plain CSV
-body — written by `write_record()`, **never hand-typed**:
+per key, in insertion order), **immediately** followed by a two-row column
+header — a Long Names row, then a Units row — then the data rows. No blank
+line anywhere. Written by `write_record()`, **never hand-typed**:
 
 ```
 # run: 1
@@ -120,14 +121,25 @@ body — written by `write_record()`, **never hand-typed**:
 # comment:
 # series: A_HB3_NOISE_20260811T143022
 ...(measurement-specific keys)...
-
-time_s,x_V,y_V,...
+time_s,x,y,...
+s,V,V,...
 0.0,1.2e-6,...
 ```
 
-Header lines start with `#` in column 0, so `pd.read_csv(path, comment="#")`
-skips them transparently — this is the standard way any downstream
-analysis script reads a raw file back.
+The two-row column header is what makes the file drag-and-drop friendly in
+OriginLab's Text/CSV connector: Origin auto-detects the `#` block as the
+file header and the next two rows as its Long Name / Units subheaders —
+but only when they sit **directly** above the data with no blank line.
+`write_record()` builds the Units row by splitting a known unit suffix off
+each column name (`magnet_field_mT` → `magnet_field` + `mT`); the suffix
+set is `_COLUMN_UNITS` in `data_naming.py`. A column with no recognised
+suffix keeps its full name and an empty unit.
+
+Header lines still start with `#` in column 0, but `pd.read_csv(path,
+comment="#")` is **no longer** a correct read — it would treat the Units
+row as the first data row. Use **`read_raw(path)`** (below), which skips
+the `#` block, consumes both header rows, and re-joins them into the
+original `name_unit` column labels.
 
 **Universal header/index columns** (`data_naming.BASE_COLUMNS`), in order:
 `run, timestamp, sample, device, type, T_setpoint_K, T_K, cooldown,
@@ -165,7 +177,7 @@ For a **new script**, the sequence is:
 ```python
 from instruments.data_naming import (
     ensure_sample, allocate_run, make_incremental_writer,
-    write_record, finalize_index_row, proc_path, preview_raw_filename,
+    write_record, read_raw, finalize_index_row, proc_path, preview_raw_filename,
 )
 
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
@@ -222,9 +234,17 @@ Key functions:
   every subsequent file in the series silently inherits the first
   iteration's run number.
 - **`write_record(raw_path, records, header_fields)`** — rewrites
-  `raw_path` in full: header block, blank line, CSV body. Direct
-  replacement for the old `Path(...).parent.mkdir(...);
-  pd.DataFrame(records).to_csv(...)` pair.
+  `raw_path` in full: `#` header block, then the Long Names row, then the
+  Units row, then the data rows — no blank line anywhere (see "The raw CSV
+  header" above for the OriginLab reason). Direct replacement for the old
+  `Path(...).parent.mkdir(...); pd.DataFrame(records).to_csv(...)` pair.
+- **`read_raw(raw_path)`** → `pd.DataFrame`. The matching reader for
+  `write_record()`'s body: skips the `# key: value` block, consumes the
+  two-row (Long Name + Units) column header, and returns a frame keyed by
+  the original `name_unit` labels (units re-joined onto the name, not kept
+  as a column level). Empty / header-only files yield an empty DataFrame.
+  This is the standard way any downstream analysis script reads a raw file
+  back — **not** `pd.read_csv(path, comment="#")`.
 - **`make_incremental_writer(raw_path, header_fields_fn)`** → a
   `Callable[[list[dict]], None]` closure. `header_fields_fn` is
   re-invoked on every call with the records-so-far, so e.g. an averaged
@@ -334,6 +354,8 @@ on success, refreshes the options with the new name selected.
   only ever come from the header/`index.csv`, never from path structure.
 - Don't hand-write a `# key: value` header — always go through
   `write_record()`/`make_incremental_writer()`.
+- Don't read a raw file with a bare `pd.read_csv(path, comment="#")` — it
+  eats the Units subheader row as data. Use `read_raw()`.
 - Don't invent a new key-axis `kind` or type code without adding it to
   the locked tables in `data_naming.py` (and this document).
 - Don't call `allocate_run()` on every keystroke of a live-updating
