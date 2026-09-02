@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 
 import mfli.mfli_noise_spectrum as noise
-from instruments.data_naming import ensure_sample
+from instruments.data_naming import ensure_sample, read_raw
 
 
 def _fake_spec(label: str) -> dict:
@@ -55,7 +55,7 @@ def test_save_results_allocates_one_run_per_pair(tmp_path: Path, monkeypatch) ->
     assert contexts[0].raw_path.name.startswith("A_0001_HB3_NOISE_T293K_")
     assert contexts[0].raw_path.exists()
 
-    df = pd.read_csv(contexts[0].raw_path, comment="#")
+    df = read_raw(contexts[0].raw_path)
     assert list(df["frequency_Hz"]) == [1.0, 10.0, 100.0]
 
     index_path = tmp_path / "A" / "index.csv"

@@ -75,6 +75,7 @@ try:
         ensure_sample,
         finalize_index_row,
         list_samples,
+        read_raw,
     )
 except ImportError as exc:  # pragma: no cover
     sys.exit(
@@ -196,10 +197,7 @@ def find_raw_file(sample_dir: Path, sample: str, run: int) -> Optional[Path]:
 
 
 def load_run_dataframe(raw_path: Path) -> pd.DataFrame:
-    try:
-        return pd.read_csv(raw_path, comment="#")
-    except pd.errors.EmptyDataError:
-        return pd.DataFrame()
+    return read_raw(raw_path)
 
 
 def numeric_columns(df: pd.DataFrame) -> list[str]:

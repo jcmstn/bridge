@@ -404,24 +404,76 @@ def _format_header_value(value) -> str:
     return "" if value is None else str(value)
 
 
+# Column-name unit suffixes split into Origin's auto-detected Units subheader
+# row by write_record(). A column whose last "_"-separated token is in this set
+# is written as `<name>` on the Long Name row and `<token>` on the Units row;
+# every other column keeps its full name and an empty unit. read_raw() re-joins
+# the two rows back into the original `name_unit` labels.
+_COLUMN_UNITS = {
+    "T", "mT", "uT", "nT",
+    "V", "mV", "uV", "nV", "kV",
+    "A", "mA", "uA", "nA", "pA",
+    "ohm", "kohm", "Mohm",
+    "K", "mK", "degC",
+    "Hz", "kHz", "MHz",
+    "deg", "rad", "s", "ms", "us", "ns",
+    "W", "dBm", "dBV", "Oe", "emu",
+}
+
+
+def _split_column_unit(col: str) -> tuple[str, str]:
+    """'magnet_field_mT' -> ('magnet_field', 'mT'); 'point_index' -> ('point_index', '')."""
+    name, _, suffix = col.rpartition("_")
+    return (name, suffix) if name and suffix in _COLUMN_UNITS else (col, "")
+
+
 def write_record(raw_path: Path, records: list[dict], header_fields: dict) -> None:
     """
     Rewrite raw_path in full: a `# key: value` comment header block
-    (header_fields, in insertion order), a blank separator line, then the
-    CSV body (pd.DataFrame(records).to_csv(..., index=False)). This is
-    the direct replacement for every script's current
-    'Path(...).parent.mkdir(...); pd.DataFrame(records).to_csv(...)' pair.
+    (header_fields, in insertion order), then a two-row column header —
+    Long Names, then Units (split off known unit suffixes, see
+    _COLUMN_UNITS) — then the data rows. No blank line anywhere: OriginLab's
+    Text/CSV drag-and-drop connector auto-detects the `#` block as file
+    header and the next two rows as Long Name / Units subheaders only when
+    they sit directly above the data. This is the direct replacement for
+    every script's current 'Path(...).parent.mkdir(...);
+    pd.DataFrame(records).to_csv(...)' pair.
 
     Call on EVERY incremental point-write (header_fields["status"] =
     "in_progress") AND once more at end-of-run with the final status/
-    comment. Header lines start with "#" (no leading whitespace) so
-    pandas' `pd.read_csv(path, comment="#")` skips them cleanly.
+    comment. Read it back with read_raw() (the `#` lines stay skippable by
+    a plain `pd.read_csv(path, comment="#")`, but that would take the Units
+    row as data — use read_raw()).
     """
     raw_path.parent.mkdir(parents=True, exist_ok=True)
     header_lines = [f"# {k}: {_format_header_value(v)}" for k, v in header_fields.items()]
+    df = pd.DataFrame(records)
     with open(raw_path, "w", newline="") as f:
-        f.write("\n".join(header_lines) + "\n\n")
-        pd.DataFrame(records).to_csv(f, index=False)
+        f.write("\n".join(header_lines) + "\n")
+        if len(df.columns):
+            names, units = zip(*(_split_column_unit(c) for c in df.columns))
+            f.write(",".join(names) + "\n")
+            f.write(",".join(units) + "\n")
+        df.to_csv(f, index=False, header=False)
+
+
+def read_raw(raw_path: Path) -> pd.DataFrame:
+    """
+    Inverse of write_record()'s body: skip the `# key: value` header, read
+    the Long Name + Units two-row column header, and return a DataFrame
+    keyed by the original `name_unit` column labels (the Units row is
+    re-joined onto the name, not kept as a level). Empty/header-only files
+    yield an empty DataFrame.
+    """
+    try:
+        df = pd.read_csv(raw_path, comment="#", header=[0, 1])
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame()
+    df.columns = [
+        name if not unit or str(unit).startswith("Unnamed") else f"{name}_{unit}"
+        for name, unit in df.columns
+    ]
+    return df
 
 
 def make_incremental_writer(

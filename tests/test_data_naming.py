@@ -24,6 +24,7 @@ from instruments.data_naming import (
     format_axis_token,
     list_samples,
     preview_raw_filename,
+    read_raw,
     write_record,
 )
 
@@ -180,12 +181,15 @@ def test_write_record_header_and_body_round_trip(tmp_path: Path) -> None:
 
     raw_text = ctx.raw_path.read_text()
     lines = raw_text.splitlines()
-    assert all(line.startswith("#") for line in lines if line.strip() and "," not in line.split(":")[0])
     assert f"# run: {ctx.run_number}" in lines
     assert "# B_range_T: [-2, 2]" in lines
     assert "# comment: clear AHE hysteresis, coercive ~80 mT" in lines
+    # Long Name row then Units row, directly above the data, no blank line.
+    assert "" not in lines
+    assert "B,Vxy,Vxx,T" in lines
+    assert "T,V,V,K" in lines
 
-    df = pd.read_csv(ctx.raw_path, comment="#")
+    df = read_raw(ctx.raw_path)
     assert list(df.columns) == ["B_T", "Vxy_V", "Vxx_V", "T_K"]
     assert len(df) == 2
     assert df.iloc[0]["B_T"] == -2.0
@@ -200,7 +204,7 @@ def test_write_record_can_be_called_repeatedly_incremental_style(tmp_path: Path)
         records.append({"x": i, "y": i * i})
         write_record(ctx.raw_path, records, {"run": ctx.run_number, "status": "in_progress"})
 
-    df = pd.read_csv(ctx.raw_path, comment="#")
+    df = read_raw(ctx.raw_path)
     assert len(df) == 3
     assert df["y"].tolist() == [0, 1, 4]
 
