@@ -70,10 +70,15 @@ class LocalDirectoryPicker(ui.dialog):
     def _add_drives_toggle(self) -> None:
         # Lab-instrument control PCs are frequently Windows even though this
         # codebase is developed on macOS — cheap to support, no cost if unused.
+        # Use ctypes (stdlib) instead of pywin32: no extra dependency to
+        # install on lab PCs, so it can't fail with "win32api missing".
         if platform.system() != "Windows":
             return
-        import win32api  # type: ignore[import-not-found]
-        drives = win32api.GetLogicalDriveStrings().split("\000")[:-1]
+        import ctypes
+        bitmask = ctypes.windll.kernel32.GetLogicalDrives()  # type: ignore[attr-defined]
+        drives = [f"{chr(ord('A') + i)}:\\" for i in range(26) if bitmask & (1 << i)]
+        if not drives:
+            return
         ui.toggle(drives, value=drives[0], on_change=lambda e: self._jump(Path(e.value))) \
             .classes("mb-1")
 
