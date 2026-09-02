@@ -24,6 +24,7 @@ Requirements:
 
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 import multiprocessing as mp
@@ -134,7 +135,7 @@ DEFAULTS: dict = {
     "source_visa_resource": "GPIB0::20::INSTR",
     "voltmeter_visa_resource": "GPIB0::7::INSTR",
     "gate_visa_resource": "GPIB0::25::INSTR",
-    "sense_current_A": "0.001",
+    "sense_current_values": "0.001",
     "compliance_V": "2.0",
     "source_delay_s": "0.05",
     "nplc": "5",
@@ -167,7 +168,6 @@ DEFAULTS: dict = {
 }
 
 NUMERIC_FIELDS: dict = {
-    "sense_current_A": float,
     "compliance_V": float,
     "source_delay_s": float,
     "nplc": float,
@@ -188,7 +188,8 @@ NUMERIC_FIELDS: dict = {
 TEXT_FIELDS = ["source_visa_resource", "voltmeter_visa_resource", "gate_visa_resource",
                "device", "cooldown", "magnet_visa_resource",
                "gaussmeter_visa_resource", "gate_voltage_values",
-               "temperature_visa_resource", "temperature_sensor_uids"]
+               "temperature_visa_resource", "temperature_sensor_uids",
+               "sense_current_values"]
 OPTIONAL_NUMERIC_FIELDS = ["temperature_setpoint_K"]
 GATE_FIELD_IDS = ["gate_visa_resource", "gate_voltage_limit_V",
                    "gate_compliance_current_A", "gate_voltage_values"]
@@ -242,6 +243,7 @@ class MeasurementPlan:
     gauss_cfg: GaussmeterConfig
     acq_cfg: AcquisitionConfig
     currents_A: np.ndarray
+    sense_currents_A: List[float]
     sample: str
     device: str
     temperature_setpoint_K: Optional[float]
@@ -253,9 +255,17 @@ class MeasurementPlan:
     temp_cfg: Optional[TemperatureControllerConfig] = None
 
     @property
-    def series_values(self) -> List[Optional[float]]:
+    def gate_series_values(self) -> List[Optional[float]]:
         """[None] for a single gate-less run, else one entry per gate voltage."""
         return list(self.gate_voltages_V) if self.gate_voltages_V else [None]
+
+    @property
+    def series_values(self) -> List[tuple[float, Optional[float]]]:
+        """Cross product of sense currents x gate voltages -- one complete
+        field sweep per (sense_current, gate_voltage) pair, each saved to
+        its own file. A single sense current and a gate-less/single-gate
+        run degenerates to today's plain gate-voltage series."""
+        return list(itertools.product(self.sense_currents_A, self.gate_series_values))
 
     @property
     def total_points(self) -> int:
@@ -364,10 +374,21 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
             + " VISA resources must all be different."
         )
 
-    if state["sense_current_A"] == 0:
-        errors.append("Sense current must be nonzero (resistance divides by it).")
+    n_current_series = 1
+    if state.get("sense_current_parse_error"):
+        errors.append(f"Sense current list: {state['sense_current_parse_error']}")
+        current_list: list[float] = []
     else:
-        info.append(f"Sense current I = {format_si(state['sense_current_A'], 'A')}")
+        current_list = state.get("sense_current_list", [])
+        if any(i == 0 for i in current_list):
+            errors.append("Sense current must be nonzero (resistance divides by it).")
+    n_current_series = len(current_list)
+    if n_current_series > 1:
+        currents_str = ", ".join(format_si(i, "A") for i in current_list)
+        info.append(f"Sense currents: {currents_str} — {n_current_series} complete field "
+                     f"sweeps, one file each, plotted together")
+    elif n_current_series == 1:
+        info.append(f"Sense current I = {format_si(current_list[0], 'A')}")
 
     if state["compliance_V"] <= 0:
         errors.append("Compliance voltage must be > 0 V.")
@@ -384,7 +405,7 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     per_point_s = state["settling_time_s"] + state["n_averages"] * reps_per_point * read_s
 
     # ── Gate (optional) ─────────────────────────────────────────────────────
-    n_series = 1
+    n_gate_series = 1
     if state["enable_gate"]:
         if state["gate_voltage_limit_V"] <= 0:
             errors.append("Gate voltage limit must be > 0 V.")
@@ -399,11 +420,11 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
                     f"Gate voltage(s) {over_limit} exceed the configured limit "
                     f"±{state['gate_voltage_limit_V']:g} V."
                 )
-        n_series = len(gate_list)
-        if n_series > 1:
-            info.append(f"Gate: {n_series} values {gate_list} V — {n_series} complete field sweeps, "
-                        f"one file each, plotted together")
-        elif n_series == 1:
+        n_gate_series = len(gate_list)
+        if n_gate_series > 1:
+            info.append(f"Gate: {n_gate_series} values {gate_list} V — {n_gate_series} complete field "
+                        f"sweeps (per sense current), one file each, plotted together")
+        elif n_gate_series == 1:
             info.append(f"Gate held fixed at {format_si(gate_list[0], 'V')}")
     else:
         info.append("Gate off — Keithley 2400 not used, single field sweep run.")
@@ -431,7 +452,7 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     info.append("Field measured live at each point via Lake Shore 475 Gaussmeter "
                  f"({state['gaussmeter_visa_resource']})")
 
-    total_points = n_sweep_points * max(1, n_series)
+    total_points = n_sweep_points * max(1, n_current_series) * max(1, n_gate_series)
     info.append(f"Estimated total run time ≈ {format_duration(total_points * per_point_s)}")
 
     # ── Temperature (MercuryiTC, optional) ──────────────────────────────────
@@ -458,8 +479,12 @@ def compute_filename_preview(state: dict) -> Optional[str]:
         state["sample"], state["device"], MEASUREMENT_TYPE,
         temperature_setpoint_K=state.get("temperature_setpoint_K"),
     )
-    suffix = (" (one file per gate voltage)" if state.get("enable_gate") and
-              len(state.get("gate_voltage_list", [])) > 1 else "")
+    axes = []
+    if len(state.get("sense_current_list", [])) > 1:
+        axes.append("sense current")
+    if state.get("enable_gate") and len(state.get("gate_voltage_list", [])) > 1:
+        axes.append("gate voltage")
+    suffix = f" (one file per {' × '.join(axes)})" if axes else ""
     return f"{preview}_<timestamp>.csv{suffix}"
 
 
@@ -615,7 +640,7 @@ class RunScreen(Screen):
 
     def on_mount(self) -> None:
         self.query_one("#results_table", DataTable).add_columns(
-            "#", "Vg (V)", "I_magnet (A)", "B (mT)", "V (V)", "R (Ω)", "n_avg",
+            "#", "I_sense (A)", "Vg (V)", "I_magnet (A)", "B (mT)", "V (V)", "R (Ω)", "n_avg",
             "T1 (K)", "T2 (K)",
         )
         self._log_handler = _LogRelay(self)
@@ -654,6 +679,7 @@ class RunScreen(Screen):
             except Exception:
                 pass
         table = self.query_one("#results_table", DataTable)
+        Isense = record.get("sense_current_A")
         I = record.get("magnet_current_A")
         B = record.get("magnet_field_mT")
         Vg = record.get("gate_voltage_V")
@@ -661,6 +687,7 @@ class RunScreen(Screen):
         T2 = record.get("temperature_2_K")
         table.add_row(
             str(record["point_index"] + 1),
+            f"{Isense:.4g}" if Isense is not None else "—",
             f"{Vg:.4g}" if Vg is not None else "—",
             f"{I:.4f}" if I is not None else "—",
             f"{B:.2f}" if B is not None else "—",
@@ -700,9 +727,14 @@ class RunScreen(Screen):
         status, comment = result
         for series_idx, ctx in enumerate(self._run_contexts):
             iter_records = [r for r in self._records if r.get("series_index", 0) == series_idx]
+            extra = None
+            if iter_records:
+                extra = {"sense_current_A": iter_records[0].get("sense_current_A")}
+                gate_V = iter_records[0].get("gate_voltage_V")
+                if gate_V is not None:
+                    extra["gate_voltage_V"] = gate_V
             header_fields = build_header_fields(
-                self.plan, ctx, iter_records, status=status, comment=comment,
-                extra={"gate_voltage_V": iter_records[0].get("gate_voltage_V")} if iter_records else None,
+                self.plan, ctx, iter_records, status=status, comment=comment, extra=extra,
             )
             try:
                 # Never truncate an already-written raw file to an empty stub —
@@ -766,22 +798,37 @@ class RunScreen(Screen):
             self._set_status_threadsafe("Connecting gaussmeter …")
             gaussmeter = connect_gaussmeter(plan.gauss_cfg)
 
-            for series_idx, gate_V in enumerate(plan.series_values):
+            n_currents = len(plan.sense_currents_A)
+            n_gates = len(plan.gate_series_values)
+            for series_idx, (I_sense, gate_V) in enumerate(plan.series_values):
                 if self._stop_event.is_set():
                     break
 
-                label = None
+                plan.src_cfg.sense_current_A = I_sense
+                label_parts = []
+                if n_currents > 1:
+                    label_parts.append(f"I={I_sense:g}A")
+                if gate_V is not None and n_gates > 1:
+                    label_parts.append(f"Vg={gate_V:g}V")
+                label = ", ".join(label_parts) or None
+
                 key_axis = None
-                if gate_V is not None:
-                    label = f"Vg={gate_V:g}V"
+                if n_gates > 1:
                     key_axis = ("gate_V", gate_V)
+                elif n_currents > 1:
+                    key_axis = ("current_A", I_sense)
+
+                if gate_V is not None:
                     self._set_status_threadsafe(f"Setting gate to {gate_V:g} V …")
                     set_gate_voltage(gate, plan.gate_cfg, gate_V)
 
+                extra = {"sense_current_A": I_sense}
+                if gate_V is not None:
+                    extra["gate_voltage_V"] = gate_V
+
                 # A fresh RunContext (own run number, own file) EVERY
-                # iteration -- never reuse one across the gate-voltage
-                # series, or every file silently inherits the first
-                # iteration's run number.
+                # iteration -- never reuse one across the series, or every
+                # file silently inherits the first iteration's run number.
                 ctx = allocate_run(
                     _DATA_DIR, plan.sample, plan.device, MEASUREMENT_TYPE,
                     temperature_setpoint_K=plan.temperature_setpoint_K,
@@ -791,9 +838,8 @@ class RunScreen(Screen):
                 plan.acq_cfg.output_file = str(ctx.raw_path)
                 write_csv = make_incremental_writer(
                     ctx.raw_path,
-                    lambda records, _ctx=ctx, _gate_V=gate_V: build_header_fields(
-                        plan, _ctx, records, status="in_progress", comment="",
-                        extra={"gate_voltage_V": _gate_V} if _gate_V is not None else None,
+                    lambda records, _ctx=ctx, _extra=extra: build_header_fields(
+                        plan, _ctx, records, status="in_progress", comment="", extra=_extra,
                     ),
                 )
 
@@ -805,8 +851,8 @@ class RunScreen(Screen):
                     for I in plan.currents_A
                 ]
 
-                status = "Running field sweep …" if gate_V is None \
-                    else f"Running field sweep (Vg={gate_V:g} V) …"
+                status = "Running field sweep …" if not label_parts \
+                    else f"Running field sweep ({', '.join(label_parts)}) …"
                 self._set_status_threadsafe(status)
                 iter_error: Optional[BaseException] = None
                 try:
@@ -830,8 +876,7 @@ class RunScreen(Screen):
                     else ("aborted" if self._stop_event.is_set() else "completed")
                 iter_records = [r for r in self._records if r.get("series_index", 0) == series_idx]
                 header_fields = build_header_fields(
-                    plan, ctx, iter_records, status=iter_status, comment="",
-                    extra={"gate_voltage_V": gate_V} if gate_V is not None else None,
+                    plan, ctx, iter_records, status=iter_status, comment="", extra=extra,
                 )
                 write_record(ctx.raw_path, iter_records, header_fields)
                 finalize_index_row(_DATA_DIR, ctx.sample, ctx.run_number, header_fields)
@@ -945,10 +990,12 @@ class DCSpinValveApp(App):
                 with Vertical(classes="param-grid"):
                     yield card(
                         "Source (Keithley 6221)",
-                        field("sense_current_A", "Sense current (A)",
-                              DEFAULTS["sense_current_A"],
+                        field("sense_current_values", "Sense current (A)",
+                              DEFAULTS["sense_current_values"], kind="text",
                               hint="Reversed +I/-I each rep to cancel thermal-EMF offsets, "
-                                   "unless reversal is switched off below."),
+                                   "unless reversal is switched off below. Single value, or "
+                                   "comma-separated list — one complete field sweep runs per "
+                                   "value, each saved to its own file."),
                         switch_field("reversal_enabled", "Reverse current each rep (+I/-I)",
                                      DEFAULTS["reversal_enabled"]),
                         Label(
@@ -1188,6 +1235,13 @@ class DCSpinValveApp(App):
             except ValueError as exc:
                 state["gate_parse_error"] = str(exc)
 
+        state["sense_current_list"] = []
+        state["sense_current_parse_error"] = None
+        try:
+            state["sense_current_list"] = parse_value_list(state["sense_current_values"])
+        except ValueError as exc:
+            state["sense_current_parse_error"] = str(exc)
+
         return state, errors
 
     # ── Reactivity ───────────────────────────────────────────────────────────
@@ -1260,7 +1314,7 @@ class DCSpinValveApp(App):
     def _build_plan(self, state: dict) -> MeasurementPlan:
         src_cfg = SourceConfig(
             visa_resource=state["source_visa_resource"],
-            sense_current_A=state["sense_current_A"],
+            sense_current_A=state["sense_current_list"][0],
             compliance_V=state["compliance_V"],
             source_delay_s=state["source_delay_s"],
         )
@@ -1313,7 +1367,6 @@ class DCSpinValveApp(App):
                 )
 
         header_extra = {
-            "sense_current_A": state["sense_current_A"],
             "compliance_V": state["compliance_V"],
             "reversal_enabled": state["reversal_enabled"],
             "n_averages": state["n_averages"],
@@ -1321,16 +1374,17 @@ class DCSpinValveApp(App):
             "field_sweep_A": [state["i_min_A"], state["i_max_A"], state["step_A"]],
         }
         # A "series" tag only means something for an actual family of runs
-        # (>1 gate voltage) -- a single/gate-less run gets no series tag.
+        # (>1 sense current and/or >1 gate voltage) -- a single-run session
+        # gets no series tag.
         series = ""
-        if len(gate_voltages_V or []) > 1:
+        if len(state["sense_current_list"]) > 1 or len(gate_voltages_V or []) > 1:
             series = (f"{state['sample']}_{state['device']}_{MEASUREMENT_TYPE}_"
                       f"{datetime.now():%Y%m%dT%H%M%S}")
 
         return MeasurementPlan(
             src_cfg=src_cfg, volt_cfg=volt_cfg,
             magnet_cfg=magnet_cfg, gauss_cfg=gauss_cfg, acq_cfg=acq_cfg,
-            currents_A=currents_A,
+            currents_A=currents_A, sense_currents_A=state["sense_current_list"],
             sample=state["sample"], device=state["device"],
             temperature_setpoint_K=state["temperature_setpoint_K"],
             cooldown=state["cooldown"], header_extra=header_extra, series=series,

@@ -29,8 +29,9 @@ import logging
 import multiprocessing as mp
 import threading
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import numpy as np
 from rich.text import Text
@@ -75,7 +76,7 @@ from dc.dc_hall_measurement import (
     shutdown_source,
     shutdown_temperature_controller,
 )
-from dc.dc_sweep_utils import linear_sweep
+from dc.dc_sweep_utils import linear_sweep, parse_value_list
 from instruments.data_naming import (
     TEST_SAMPLE,
     RunContext,
@@ -124,7 +125,7 @@ MEASUREMENT_TYPE = "HALL"
 DEFAULTS: dict = {
     "source_visa_resource": "GPIB0::20::INSTR",
     "voltmeter_visa_resource": "GPIB0::7::INSTR",
-    "sense_current_A": "0.001",
+    "sense_current_values": "0.001",
     "compliance_V": "2.0",
     "source_delay_s": "0.05",
     "nplc": "5",
@@ -154,7 +155,6 @@ DEFAULTS: dict = {
 
 # id -> caster, for every free-text numeric field (Switch handled separately)
 NUMERIC_FIELDS: dict = {
-    "sense_current_A": float,
     "compliance_V": float,
     "source_delay_s": float,
     "nplc": float,
@@ -172,7 +172,8 @@ NUMERIC_FIELDS: dict = {
 }
 TEXT_FIELDS = ["source_visa_resource", "voltmeter_visa_resource", "device",
                "cooldown", "magnet_visa_resource", "gaussmeter_visa_resource",
-               "temperature_visa_resource", "temperature_sensor_uids"]
+               "temperature_visa_resource", "temperature_sensor_uids",
+               "sense_current_values"]
 # Parsed separately from NUMERIC_FIELDS -- unlike every other numeric field,
 # this one may be BLANK (valid_empty=True), which means "no temperature
 # setpoint" -> the T### K filename token is simply omitted.
@@ -234,25 +235,36 @@ class MeasurementPlan:
     magnet_cfg: Optional[MagnetConfig]
     gauss_cfg: Optional[GaussmeterConfig]
     currents_A: Optional[np.ndarray]
+    sense_currents_A: List[float]
     temp_cfg: Optional[TemperatureControllerConfig]
-    run_ctx: RunContext
+    sample: str
+    device: str
     temperature_setpoint_K: Optional[float]
     cooldown: str
     header_extra: dict
     series: str = ""
 
     @property
+    def series_values(self) -> List[float]:
+        """One entry per sense current -- one complete measurement (single
+        point, or a full field sweep) per value, each saved to its own file."""
+        return list(self.sense_currents_A)
+
+    @property
     def total_points(self) -> int:
-        return len(self.currents_A) if self.currents_A is not None else 1
+        base = len(self.currents_A) if self.currents_A is not None else 1
+        return base * len(self.sense_currents_A)
 
 
-def build_header_fields(plan: "MeasurementPlan", records: list[dict], *,
-                         status: str, comment: str) -> dict:
+def build_header_fields(plan: "MeasurementPlan", ctx: RunContext, records: list[dict], *,
+                         status: str, comment: str, extra: Optional[dict] = None) -> dict:
     """
-    Universal + measurement-specific header/index fields for one run. Called
-    on every incremental write (status='in_progress', comment='') and once
-    more at end-of-run (outcome status, then again with the user's real
-    good/open/short/noisy judgement) -- see instruments/data_naming.py.
+    Universal + measurement-specific header/index fields for ONE run within
+    this (possibly multi-file, one-per-sense-current) session -- `ctx` is
+    that particular iteration's RunContext, not a single plan-wide one (see
+    instruments/data_naming.py's allocate_run() -- called fresh per
+    iteration for this suite). `extra` carries this iteration's own value
+    (sense_current_A) on top of the plan-wide header_extra.
 
     T_setpoint_K is the nominal value used to build the filename's T###K
     token. T_K is the MEASURED mean (temperature_1_K) -- left blank (not
@@ -260,7 +272,6 @@ def build_header_fields(plan: "MeasurementPlan", records: list[dict], *,
     or hasn't produced a reading yet, so a query like `T_K < 50` never
     silently trusts an unmeasured number.
     """
-    ctx = plan.run_ctx
     measured = [r["temperature_1_K"] for r in records if r.get("temperature_1_K") is not None]
     T_K = (sum(measured) / len(measured)) if measured else ""
     fields = {
@@ -277,6 +288,8 @@ def build_header_fields(plan: "MeasurementPlan", records: list[dict], *,
         "series": plan.series,
     }
     fields.update(plan.header_extra)
+    if extra:
+        fields.update(extra)
     return fields
 
 
@@ -342,10 +355,20 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         errors.append("Source (6221) and voltmeter (2182) VISA resources must be different.")
 
     # ── Source ───────────────────────────────────────────────────────────────
-    if state["sense_current_A"] == 0:
-        errors.append("Sense current must be nonzero (Hall resistance divides by it).")
+    if state.get("sense_current_parse_error"):
+        errors.append(f"Sense current list: {state['sense_current_parse_error']}")
+        current_list: list[float] = []
     else:
-        info.append(f"Sense current I = {format_si(state['sense_current_A'], 'A')}")
+        current_list = state.get("sense_current_list", [])
+        if any(i == 0 for i in current_list):
+            errors.append("Sense current must be nonzero (Hall resistance divides by it).")
+    n_series = len(current_list)
+    if n_series > 1:
+        currents_str = ", ".join(format_si(i, "A") for i in current_list)
+        info.append(f"Sense currents: {currents_str} — {n_series} complete measurements, "
+                     f"one file each")
+    elif n_series == 1:
+        info.append(f"Sense current I = {format_si(current_list[0], 'A')}")
 
     if state["compliance_V"] <= 0:
         errors.append("Compliance voltage must be > 0 V.")
@@ -379,10 +402,12 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
             info.append(f"Sweep: {direction}, step={state['step_A']:g} A, {total_points} points")
         info.append("Field measured live at each point via Lake Shore 475 Gaussmeter "
                      f"({state['gaussmeter_visa_resource']})")
-        info.append(f"Estimated total run time ≈ {format_duration(total_points * per_point_s)}")
+        info.append(f"Estimated total run time ≈ "
+                     f"{format_duration(total_points * max(1, n_series) * per_point_s)}")
     else:
         info.append("Single point — no field sweep, magnet untouched.")
-        info.append(f"Estimated run time ≈ {format_duration(per_point_s)}")
+        info.append(f"Estimated total run time ≈ "
+                     f"{format_duration(max(1, n_series) * per_point_s)}")
 
     # ── Temperature (MercuryiTC, optional) ──────────────────────────────────
     if state["enable_temperature"]:
@@ -408,7 +433,9 @@ def compute_filename_preview(state: dict) -> Optional[str]:
         state["sample"], state["device"], MEASUREMENT_TYPE,
         temperature_setpoint_K=state.get("temperature_setpoint_K"),
     )
-    return f"{preview}_<timestamp>.csv"
+    suffix = (" (one file per sense current)"
+              if len(state.get("sense_current_list", [])) > 1 else "")
+    return f"{preview}_<timestamp>.csv{suffix}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -430,32 +457,45 @@ def _live_plot_worker(queue: "mp.Queue", has_field_sweep: bool) -> None:
         fig.canvas.manager.set_window_title("DC Hall live measurement")
     except Exception:
         pass
-    line, = ax.plot([], [], "o-", color="tab:blue")
     ax.set_ylabel("Hall voltage (V)")
     ax.set_xlabel("Magnetic field (mT)" if has_field_sweep else "Point #")
     ax.set_title("Live measurement")
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
 
-    xs: list[float] = []
-    ys: list[float] = []
+    cmap = plt.get_cmap("tab10")
+    lines: dict[int, "plt.Line2D"] = {}
+    series_data: dict[int, tuple[list, list]] = {}
 
     def _drain(_frame=None):
-        updated = False
+        updated: set[int] = set()
+        new_series = False
         while True:
             try:
                 record = queue.get_nowait()
             except Exception:
                 break
+            idx = record.get("series_index", 0)
+            if idx not in lines:
+                label = record.get("series_label")
+                (line,) = ax.plot([], [], "o-", color=cmap(idx % 10), label=label)
+                lines[idx] = line
+                series_data[idx] = ([], [])
+                new_series = True
+            xs, ys = series_data[idx]
             x = record.get("magnet_field_mT") if has_field_sweep else None
             xs.append(x if x is not None else record["point_index"])
             ys.append(record["hall_voltage_V"])
-            updated = True
+            updated.add(idx)
         if updated:
-            line.set_data(xs, ys)
+            for idx in updated:
+                xs, ys = series_data[idx]
+                lines[idx].set_data(xs, ys)
+            if new_series and any(l.get_label() and not l.get_label().startswith("_") for l in lines.values()):
+                ax.legend(loc="best", fontsize=8)
             ax.relim()
             ax.autoscale_view()
-        return (line,)
+        return tuple(lines.values())
 
     # Keep a reference so it isn't garbage-collected mid-run.
     _ani = FuncAnimation(fig, _drain, interval=300, cache_frame_data=False)
@@ -464,7 +504,8 @@ def _live_plot_worker(queue: "mp.Queue", has_field_sweep: bool) -> None:
 
 def _save_measurement_png(records: list[dict], png_path: Path) -> None:
     """Save a static Hall-voltage-vs-field PNG to proc/, from whatever
-    points were actually collected (including an aborted/partial run)."""
+    points were actually collected (including an aborted/partial run),
+    one colored trace per sense current when more than one was used."""
     if not records:
         return
 
@@ -472,16 +513,23 @@ def _save_measurement_png(records: list[dict], png_path: Path) -> None:
     matplotlib.use("Agg")  # headless — must not touch the TUI's terminal
     import matplotlib.pyplot as plt
 
-    has_field = any(r.get("magnet_field_mT") is not None for r in records)
-    xs = [r["magnet_field_mT"] if has_field else r["point_index"] for r in records]
-    ys = [r["hall_voltage_V"] for r in records]
-
+    cmap = plt.get_cmap("tab10")
     fig, ax = plt.subplots(figsize=(7, 5))
-    ax.plot(xs, ys, "o-", color="tab:blue")
+
+    has_field = any(r.get("magnet_field_mT") is not None for r in records)
+    series_ids = sorted({r.get("series_index", 0) for r in records})
+    for idx in series_ids:
+        rows = [r for r in records if r.get("series_index", 0) == idx]
+        label = rows[0].get("series_label")
+        xs = [r["magnet_field_mT"] if has_field else r["point_index"] for r in rows]
+        ax.plot(xs, [r["hall_voltage_V"] for r in rows], ".-", color=cmap(idx % 10), label=label)
+
     ax.set_ylabel("Hall voltage (V)")
     ax.set_xlabel("Magnetic field (mT)" if has_field else "Point #")
     ax.set_title("Measurement result")
     ax.grid(True, alpha=0.3)
+    if any(r.get("series_label") for r in records):
+        ax.legend(loc="best", fontsize=8)
     fig.tight_layout()
 
     png_path.parent.mkdir(parents=True, exist_ok=True)
@@ -539,6 +587,9 @@ class RunScreen(Screen):
         self._records: list[dict] = []
         self._plot_queue: Optional["mp.Queue"] = None
         self._plot_process: Optional[mp.Process] = None
+        # One RunContext per iteration of the sense-current series -- each
+        # gets its own run number/file (see allocate_run() in do_run below).
+        self._run_contexts: list[RunContext] = []
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -553,7 +604,7 @@ class RunScreen(Screen):
 
     def on_mount(self) -> None:
         self.query_one("#results_table", DataTable).add_columns(
-            "#", "I_magnet (A)", "B (mT)", "V_Hall (V)", "R_Hall (Ω)", "n_rev",
+            "#", "I_sense (A)", "I_magnet (A)", "B (mT)", "V_Hall (V)", "R_Hall (Ω)", "n_rev",
             "T1 (K)", "T2 (K)",
         )
         self._log_handler = _LogRelay(self)
@@ -597,12 +648,14 @@ class RunScreen(Screen):
             except Exception:
                 pass
         table = self.query_one("#results_table", DataTable)
+        Isense = record.get("sense_current_A")
         I = record.get("magnet_current_A")
         B = record.get("magnet_field_mT")
         T1 = record.get("temperature_1_K")
         T2 = record.get("temperature_2_K")
         table.add_row(
             str(record["point_index"] + 1),
+            f"{Isense:.4g}" if Isense is not None else "—",
             f"{I:.4f}" if I is not None else "—",
             f"{B:.2f}" if B is not None else "—",
             f"{record['hall_voltage_V']:.4e}",
@@ -613,47 +666,49 @@ class RunScreen(Screen):
         )
         table.move_cursor(row=table.row_count - 1, scroll=True)
         self.query_one("#progress", ProgressBar).advance(1)
-        self._set_status(f"Point {record['point_index'] + 1} / {self.plan.total_points} complete.")
+        self._set_status(f"Point {len(self._records)} / {self.plan.total_points} complete.")
 
     def _on_finished(self, final_status: str) -> None:
         self._measurement_running = False
         self._set_status(final_status)
         self.query_one("#back_btn", Button).disabled = False
         self.query_one("#abort_btn", Button).disabled = True
-
-        # Finalize the header/index row UNCONDITIONALLY, right now — never
-        # gated on the status/comment prompt below being answered, so a
-        # closed session never leaves the record stuck at "in_progress".
-        outcome_status = ("aborted" if self._stop_event.is_set()
-                           else "error" if final_status.startswith("ERROR") else "completed")
-        ctx = self.plan.run_ctx
-        header_fields = build_header_fields(self.plan, self._records, status=outcome_status, comment="")
         try:
-            write_record(ctx.raw_path, self._records, header_fields)
-            finalize_index_row(_DATA_DIR, ctx.sample, ctx.run_number, header_fields)
-        except Exception:
-            log.exception("Could not finalize run record")
-
-        try:
-            png_path = proc_path(_DATA_DIR, ctx.sample, ctx.run_str, ctx.device,
-                                  MEASUREMENT_TYPE, "plot")
-            _save_measurement_png(self._records, png_path)
+            if self._run_contexts:
+                first, last = self._run_contexts[0], self._run_contexts[-1]
+                run_label = first.run_str if first is last else f"{first.run_str}-{last.run_str}"
+                png_path = proc_path(_DATA_DIR, self.plan.sample, run_label, self.plan.device,
+                                      MEASUREMENT_TYPE, "combined", combined=True)
+                _save_measurement_png(self._records, png_path)
         except Exception:
             log.exception("Could not save measurement plot PNG")
 
+        # One status/comment prompt for the whole session -- applied to
+        # every file in the sense-current series (asking once per file
+        # would be needless friction; they're one physical measurement
+        # session).
         self.app.push_screen(StatusCommentScreen(), self._on_status_comment)
 
     def _on_status_comment(self, result: Optional[tuple[str, str]]) -> None:
         if result is None:
             return
         status, comment = result
-        ctx = self.plan.run_ctx
-        header_fields = build_header_fields(self.plan, self._records, status=status, comment=comment)
-        try:
-            write_record(ctx.raw_path, self._records, header_fields)
-            finalize_index_row(_DATA_DIR, ctx.sample, ctx.run_number, header_fields)
-        except Exception:
-            log.exception("Could not save final status/comment")
+        for series_idx, ctx in enumerate(self._run_contexts):
+            iter_records = [r for r in self._records if r.get("series_index", 0) == series_idx]
+            header_fields = build_header_fields(
+                self.plan, ctx, iter_records, status=status, comment=comment,
+                extra={"sense_current_A": iter_records[0].get("sense_current_A")} if iter_records else None,
+            )
+            try:
+                # Never truncate an already-written raw file to an empty stub —
+                # a run with data must always keep it; only a run that never
+                # wrote a point (ctx.raw_path doesn't exist yet) gets a fresh
+                # header-only write here.
+                if iter_records or not ctx.raw_path.exists():
+                    write_record(ctx.raw_path, iter_records, header_fields)
+                finalize_index_row(_DATA_DIR, ctx.sample, ctx.run_number, header_fields)
+            except Exception:
+                log.exception("Could not save final status/comment for run %d", ctx.run_number)
 
     def action_abort(self) -> None:
         if self._measurement_running and not self._stop_event.is_set():
@@ -671,6 +726,13 @@ class RunScreen(Screen):
             self.action_abort()
         elif event.button.id == "back_btn":
             self.app.pop_screen()
+
+    def _make_on_point(self, series_index: int, series_label: Optional[str]):
+        def _cb(record: dict) -> None:
+            record["series_index"] = series_index
+            record["series_label"] = series_label
+            self.app.call_from_thread(self._on_point, record)
+        return _cb
 
     @work(thread=True, exclusive=True)
     def do_run(self) -> None:
@@ -694,29 +756,78 @@ class RunScreen(Screen):
                 magnet = connect_magnet(plan.magnet_cfg)
                 self._set_status_threadsafe("Connecting gaussmeter …")
                 gaussmeter = connect_gaussmeter(plan.gauss_cfg)
-                points = [
-                    FieldPoint(
-                        magnet_current_A=I,
-                        set_action=lambda I=I: set_magnet_current(magnet, plan.magnet_cfg, I),
-                    )
-                    for I in plan.currents_A
-                ]
-            else:
-                points = [FieldPoint()]
 
-            self._set_status_threadsafe("Running measurement …")
-            write_csv = make_incremental_writer(
-                plan.run_ctx.raw_path,
-                lambda records: build_header_fields(plan, records, status="in_progress", comment=""),
-            )
-            run_measurement(
-                source, voltmeter, plan.src_cfg, plan.acq_cfg, points,
-                stop_event=self._stop_event,
-                on_point=lambda record: self.app.call_from_thread(self._on_point, record),
-                gaussmeter=gaussmeter, gauss_cfg=plan.gauss_cfg,
-                temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg,
-                write_csv=write_csv,
-            )
+            for series_idx, I_sense in enumerate(plan.series_values):
+                if self._stop_event.is_set():
+                    break
+
+                label = f"I={I_sense:g}A" if len(plan.series_values) > 1 else None
+                plan.src_cfg.sense_current_A = I_sense
+
+                # A fresh RunContext (own run number, own file) EVERY
+                # iteration -- never reuse one across the sense-current
+                # series, or every file silently inherits the first
+                # iteration's run number.
+                key_axis = ("current_A", I_sense) if len(plan.series_values) > 1 else None
+                ctx = allocate_run(
+                    _DATA_DIR, plan.sample, plan.device, MEASUREMENT_TYPE,
+                    temperature_setpoint_K=plan.temperature_setpoint_K,
+                    key_axis=key_axis, series=plan.series,
+                )
+                self._run_contexts.append(ctx)
+                plan.acq_cfg.output_file = str(ctx.raw_path)
+                write_csv = make_incremental_writer(
+                    ctx.raw_path,
+                    lambda records, _ctx=ctx, _I=I_sense: build_header_fields(
+                        plan, _ctx, records, status="in_progress", comment="",
+                        extra={"sense_current_A": _I},
+                    ),
+                )
+
+                if magnet is not None and plan.currents_A is not None:
+                    points = [
+                        FieldPoint(
+                            magnet_current_A=I,
+                            set_action=lambda I=I: set_magnet_current(magnet, plan.magnet_cfg, I),
+                        )
+                        for I in plan.currents_A
+                    ]
+                else:
+                    points = [FieldPoint()]
+
+                status = "Running measurement …" if len(plan.series_values) == 1 \
+                    else f"Running measurement (I={I_sense:g} A) …"
+                self._set_status_threadsafe(status)
+                iter_error: Optional[BaseException] = None
+                try:
+                    run_measurement(
+                        source, voltmeter, plan.src_cfg, plan.acq_cfg, points,
+                        stop_event=self._stop_event,
+                        on_point=self._make_on_point(series_idx, label),
+                        gaussmeter=gaussmeter, gauss_cfg=plan.gauss_cfg,
+                        temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg,
+                        write_csv=write_csv,
+                    )
+                except Exception as exc:
+                    iter_error = exc
+
+                # Finalize THIS iteration's header/index row UNCONDITIONALLY,
+                # right now -- never gated on the end-of-session status/
+                # comment prompt, so an aborted/crashed session never leaves
+                # a file stuck at "in_progress".
+                iter_status = "error" if iter_error is not None \
+                    else ("aborted" if self._stop_event.is_set() else "completed")
+                iter_records = [r for r in self._records if r.get("series_index", 0) == series_idx]
+                header_fields = build_header_fields(
+                    plan, ctx, iter_records, status=iter_status, comment="",
+                    extra={"sense_current_A": I_sense},
+                )
+                write_record(ctx.raw_path, iter_records, header_fields)
+                finalize_index_row(_DATA_DIR, ctx.sample, ctx.run_number, header_fields)
+
+                if iter_error is not None:
+                    raise iter_error
+
             final = "Measurement aborted." if self._stop_event.is_set() else "Measurement complete."
         except Exception as exc:
             log.exception("Measurement failed")
@@ -818,10 +929,11 @@ class DCHallMeasurementApp(App):
                 with Vertical(classes="param-grid"):
                     yield card(
                         "Source (Keithley 6221)",
-                        field("sense_current_A", "Sense current (A)",
-                              DEFAULTS["sense_current_A"],
-                              hint="Reversed +I/-I each rep to cancel thermal-EMF offsets.",
-                              validators=[Number(failure_description="must be a number")]),
+                        field("sense_current_values", "Sense current (A)",
+                              DEFAULTS["sense_current_values"], kind="text",
+                              hint="Reversed +I/-I each rep to cancel thermal-EMF offsets. "
+                                   "Single value, or comma-separated list — one complete "
+                                   "measurement runs per value, each saved to its own file."),
                         field("compliance_V", "Compliance voltage (V)",
                               DEFAULTS["compliance_V"],
                               validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
@@ -1020,6 +1132,14 @@ class DCHallMeasurementApp(App):
         state["enable_temperature"] = self.query_one("#enable_temperature", Switch).value
         sample_value = self.query_one("#sample_select", Select).value
         state["sample"] = sample_value if sample_value not in (None, Select.BLANK) else ""
+
+        state["sense_current_list"] = []
+        state["sense_current_parse_error"] = None
+        try:
+            state["sense_current_list"] = parse_value_list(state["sense_current_values"])
+        except ValueError as exc:
+            state["sense_current_parse_error"] = str(exc)
+
         return state, errors
 
     # ── Reactivity ───────────────────────────────────────────────────────────
@@ -1093,7 +1213,7 @@ class DCHallMeasurementApp(App):
     def _build_plan(self, state: dict) -> MeasurementPlan:
         src_cfg = SourceConfig(
             visa_resource=state["source_visa_resource"],
-            sense_current_A=state["sense_current_A"],
+            sense_current_A=state["sense_current_list"][0],
             compliance_V=state["compliance_V"],
             source_delay_s=state["source_delay_s"],
         )
@@ -1102,14 +1222,10 @@ class DCHallMeasurementApp(App):
             nplc=state["nplc"],
             auto_range=state["auto_range"],
         )
-        run_ctx = allocate_run(
-            _DATA_DIR, state["sample"], state["device"], MEASUREMENT_TYPE,
-            temperature_setpoint_K=state["temperature_setpoint_K"],
-        )
         acq_cfg = AcquisitionConfig(
             settling_time_s=state["settling_time_s"],
             n_reversals=state["n_reversals"],
-            output_file=str(run_ctx.raw_path),
+            output_file="",  # overwritten per series iteration
         )
 
         magnet_cfg = None
@@ -1143,7 +1259,6 @@ class DCHallMeasurementApp(App):
                 )
 
         header_extra = {
-            "sense_current_A": state["sense_current_A"],
             "compliance_V": state["compliance_V"],
             "n_reversals": state["n_reversals"],
             "settling_time_s": state["settling_time_s"],
@@ -1151,12 +1266,20 @@ class DCHallMeasurementApp(App):
         if state["enable_sweep"]:
             header_extra["field_sweep_A"] = [state["i_min_A"], state["i_max_A"], state["step_A"]]
 
+        # A "series" tag only means something for an actual family of runs
+        # (>1 sense current) -- a single-current run gets no series tag.
+        series = ""
+        if len(state["sense_current_list"]) > 1:
+            series = (f"{state['sample']}_{state['device']}_{MEASUREMENT_TYPE}_"
+                      f"{datetime.now():%Y%m%dT%H%M%S}")
+
         return MeasurementPlan(
             src_cfg=src_cfg, volt_cfg=volt_cfg, acq_cfg=acq_cfg,
             magnet_cfg=magnet_cfg, gauss_cfg=gauss_cfg, currents_A=currents_A,
-            temp_cfg=temp_cfg, run_ctx=run_ctx,
+            sense_currents_A=state["sense_current_list"],
+            temp_cfg=temp_cfg, sample=state["sample"], device=state["device"],
             temperature_setpoint_K=state["temperature_setpoint_K"],
-            cooldown=state["cooldown"], header_extra=header_extra,
+            cooldown=state["cooldown"], header_extra=header_extra, series=series,
         )
 
 
