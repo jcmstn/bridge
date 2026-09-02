@@ -107,6 +107,7 @@ def build_plan(state: dict) -> MeasurementPlan:
     )
     acq_cfg = AcquisitionConfig(
         settling_time_s=state["settling_time_s"], n_averages=int(state["n_averages"]),
+        field_settle_tolerance_mT=state["field_settle_tolerance_mT"],
         output_file=str(run_ctx.raw_path),
     )
 
@@ -301,6 +302,10 @@ def page() -> None:
                         "Field readings averaged per point", float(d("gaussmeter_n_averages")), integer=True)
                     inputs["gaussmeter_read_delay_s"] = num_field(
                         "Delay between readings (s)", float(d("gaussmeter_read_delay_s")))
+                    inputs["field_settle_tolerance_mT"] = num_field(
+                        "Field-settle tolerance (mT)", float(d("field_settle_tolerance_mT")),
+                        hint="Advanced: after each magnet step, wait until a short window of "
+                             "gaussmeter readings spans less than this before the settling time.")
 
                 with stable_card("Temperature controller"):
                     inputs["temperature_visa_resource"] = text_field("MercuryiTC VISA resource", d("temperature_visa_resource"))
@@ -534,7 +539,9 @@ def page() -> None:
                     gaussmeter = connect_gaussmeter(plan.gauss_cfg)
                     points = [
                         MeasurementPoint(magnet_current_A=I,
-                                         set_action=lambda daq, I=I: set_magnet_current(magnet, plan.magnet_cfg, I))
+                                         set_action=lambda daq, I=I: set_magnet_current(
+                            magnet, plan.magnet_cfg, I, gaussmeter, plan.gauss_cfg,
+                            plan.acq_cfg.field_settle_tolerance_mT, stop_event))
                         for I in plan.currents_A
                     ]
                 else:
@@ -544,7 +551,9 @@ def page() -> None:
                     cb.on_status("Phase calibration: nulling 1f Y (leader demod phaseshift) …")
                     if magnet is not None and plan.phase_cal_current_A is not None:
                         log.info("Phase calibration: ramping magnet to %.4f A ...", plan.phase_cal_current_A)
-                        set_magnet_current(magnet, plan.magnet_cfg, plan.phase_cal_current_A)
+                        set_magnet_current(magnet, plan.magnet_cfg, plan.phase_cal_current_A,
+                                           gaussmeter, plan.gauss_cfg,
+                                           plan.acq_cfg.field_settle_tolerance_mT, stop_event)
                         time.sleep(plan.acq_cfg.settling_time_s)
                     result = auto_null_phase(
                         daq, plan.demod1_cfg, n_averages=plan.phase_cal_n_averages,

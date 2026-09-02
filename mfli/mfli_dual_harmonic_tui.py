@@ -140,6 +140,7 @@ DEFAULTS: dict = {
     "input_range_2f_V": "1.0",
     "sample_rate_Hz": "857.0",
     "settling_time_s": "15",
+    "field_settle_tolerance_mT": "0.02",
     "n_averages": "50",
     "device": "",
     "cooldown": "",
@@ -180,6 +181,7 @@ NUMERIC_FIELDS: dict = {
     "input_range_2f_V": float,
     "sample_rate_Hz": float,
     "settling_time_s": float,
+    "field_settle_tolerance_mT": float,
     "n_averages": int,
     "current_limit_A": float,
     "voltage_compliance_V": float,
@@ -207,6 +209,7 @@ MAGNET_FIELD_IDS = [
     "visa_resource", "current_limit_A", "voltage_compliance_V",
     "ramp_step_A", "ramp_delay_s", "i_min_A", "i_max_A", "n_points",
     "gaussmeter_visa_resource", "gaussmeter_n_averages", "gaussmeter_read_delay_s",
+    "field_settle_tolerance_mT",
 ]
 TEMPERATURE_FIELD_IDS = ["temperature_visa_resource", "temperature_sensor_uids"]
 
@@ -451,6 +454,13 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         )
         info.append("Field measured live at each point via Lake Shore 475 Gaussmeter "
                      f"({state['gaussmeter_visa_resource']})")
+        tol_mT = state["field_settle_tolerance_mT"]
+        if tol_mT <= 0:
+            warnings.append("Field-settle tolerance is 0 — every magnet step will wait the "
+                             "full settle timeout before acquiring.")
+        elif tol_mT < 0.01:
+            warnings.append(f"Field-settle tolerance {tol_mT:g} mT is below the 475's typical "
+                             "reading noise — points may stall until the settle timeout.")
         info.append(f"Estimated total run time ≈ {format_duration(total_points * per_point_s)}")
     else:
         info.append("Single point — no field sweep, magnet untouched.")
@@ -844,7 +854,9 @@ class RunScreen(Screen):
                 points = [
                     MeasurementPoint(
                         magnet_current_A=I,
-                        set_action=lambda daq, I=I: set_magnet_current(magnet, plan.magnet_cfg, I),
+                        set_action=lambda daq, I=I: set_magnet_current(
+                            magnet, plan.magnet_cfg, I, gaussmeter, plan.gauss_cfg,
+                            plan.acq_cfg.field_settle_tolerance_mT, self._stop_event),
                     )
                     for I in plan.currents_A
                 ]
@@ -858,7 +870,9 @@ class RunScreen(Screen):
                 if magnet is not None and plan.phase_cal_current_A is not None:
                     log.info("Phase calibration: ramping magnet to %.4f A ...",
                              plan.phase_cal_current_A)
-                    set_magnet_current(magnet, plan.magnet_cfg, plan.phase_cal_current_A)
+                    set_magnet_current(magnet, plan.magnet_cfg, plan.phase_cal_current_A,
+                                       gaussmeter, plan.gauss_cfg,
+                                       plan.acq_cfg.field_settle_tolerance_mT, self._stop_event)
                     time.sleep(plan.acq_cfg.settling_time_s)
                 result = auto_null_phase(
                     daq, plan.demod1_cfg,
@@ -1115,6 +1129,12 @@ class MFLIDualHarmonicApp(App):
                               validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
                         field("gaussmeter_read_delay_s", "Delay between readings (s)",
                               DEFAULTS["gaussmeter_read_delay_s"]),
+                        field("field_settle_tolerance_mT", "Field-settle tolerance (mT)",
+                              DEFAULTS["field_settle_tolerance_mT"],
+                              hint="Advanced: after each magnet step, wait until a short "
+                                   "window of gaussmeter readings spans less than this before "
+                                   "the settling time above. Raise if points stall.",
+                              validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
                         muted=True,
                     )
                     yield card(
@@ -1401,6 +1421,7 @@ class MFLIDualHarmonicApp(App):
         )
         acq_cfg = AcquisitionConfig(
             settling_time_s=state["settling_time_s"],
+            field_settle_tolerance_mT=state["field_settle_tolerance_mT"],
             n_averages=state["n_averages"],
             output_file=str(run_ctx.raw_path),
         )

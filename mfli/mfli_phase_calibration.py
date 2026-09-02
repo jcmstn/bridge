@@ -113,6 +113,9 @@ class SweepConfig:
     n_points: int          = 11     # points per sweep direction (see bidirectional_current_sweep)
     settling_time_s: float = 1.5    # dead time after each magnet step
     n_averages: int        = 20     # demod samples averaged per point
+    field_settle_tolerance_mT: float = 0.02  # passed to set_magnet_current(): field counts
+                                    # as settled once a short window of gaussmeter readings
+                                    # spans no more than this, before settling_time_s
 
 
 @dataclass
@@ -239,7 +242,8 @@ def run_field_sweep_diagnostic(
             break
 
         log.info("── Sweep point %d / %d   I_magnet=%.4f A ──────────────────", idx + 1, len(currents_A), I)
-        set_magnet_current(magnet, magnet_cfg, I)
+        set_magnet_current(magnet, magnet_cfg, I, gaussmeter, gauss_cfg,
+                           sweep_cfg.field_settle_tolerance_mT, stop_event)
         time.sleep(sweep_cfg.settling_time_s)
 
         d1 = acquire_averaged(daq, demod1_cfg, sweep_cfg.n_averages)
@@ -517,7 +521,8 @@ def run_phase_calibration(
             on_status(msg)
 
     status(f"Ramping magnet to calibration point {calibration_current_A:.4f} A ...")
-    set_magnet_current(magnet, magnet_cfg, calibration_current_A)
+    set_magnet_current(magnet, magnet_cfg, calibration_current_A, gaussmeter, gauss_cfg,
+                       sweep_cfg.field_settle_tolerance_mT, stop_event)
     time.sleep(sweep_cfg.settling_time_s)
 
     status("Nulling 1f Y quadrature (leader demod phaseshift) ...")

@@ -115,6 +115,7 @@ def build_plan(state: dict) -> CalibrationPlan:
     sweep_cfg = SweepConfig(
         i_min_A=state["i_min_A"], i_max_A=state["i_max_A"], n_points=int(state["n_points"]),
         settling_time_s=state["sweep_settling_time_s"], n_averages=int(state["sweep_n_averages"]),
+        field_settle_tolerance_mT=state["field_settle_tolerance_mT"],
     )
     amplitude_check_cfg = AmplitudeCheckConfig(
         enabled=state["enable_amplitude_check"], amplitudes_V=state["amplitudes_V"] or [0.05, 0.1],
@@ -316,6 +317,10 @@ def page() -> None:
                         "Field readings averaged per point", float(d("gaussmeter_n_averages")), integer=True)
                     inputs["gaussmeter_read_delay_s"] = num_field(
                         "Delay between readings (s)", float(d("gaussmeter_read_delay_s")))
+                    inputs["field_settle_tolerance_mT"] = num_field(
+                        "Field-settle tolerance (mT)", float(d("field_settle_tolerance_mT")),
+                        hint="Advanced: after each magnet step, wait until a short window of "
+                             "gaussmeter readings spans less than this before the settling time.")
 
                 with stable_card("Sweep timing & hold check"):
                     inputs["sweep_settling_time_s"] = num_field(

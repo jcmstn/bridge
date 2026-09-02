@@ -154,6 +154,7 @@ DEFAULTS: dict = {
     "ramp_step_A": "0.1",
     "ramp_delay_s": "0.05",
     "field_settle_s": "1.0",
+    "field_settle_tolerance_mT": "0.02",
     "gaussmeter_visa_resource": "GPIB0::12::INSTR",
     "gaussmeter_n_averages": "10",
     "gaussmeter_read_delay_s": "0.05",
@@ -180,6 +181,7 @@ NUMERIC_FIELDS: dict = {
     "ramp_step_A": float,
     "ramp_delay_s": float,
     "field_settle_s": float,
+    "field_settle_tolerance_mT": float,
     "gaussmeter_n_averages": int,
     "gaussmeter_read_delay_s": float,
 }
@@ -190,7 +192,7 @@ TEXT_FIELDS = ["source_visa_resource", "voltmeter_visa_resource", "gate_visa_res
 OPTIONAL_NUMERIC_FIELDS = ["temperature_setpoint_K"]
 FIELD_FIELD_IDS = [
     "magnet_visa_resource", "current_limit_A", "voltage_compliance_V",
-    "ramp_step_A", "ramp_delay_s", "field_settle_s",
+    "ramp_step_A", "ramp_delay_s", "field_settle_s", "field_settle_tolerance_mT",
     "gaussmeter_visa_resource", "gaussmeter_n_averages", "gaussmeter_read_delay_s",
     "field_current_values",
 ]
@@ -253,6 +255,7 @@ class MeasurementPlan:
     gauss_cfg: Optional[GaussmeterConfig] = None
     field_currents_A: Optional[List[float]] = None
     field_settle_s: float = 1.0
+    field_settle_tolerance_mT: float = 0.02
     temp_cfg: Optional[TemperatureControllerConfig] = None
 
     @property
@@ -404,6 +407,13 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         elif n_series == 1:
             info.append(f"Field parked at I_magnet={field_list[0]:g} A "
                          "(actual field measured live via Lake Shore 475)")
+        tol_mT = state["field_settle_tolerance_mT"]
+        if tol_mT <= 0:
+            warnings.append("Field-settle tolerance is 0 — parking the magnet will wait the "
+                             "full settle timeout every time.")
+        elif tol_mT < 0.01:
+            warnings.append(f"Field-settle tolerance {tol_mT:g} mT is below the 475's typical "
+                             "reading noise — parking may stall until the settle timeout.")
         total_points = n_sweep_points * max(1, n_series)
         settle_overhead = max(1, n_series) * state["field_settle_s"]
         info.append(f"Estimated total run time ≈ {format_duration(total_points * per_point_s + settle_overhead)}")
@@ -743,7 +753,9 @@ class RunScreen(Screen):
                     label = f"I_mag={current_A:g}A"
                     key_axis = ("current_A", current_A)
                     self._set_status_threadsafe(f"Parking magnet at {current_A:g} A …")
-                    set_magnet_current(magnet, plan.magnet_cfg, current_A)
+                    set_magnet_current(magnet, plan.magnet_cfg, current_A,
+                                       gaussmeter, plan.gauss_cfg,
+                                       plan.field_settle_tolerance_mT, self._stop_event)
                     time.sleep(plan.field_settle_s)
                     field_mT = read_field_mT(gaussmeter, plan.gauss_cfg)
                     log.info("Field parked: I_magnet=%.4f A  B=%.4f mT (measured)", current_A, field_mT)
@@ -994,6 +1006,13 @@ class DCGateSweepApp(App):
                         field("ramp_delay_s", "Ramp delay (s)", DEFAULTS["ramp_delay_s"]),
                         field("field_settle_s", "Settling time after parking field (s)",
                               DEFAULTS["field_settle_s"]),
+                        field("field_settle_tolerance_mT", "Field-settle tolerance (mT)",
+                              DEFAULTS["field_settle_tolerance_mT"],
+                              hint="Advanced: after parking the magnet, wait until a short "
+                                   "window of gaussmeter readings spans less than this before "
+                                   "the dwell above. Raise it if parking stalls; lower for "
+                                   "tighter field control.",
+                              validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
                         muted=True,
                     )
                     yield card(
@@ -1275,6 +1294,7 @@ class DCGateSweepApp(App):
             cooldown=state["cooldown"], header_extra=header_extra, series=series,
             magnet_cfg=magnet_cfg, gauss_cfg=gauss_cfg, field_currents_A=field_currents_A,
             field_settle_s=state["field_settle_s"],
+            field_settle_tolerance_mT=state["field_settle_tolerance_mT"],
             temp_cfg=temp_cfg,
         )
 

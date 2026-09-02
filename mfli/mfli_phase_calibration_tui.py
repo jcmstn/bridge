@@ -151,6 +151,7 @@ DEFAULTS: dict = {
     "i_max_A": "20",
     "n_points": "11",
     "sweep_settling_time_s": "1.5",
+    "field_settle_tolerance_mT": "0.02",
     "sweep_n_averages": "20",
     "hold_tol_ratio": "0.02",
     "null_n_averages": "20",
@@ -193,6 +194,7 @@ NUMERIC_FIELDS: dict = {
     "i_max_A": float,
     "n_points": int,
     "sweep_settling_time_s": float,
+    "field_settle_tolerance_mT": float,
     "sweep_n_averages": int,
     "hold_tol_ratio": float,
     "null_n_averages": int,
@@ -980,6 +982,12 @@ class MFLIPhaseCalibrationApp(App):
                               DEFAULTS["sweep_settling_time_s"],
                               hint="Rule of thumb: ≥ 5 × time constant.",
                               validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
+                        field("field_settle_tolerance_mT", "Field-settle tolerance (mT)",
+                              DEFAULTS["field_settle_tolerance_mT"],
+                              hint="Advanced: after each magnet step, wait until a short window "
+                                   "of gaussmeter readings spans less than this before the "
+                                   "settling time above.",
+                              validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
                         field("sweep_n_averages", "Samples to average per sweep point",
                               DEFAULTS["sweep_n_averages"], kind="integer",
                               validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
@@ -1246,6 +1254,7 @@ class MFLIPhaseCalibrationApp(App):
         sweep_cfg = SweepConfig(
             i_min_A=state["i_min_A"], i_max_A=state["i_max_A"], n_points=state["n_points"],
             settling_time_s=state["sweep_settling_time_s"], n_averages=state["sweep_n_averages"],
+            field_settle_tolerance_mT=state["field_settle_tolerance_mT"],
         )
         amplitude_check_cfg = AmplitudeCheckConfig(
             enabled=state["enable_amplitude_check"],

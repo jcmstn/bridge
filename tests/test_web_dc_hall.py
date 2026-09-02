@@ -28,7 +28,7 @@ def _state(data_dir: Path, **overrides) -> dict:
         voltage_compliance_V=15.0, ramp_step_A=0.1, ramp_delay_s=0.05,
         i_min_A=-20.0, i_max_A=20.0, step_A=2.0, bidirectional_sweep=True,
         gaussmeter_visa_resource="GPIB0::12::INSTR", gaussmeter_n_averages=10,
-        gaussmeter_read_delay_s=0.05, enable_temperature=False,
+        gaussmeter_read_delay_s=0.05, field_settle_tolerance_mT=0.02, enable_temperature=False,
         temperature_visa_resource="", temperature_sensor_uids="",
         sample="A", data_dir=str(data_dir),
     )

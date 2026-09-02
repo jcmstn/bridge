@@ -141,6 +141,7 @@ DEFAULTS: dict = {
     "nplc": "5",
     "auto_range": True,
     "settling_time_s": "1.0",
+    "field_settle_tolerance_mT": "0.02",
     "reversal_enabled": True,
     "n_averages": "5",
     "device": "",
@@ -172,6 +173,7 @@ NUMERIC_FIELDS: dict = {
     "source_delay_s": float,
     "nplc": float,
     "settling_time_s": float,
+    "field_settle_tolerance_mT": float,
     "n_averages": int,
     "gate_voltage_limit_V": float,
     "gate_compliance_current_A": float,
@@ -451,6 +453,13 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     info.append(f"Field sweep: {direction}, step={state['step_A']:g} A, {n_sweep_points} points")
     info.append("Field measured live at each point via Lake Shore 475 Gaussmeter "
                  f"({state['gaussmeter_visa_resource']})")
+    tol_mT = state["field_settle_tolerance_mT"]
+    if tol_mT <= 0:
+        warnings.append("Field-settle tolerance is 0 — every magnet step will wait the "
+                         "full settle timeout before acquiring.")
+    elif tol_mT < 0.01:
+        warnings.append(f"Field-settle tolerance {tol_mT:g} mT is below the 475's typical "
+                         "reading noise — points may stall until the settle timeout.")
 
     total_points = n_sweep_points * max(1, n_current_series) * max(1, n_gate_series)
     info.append(f"Estimated total run time ≈ {format_duration(total_points * per_point_s)}")
@@ -846,7 +855,9 @@ class RunScreen(Screen):
                 points = [
                     FieldPoint(
                         magnet_current_A=I,
-                        set_action=lambda I=I: set_magnet_current(magnet, plan.magnet_cfg, I),
+                        set_action=lambda I=I: set_magnet_current(
+                            magnet, plan.magnet_cfg, I, gaussmeter, plan.gauss_cfg,
+                            plan.acq_cfg.field_settle_tolerance_mT, self._stop_event),
                     )
                     for I in plan.currents_A
                 ]
@@ -1103,6 +1114,13 @@ class DCSpinValveApp(App):
                               validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
                         field("gaussmeter_read_delay_s", "Delay between readings (s)",
                               DEFAULTS["gaussmeter_read_delay_s"]),
+                        field("field_settle_tolerance_mT", "Field-settle tolerance (mT)",
+                              DEFAULTS["field_settle_tolerance_mT"],
+                              hint="Advanced: after each magnet step, the field counts as "
+                                   "settled once a short window of gaussmeter readings spans "
+                                   "less than this. Raise it if points stall waiting; lower "
+                                   "for tighter field control before acquiring.",
+                              validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
                         field("temperature_sensor_uids", "MercuryiTC sensor board UID(s)",
                               DEFAULTS["temperature_sensor_uids"], kind="text",
                               hint="1-2 UIDs, comma-separated."),
@@ -1337,6 +1355,7 @@ class DCSpinValveApp(App):
         )
         acq_cfg = AcquisitionConfig(
             settling_time_s=state["settling_time_s"],
+            field_settle_tolerance_mT=state["field_settle_tolerance_mT"],
             reversal_enabled=state["reversal_enabled"],
             n_averages=state["n_averages"],
             output_file=str(_DATA_DIR / "dc_spin_valve.csv"),  # placeholder — overwritten per series
