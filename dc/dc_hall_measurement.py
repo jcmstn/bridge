@@ -107,7 +107,12 @@ log = logging.getLogger(__name__)
 @dataclass
 class AcquisitionConfig:
     """Timing and averaging parameters."""
-    settling_time_s: float = 1.0      # Dead-time after a field change  [s]
+    settling_time_s: float = 1.0      # Physics-equilibration dwell AFTER the field
+                                      # has settled at its final value  [s]
+    field_settle_tolerance_mT: float = 0.02  # Passed to set_magnet_current(): the field
+                                      # counts as settled once a short window of
+                                      # gaussmeter readings spans no more than this.
+                                      # Exposed in the TUI/web "Advanced" section.
     n_reversals: int       = 5        # +I/-I reversal pairs averaged per point
     output_file: str       = "dc_hall.csv"
 
@@ -203,8 +208,10 @@ def run_measurement(
             log.info("── Point %d / %d ──────────────────────────────────", idx + 1, len(points))
 
         # ── 1. Apply external parameter ────────────────────────────────────
-        if pt.set_action is not None:
-            pt.set_action()
+        # set_action (for a field point, set_magnet_current) now blocks until
+        # the magnet current and the measured field have both settled, and
+        # returns a provenance dict folded into the record below.
+        settle_info = pt.set_action() if pt.set_action is not None else None
 
         # ── 2. Settle ──────────────────────────────────────────────────────
         settle = pt.settling_override_s if pt.settling_override_s is not None \
@@ -245,6 +252,13 @@ def run_measurement(
             "hall_resistance_ohm": r_hall,
             "n_reversals":      hv["n_reversals"],
         }
+        if isinstance(settle_info, dict):
+            record.update({
+                "current_settled":  settle_info.get("current_settled"),
+                "field_settled":    settle_info.get("field_settled"),
+                "settle_elapsed_s": settle_info.get("settle_elapsed_s"),
+                "i_measured_A":     settle_info.get("i_measured_A"),
+            })
         records.append(record)
 
         if on_point is not None:
@@ -330,7 +344,9 @@ def main() -> None:
     points = [
         FieldPoint(
             magnet_current_A = I,
-            set_action = lambda I=I: set_magnet_current(magnet, magnet_cfg, I),
+            set_action = lambda I=I: set_magnet_current(
+                magnet, magnet_cfg, I, gaussmeter, gauss_cfg,
+                acq_cfg.field_settle_tolerance_mT),
         )
         for I in currents_A
     ]

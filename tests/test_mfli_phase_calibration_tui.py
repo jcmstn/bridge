@@ -24,7 +24,7 @@ def _state(**overrides) -> dict:
         visa_resource="GPIB0::6::INSTR", current_limit_A=35.0,
         voltage_compliance_V=15.0, ramp_step_A=0.1, ramp_delay_s=0.05,
         gaussmeter_visa_resource="GPIB0::12::INSTR", gaussmeter_n_averages=10,
-        gaussmeter_read_delay_s=0.05,
+        gaussmeter_read_delay_s=0.05, field_settle_tolerance_mT=0.02,
         calibration_current_A=20.0, i_min_A=-20.0, i_max_A=20.0, n_points=11,
         sweep_settling_time_s=1.5, sweep_n_averages=20, hold_tol_ratio=0.02,
         null_n_averages=20, null_max_iterations=5, null_tol_deg=0.02,

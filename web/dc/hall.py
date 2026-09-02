@@ -98,6 +98,7 @@ def build_plan(state: dict) -> MeasurementPlan:
     )
     acq_cfg = AcquisitionConfig(
         settling_time_s=state["settling_time_s"],
+        field_settle_tolerance_mT=state["field_settle_tolerance_mT"],
         n_reversals=int(state["n_reversals"]),
         output_file="",  # overwritten per series iteration
     )
@@ -298,6 +299,11 @@ def page() -> None:
                         "Field readings averaged per point", float(d("gaussmeter_n_averages")), integer=True)
                     inputs["gaussmeter_read_delay_s"] = num_field(
                         "Delay between readings (s)", float(d("gaussmeter_read_delay_s")))
+                    inputs["field_settle_tolerance_mT"] = num_field(
+                        "Field-settle tolerance (mT)", float(d("field_settle_tolerance_mT")),
+                        hint="Advanced: after each magnet step, the field counts as settled "
+                             "once a short window of gaussmeter readings spans less than this. "
+                             "Raise it if points stall; lower for tighter field control.")
                     inputs["temperature_sensor_uids"] = text_field(
                         "Sensor board UID(s)", d("temperature_sensor_uids"),
                         hint="1 or 2 board UIDs, comma-separated, e.g. 'MB1.T1, DB5.T1'.")
@@ -528,7 +534,9 @@ def page() -> None:
                     if magnet is not None and plan.currents_A is not None:
                         points = [
                             FieldPoint(magnet_current_A=I,
-                                       set_action=lambda I=I: set_magnet_current(magnet, plan.magnet_cfg, I))
+                                       set_action=lambda I=I: set_magnet_current(
+                                           magnet, plan.magnet_cfg, I, gaussmeter, plan.gauss_cfg,
+                                           plan.acq_cfg.field_settle_tolerance_mT, stop_event))
                             for I in plan.currents_A
                         ]
                     else:

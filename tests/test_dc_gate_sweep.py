@@ -21,7 +21,7 @@ def _state(**overrides) -> dict:
         enable_field=True, magnet_visa_resource="GPIB0::6::INSTR", current_limit_A=35.0,
         voltage_compliance_V=15.0, ramp_step_A=0.1, ramp_delay_s=0.05, field_settle_s=1.0,
         gaussmeter_visa_resource="GPIB0::12::INSTR", gaussmeter_n_averages=10,
-        gaussmeter_read_delay_s=0.05, field_current_values="0, 1", field_current_list=[0.0, 1.0],
+        gaussmeter_read_delay_s=0.05, field_settle_tolerance_mT=0.02, field_current_values="0, 1", field_current_list=[0.0, 1.0],
         enable_temperature=False, temperature_visa_resource="", temperature_sensor_uids="",
         sample="A",
     )

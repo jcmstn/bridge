@@ -481,6 +481,41 @@ class MagnetConfig:
     ramp_delay_s:         float = 0.05    # Delay between ramp steps  [s]
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Settle detection  ── used by set_magnet_current() below ─────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# ramp_current() only walks the *setpoint*; it returns before the supply's
+# analog output has slewed into the inductive magnet, and long before the
+# iron-core field has stopped drifting (eddy currents + magnetic after-effect).
+# The BOP-GL has no SCPI "output settled / ramp complete" query -- *OPC?/*WAI
+# only sync the command parser, and STAT:OPER:COND has no SETTling bit (its
+# bits are list running/complete, sample complete, CC/CV mode, transient
+# armed/complete, waiting-for-trigger). So set_magnet_current() closes the gap
+# itself: poll MEAS:CURR? until the output reaches the setpoint, then (if a
+# gaussmeter is supplied) poll the field until it stops drifting.
+#
+# These constants are deliberately NOT surfaced in the TUI / web forms -- edit
+# them here if a particular rig needs it. The one exception is the field
+# tolerance, which set_magnet_current() takes as an argument so the TUI/web
+# "Advanced" section can override FIELD_SETTLE_TOLERANCE_MT per system.
+CURRENT_SETTLE_REL        = 0.05    # readback band as a fraction of |setpoint|
+CURRENT_SETTLE_TIMEOUT_S  = 10.0    # give up waiting on MEAS:CURR? after this  [s]
+FIELD_SETTLE_TOLERANCE_MT = 0.02    # default window span (max-min) that counts as settled  [mT]
+FIELD_SETTLE_WINDOW_N     = 4       # readings that must all fall within tolerance
+FIELD_SETTLE_POLL_S       = 0.25    # delay between field readings  [s]  (→ ~1 s look-back)
+FIELD_SETTLE_TIMEOUT_S    = 30.0    # give up waiting on the field after this  [s]
+
+_UNIT_TO_MT = {"T": 1e3, "G": 1e-1}   # GaussmeterConfig.unit → mT
+
+
+def _window_settled(readings: list, tol: float) -> bool:
+    """True once the last FIELD_SETTLE_WINDOW_N readings span <= tol (max - min)."""
+    if len(readings) < FIELD_SETTLE_WINDOW_N:
+        return False
+    window = readings[-FIELD_SETTLE_WINDOW_N:]
+    return (max(window) - min(window)) <= tol
+
+
 def connect_magnet(cfg: MagnetConfig) -> "KepkoBOPGL":
     """
     Open a VISA session to the Kepco BOP-GL and arm it as a current source.
@@ -508,14 +543,107 @@ def connect_magnet(cfg: MagnetConfig) -> "KepkoBOPGL":
     return psu
 
 
-def set_magnet_current(psu: "KepkoBOPGL", cfg: MagnetConfig, current_A: float) -> None:
-    """Ramp the magnet current to `current_A`, enforcing the software limit in `cfg`."""
+def set_magnet_current(
+    psu: "KepkoBOPGL",
+    cfg: MagnetConfig,
+    current_A: float,
+    gaussmeter=None,
+    gauss_cfg=None,
+    field_settle_tolerance_mT: "float | None" = None,
+    stop_event=None,
+) -> dict:
+    """
+    Ramp the magnet current to `current_A`, then wait until it has actually
+    settled before returning.
+
+    Two waits, both bounded by a timeout (a slow rig degrades to the old
+    behaviour with a logged warning -- it never hangs the measurement):
+
+      1. Poll ``MEAS:CURR?`` until the supply output is within
+         ``max(CURRENT_SETTLE_REL * |current_A|, cfg.ramp_step_A)`` of the
+         setpoint. Always runs.
+
+      2. If `gaussmeter` / `gauss_cfg` are given, poll the field until the
+         last ``FIELD_SETTLE_WINDOW_N`` readings span no more than
+         `field_settle_tolerance_mT` (defaults to
+         ``FIELD_SETTLE_TOLERANCE_MT``). This catches the eddy-current /
+         after-effect drift the current readback can't see.
+
+    The caller's own post-field settling dwell (``settling_time_s``) still
+    belongs *after* this returns -- that one is the physics-equilibration
+    wait once the field has reached its final value.
+
+    `stop_event`, if given, is checked between polls and breaks either wait.
+
+    Returns a provenance dict the measurement loops fold into each CSV row::
+
+        {"current_settled": bool,
+         "field_settled":    bool | None,   # None → no gaussmeter passed
+         "settle_elapsed_s": float,
+         "i_measured_A":     float}
+    """
     if abs(current_A) > cfg.current_limit_A:
         raise ValueError(
             f"Requested current {current_A:.3f} A exceeds configured "
             f"limit ±{cfg.current_limit_A:.3f} A"
         )
     psu.ramp_current(current_A, step=cfg.ramp_step_A, delay=cfg.ramp_delay_s)
+
+    t0 = time.monotonic()
+
+    # ── 1. Wait for the supply output to reach the setpoint ────────────────
+    # Coarse gate only: ramp_current() has already blocked through the whole
+    # stepped setpoint walk, so MEAS:CURR? is usually within band on the
+    # first read. It catches a supply that fell behind (compliance-limited)
+    # during the ramp; the field window below is what actually decides the
+    # field has stopped moving.
+    band = max(CURRENT_SETTLE_REL * abs(current_A), cfg.ramp_step_A)
+    i_meas = float(psu.measure_current)
+    while abs(i_meas - current_A) > band:
+        if stop_event is not None and stop_event.is_set():
+            break
+        if time.monotonic() - t0 > CURRENT_SETTLE_TIMEOUT_S:
+            log.warning(
+                "Magnet current did not settle: I_meas=%.4f A vs set=%.4f A "
+                "(band ±%.4f A) after %.1f s", i_meas, current_A, band,
+                CURRENT_SETTLE_TIMEOUT_S)
+            break
+        time.sleep(cfg.ramp_delay_s)
+        i_meas = float(psu.measure_current)
+    current_settled = abs(i_meas - current_A) <= band
+
+    # ── 2. Wait for the field to stop drifting (gaussmeter) ────────────────
+    field_settled = None
+    if gaussmeter is not None and gauss_cfg is not None:
+        tol = (field_settle_tolerance_mT if field_settle_tolerance_mT is not None
+               else FIELD_SETTLE_TOLERANCE_MT)
+        to_mT = _UNIT_TO_MT[gauss_cfg.unit]
+        readings: list = []
+        tf0 = time.monotonic()
+        while True:
+            readings.append(float(gaussmeter.field) * to_mT)
+            if _window_settled(readings, tol):
+                field_settled = True
+                break
+            if stop_event is not None and stop_event.is_set():
+                field_settled = _window_settled(readings, tol)
+                break
+            if time.monotonic() - tf0 > FIELD_SETTLE_TIMEOUT_S:
+                w = readings[-FIELD_SETTLE_WINDOW_N:]
+                span = (max(w) - min(w)) if len(w) >= FIELD_SETTLE_WINDOW_N else float("nan")
+                log.warning(
+                    "Field did not settle within %.1f s: window span %.4f mT "
+                    "> tol %.4f mT", FIELD_SETTLE_TIMEOUT_S, span, tol)
+                field_settled = False
+                break
+            time.sleep(FIELD_SETTLE_POLL_S)
+
+    return {
+        "current_settled":  current_settled,
+        "field_settled":    field_settled,
+        "settle_elapsed_s": round(time.monotonic() - t0, 3),
+        "i_measured_A":     i_meas,
+    }
 
 
 def shutdown_magnet(psu: "KepkoBOPGL", cfg: MagnetConfig) -> None:

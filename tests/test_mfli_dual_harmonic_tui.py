@@ -29,7 +29,7 @@ def _state(**overrides) -> dict:
         voltage_compliance_V=15.0, ramp_step_A=0.1, ramp_delay_s=0.05,
         i_min_A=-20.0, i_max_A=20.0, n_points=21,
         gaussmeter_visa_resource="GPIB0::12::INSTR", gaussmeter_n_averages=10,
-        gaussmeter_read_delay_s=0.05, enable_temperature=False,
+        gaussmeter_read_delay_s=0.05, field_settle_tolerance_mT=0.02, enable_temperature=False,
         temperature_visa_resource="", temperature_sensor_uids="",
         enable_phase_cal=False, phase_cal_current_A=None,
         phase_cal_n_averages=20, phase_cal_max_iterations=5,

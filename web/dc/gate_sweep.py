@@ -131,7 +131,8 @@ def build_plan(state: dict) -> MeasurementPlan:
         temperature_setpoint_K=state["temperature_setpoint_K"],
         cooldown=state["cooldown"], header_extra=header_extra, series=series,
         magnet_cfg=magnet_cfg, gauss_cfg=gauss_cfg,
-        field_currents_A=field_currents_A, field_settle_s=state["field_settle_s"], temp_cfg=temp_cfg,
+        field_currents_A=field_currents_A, field_settle_s=state["field_settle_s"],
+        field_settle_tolerance_mT=state["field_settle_tolerance_mT"], temp_cfg=temp_cfg,
     )
 
 
@@ -251,6 +252,10 @@ def page() -> None:
                 with stable_card("Gaussmeter & temperature sensors"):
                     inputs["gaussmeter_n_averages"] = num_field("Field readings averaged", float(d("gaussmeter_n_averages")), integer=True)
                     inputs["gaussmeter_read_delay_s"] = num_field("Delay between readings (s)", float(d("gaussmeter_read_delay_s")))
+                    inputs["field_settle_tolerance_mT"] = num_field(
+                        "Field-settle tolerance (mT)", float(d("field_settle_tolerance_mT")),
+                        hint="Advanced: after parking the magnet, wait until a short window of "
+                             "gaussmeter readings spans less than this before the dwell above.")
                     inputs["temperature_sensor_uids"] = text_field("Sensor board UID(s)", d("temperature_sensor_uids"))
 
         with ui.column().classes("w-96 gap-2"):
@@ -457,7 +462,9 @@ def page() -> None:
                     field_mT = None
                     if current_A is not None:
                         cb.on_status(f"Parking magnet at {current_A:g} A …")
-                        set_magnet_current(magnet, plan.magnet_cfg, current_A)
+                        set_magnet_current(magnet, plan.magnet_cfg, current_A,
+                                           gaussmeter, plan.gauss_cfg,
+                                           plan.field_settle_tolerance_mT, stop_event)
                         time.sleep(plan.field_settle_s)
                         field_mT = read_field_mT(gaussmeter, plan.gauss_cfg)
 

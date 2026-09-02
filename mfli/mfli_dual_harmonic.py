@@ -170,6 +170,10 @@ class AcquisitionConfig:
                                       #   default here) — a higher-order filter
                                       #   settles more slowly per time constant.
     n_averages: int        = 50       # Number of independent demod samples to average
+    field_settle_tolerance_mT: float = 0.02  # Passed to set_magnet_current(): the field
+                                      #   counts as settled once a short window of
+                                      #   gaussmeter readings spans no more than this,
+                                      #   before the settling_time_s dwell above.
     output_file: str       = "lockin_data.csv"
 
 
@@ -873,7 +877,9 @@ def main() -> None:
     points = [
         MeasurementPoint(
             magnet_current_A = I,
-            set_action = lambda daq, I=I: set_magnet_current(magnet, magnet_cfg, I),
+            set_action = lambda daq, I=I: set_magnet_current(
+                magnet, magnet_cfg, I, gaussmeter, gauss_cfg,
+                acq_cfg.field_settle_tolerance_mT),
         )
         for I in currents_A
     ]
