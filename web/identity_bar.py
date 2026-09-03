@@ -11,10 +11,10 @@ pinned above the parameter grid instead of buried in a mid-form section.
 Implemented once here rather than duplicated across 7 pages, same as
 web/directory_picker.py and web/sample_picker.py.
 
-The web pages have one field the TUI doesn't: a free-choice save directory
-(directory_picker.py) — it sits on its own full-width row above the
-identity_fields-equivalent 4-column grid, since a filesystem path doesn't
-fit a narrow grid column and the TUI has no equivalent to align with.
+The save-directory field (directory_picker.py) sits on its own full-width
+row above the identity_fields-equivalent 4-column grid, since a filesystem
+path doesn't fit a narrow grid column. The TUIs now have the same field
+(instruments/data_dir.py), laid out the same way.
 """
 
 from __future__ import annotations

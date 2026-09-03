@@ -30,6 +30,10 @@ from typing import Optional
 
 from nicegui import events, ui
 
+# The pure path check lives in instruments/data_dir.py so the TUIs can
+# reuse it without importing NiceGUI. Re-exported here for existing callers.
+from instruments.data_dir import validate_directory  # noqa: F401
+
 
 class LocalDirectoryPicker(ui.dialog):
 
@@ -118,29 +122,6 @@ class LocalDirectoryPicker(ui.dialog):
                     .classes("text-xs px-1 min-w-0")
                 if not is_last:
                     ui.label("/").classes("text-xs text-grey")
-
-
-def validate_directory(raw: str) -> tuple[Optional[str], Optional[str]]:
-    """
-    Validate a save-directory string typed/pasted/picked into a
-    directory_field(). Returns (warning, error) — at most one is not None.
-
-    Never errors on "doesn't exist yet": every run_measurement() already
-    does Path(output_file).parent.mkdir(parents=True, exist_ok=True), so a
-    not-yet-existing directory is fine, just worth a heads-up. Only a
-    missing/relative/non-directory path is a genuine blocking error.
-    """
-    text = raw.strip()
-    if not text:
-        return None, "Save directory is required."
-    path = Path(text).expanduser()
-    if not path.is_absolute():
-        return None, f"'{text}' is not an absolute path."
-    if path.exists() and not path.is_dir():
-        return None, f"'{path}' exists but is not a directory."
-    if not path.exists():
-        return f"'{path}' does not exist yet — it will be created when the run starts.", None
-    return None, None
 
 
 def directory_field(label: str, default: str) -> ui.input:

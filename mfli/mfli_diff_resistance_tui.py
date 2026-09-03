@@ -77,10 +77,12 @@ from mfli.mfli_diff_resistance_vs_bias import (
     shutdown_temperature_controller,
     sync_follower_oscillator,
 )
+from instruments.data_dir import DataDirPickerScreen, validate_directory
 from instruments.data_naming import (
     TEST_SAMPLE,
     RunContext,
     allocate_run,
+    ensure_sample,
     finalize_index_row,
     make_incremental_writer,
     preview_raw_filename,
@@ -98,10 +100,11 @@ log = logging.getLogger("mfli_diff_resistance_tui")
 
 # Data/settings live outside "bridge" (a sibling of it), same convention as
 # mfli_diff_resistance_vs_bias.py, so nothing generated at runtime ends up
-# in the git-tracked source tree. _DATA_DIR doubles as the data-convention
-# "data root" (parent of every {sample}/ folder).
-_DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
-SETTINGS_PATH = _DATA_DIR / "mfli_diff_resistance_tui_settings.json"
+# in the git-tracked source tree. _DEFAULT_DATA_DIR is the fallback data
+# root; the real one is chosen per run in the identity bar's "Data root"
+# field (mirrors the web app) and persisted in the settings file.
+_DEFAULT_DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
+SETTINGS_PATH = _DEFAULT_DATA_DIR / "mfli_diff_resistance_tui_settings.json"
 
 # Locked type code for this measurement (see instruments/data_naming.py) —
 # never deviates.
@@ -156,7 +159,7 @@ NUMERIC_FIELDS: dict = {
     "n_points": int,
 }
 TEXT_FIELDS = ["leader_device", "follower_device", "daq_host", "device", "cooldown",
-               "temperature_visa_resource", "temperature_sensor_uids"]
+               "temperature_visa_resource", "temperature_sensor_uids", "data_dir"]
 # Free-text, blank-allowed: parsed to Optional[float] by hand in parse_state()
 # rather than going through NUMERIC_FIELDS' "blank is an error" casting.
 OPTIONAL_NUMERIC_FIELDS = ["temperature_setpoint_K"]
@@ -221,6 +224,7 @@ class MeasurementPlan:
     header_extra: dict
     temp_cfg: Optional[TemperatureControllerConfig] = None
     series: str = ""
+    data_root: Path = _DEFAULT_DATA_DIR
 
     @property
     def total_points(self) -> int:
@@ -321,6 +325,11 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     errors: list[str] = []
 
     # ── Sample / run identity ───────────────────────────────────────────────
+    dir_warn, dir_err = validate_directory(state.get("data_dir", ""))
+    if dir_err:
+        errors.append(f"Data root: {dir_err}")
+    elif dir_warn:
+        warnings.append(f"Data root: {dir_warn}")
     if not state.get("sample") or state["sample"] == NEW_SAMPLE_SENTINEL:
         errors.append("Choose a sample (or create a new one).")
     if not state.get("device"):
@@ -660,12 +669,12 @@ class RunScreen(Screen):
         header_fields = build_header_fields(self.plan, self._records, status=outcome_status, comment="")
         try:
             write_record(ctx.raw_path, self._records, header_fields)
-            finalize_index_row(_DATA_DIR, ctx.sample, ctx.run_number, header_fields)
+            finalize_index_row(self.plan.data_root, ctx.sample, ctx.run_number, header_fields)
         except Exception:
             log.exception("Could not finalize run record")
 
         try:
-            png_path = proc_path(_DATA_DIR, ctx.sample, ctx.run_str, ctx.device,
+            png_path = proc_path(self.plan.data_root, ctx.sample, ctx.run_str, ctx.device,
                                   MEASUREMENT_TYPE, "plot")
             _save_measurement_png(self._records, png_path)
         except Exception:
@@ -684,7 +693,7 @@ class RunScreen(Screen):
             # only a run that never wrote a point gets a header-only write.
             if self._records or not ctx.raw_path.exists():
                 write_record(ctx.raw_path, self._records, header_fields)
-            finalize_index_row(_DATA_DIR, ctx.sample, ctx.run_number, header_fields)
+            finalize_index_row(self.plan.data_root, ctx.sample, ctx.run_number, header_fields)
         except Exception:
             log.exception("Could not save final status/comment")
 
@@ -778,6 +787,10 @@ class MFLIDiffResistanceApp(App):
     TITLE = "MFLI Differential Resistance vs. Bias"
     SUB_TITLE = "dV/dI · DC bias sweep"
 
+    # Session data root — fallback until _load_settings()/the identity bar's
+    # "Data root" field replaces it. Read in compose(), so it must exist here.
+    data_root: Path = _DEFAULT_DATA_DIR
+
     CSS = """
     #body { height: 1fr; }
     #form { width: 1fr; padding: 1 2; }
@@ -791,6 +804,9 @@ class MFLIDiffResistanceApp(App):
 
     #identity_bar { border: round $accent; padding: 1 2; height: auto; margin-bottom: 1; }
     #filename_preview { margin-bottom: 1; }
+    #data_dir_row { height: 3; margin-bottom: 1; }
+    #data_dir_row Input { width: 1fr; }
+    #data_dir_row Button { margin-left: 1; }
     #identity_fields { layout: grid; grid-size: 4; grid-gutter: 1 2; height: auto; }
     #identity_fields > Vertical { height: auto; }
     .section-title { text-style: bold underline; margin: 1 0; }
@@ -814,10 +830,14 @@ class MFLIDiffResistanceApp(App):
             with VerticalScroll(id="form"):
                 with Vertical(id="identity_bar"):
                     yield Static(id="filename_preview")
+                    with Horizontal(id="data_dir_row"):
+                        yield Input(value=str(_DEFAULT_DATA_DIR), id="data_dir",
+                                    placeholder="Absolute path to the data root")
+                        yield Button("Browse…", id="browse_data_dir")
                     with Vertical(id="identity_fields"):
                         yield Vertical(
                             Label("Sample", classes="field-label"),
-                            Select(sample_options(_DATA_DIR), id="sample_select",
+                            Select(sample_options(self.data_root), id="sample_select",
                                    allow_blank=False, value=TEST_SAMPLE),
                         )
                         yield Vertical(*field("device", "Device (e.g. HB3, SV2)",
@@ -951,15 +971,39 @@ class MFLIDiffResistanceApp(App):
 
     def _refresh_sample_options(self, *, select_value: Optional[str] = None) -> None:
         select = self.query_one("#sample_select", Select)
-        options = sample_options(_DATA_DIR)
+        options = sample_options(self.data_root)
         select.set_options(options)
         if select_value is not None:
             select.value = select_value
 
+    def _sync_data_root(self) -> None:
+        """Adopt the identity bar's "Data root" field when it names an
+        existing directory, and re-list samples from there. Gated on
+        is_dir() so a half-typed path doesn't scatter _test/ folders
+        across the disk (sample_options() creates them)."""
+        path = Path(self.query_one("#data_dir", Input).value.strip()).expanduser()
+        if not path.is_dir():
+            return
+        self.data_root = path.resolve()
+        opts = [v for _, v in sample_options(self.data_root)]
+        cur = self.query_one("#sample_select", Select).value
+        self._refresh_sample_options(select_value=cur if cur in opts else TEST_SAMPLE)
+
+    def _browse_data_dir(self) -> None:
+        start = self.query_one("#data_dir", Input).value.strip() or str(_DEFAULT_DATA_DIR)
+        self.push_screen(DataDirPickerScreen(start), self._on_data_dir_picked)
+
+    def _on_data_dir_picked(self, picked: Optional[str]) -> None:
+        if not picked:
+            return
+        self.query_one("#data_dir", Input).value = picked
+        self._sync_data_root()
+        self.refresh_summary()
+
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "sample_select":
             if event.value == NEW_SAMPLE_SENTINEL:
-                self.push_screen(NewSampleScreen(_DATA_DIR), self._on_new_sample_created)
+                self.push_screen(NewSampleScreen(self.data_root), self._on_new_sample_created)
                 return
         self.refresh_summary()
 
@@ -1002,8 +1046,9 @@ class MFLIDiffResistanceApp(App):
                 pass
         if "enable_temperature" in saved:
             self.query_one("#enable_temperature", Switch).value = bool(saved["enable_temperature"])
+        self._sync_data_root()
         saved_sample = saved.get("sample")
-        if saved_sample and saved_sample in [v for _, v in sample_options(_DATA_DIR)]:
+        if saved_sample and saved_sample in [v for _, v in sample_options(self.data_root)]:
             self.query_one("#sample_select", Select).value = saved_sample
 
     def _save_settings(self, raw: dict) -> None:
@@ -1045,6 +1090,8 @@ class MFLIDiffResistanceApp(App):
     # ── Reactivity ───────────────────────────────────────────────────────────
 
     def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "data_dir":
+            self._sync_data_root()
         self.refresh_summary()
 
     def on_switch_changed(self, event: Switch.Changed) -> None:
@@ -1091,6 +1138,10 @@ class MFLIDiffResistanceApp(App):
             self.bell()
             return
 
+        self.data_root = Path(state["data_dir"]).expanduser()
+        # Typed a not-yet-existing root? bootstrap it now, so the run has
+        # somewhere to write (allocate_run() itself stays strict).
+        ensure_sample(self.data_root, state["sample"], create=True)
         self._save_settings(self.collect_raw())
         plan = self._build_plan(state)
         self.push_screen(RunScreen(plan))
@@ -1098,6 +1149,8 @@ class MFLIDiffResistanceApp(App):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "start":
             self.action_start()
+        elif event.button.id == "browse_data_dir":
+            self._browse_data_dir()
 
     def _build_plan(self, state: dict) -> MeasurementPlan:
         out_cfg = OutputConfig(
@@ -1127,7 +1180,7 @@ class MFLIDiffResistanceApp(App):
             sample_rate_Hz=state["sample_rate_Hz"], filter=filt,
         )
         run_ctx = allocate_run(
-            _DATA_DIR, state["sample"], state["device"], MEASUREMENT_TYPE,
+            self.data_root, state["sample"], state["device"], MEASUREMENT_TYPE,
             temperature_setpoint_K=state["temperature_setpoint_K"],
         )
         acq_cfg = AcquisitionConfig(
@@ -1165,7 +1218,7 @@ class MFLIDiffResistanceApp(App):
             leader=state["leader_device"], follower=state["follower_device"],
             out_cfg=out_cfg, current_cfg=current_cfg, voltage_cfg=voltage_cfg,
             acq_cfg=acq_cfg, biases_V=biases_V,
-            run_ctx=run_ctx, temperature_setpoint_K=state["temperature_setpoint_K"],
+            run_ctx=run_ctx, data_root=self.data_root, temperature_setpoint_K=state["temperature_setpoint_K"],
             cooldown=state["cooldown"], header_extra=header_extra,
             temp_cfg=temp_cfg,
         )

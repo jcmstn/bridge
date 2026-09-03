@@ -42,9 +42,10 @@ def _state(**overrides) -> dict:
 
 
 def test_build_plan_allocates_run_and_matches_filename_convention(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(tui, "_DATA_DIR", tmp_path)
+    monkeypatch.setattr(tui, "_DEFAULT_DATA_DIR", tmp_path)
     ensure_sample(tmp_path, "A", create=True)
     app = tui.MFLIDualHarmonicApp()
+    app.data_root = tmp_path
 
     plan1 = app._build_plan(_state())
     assert plan1.run_ctx.run_number == 1

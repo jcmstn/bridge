@@ -83,10 +83,12 @@ from dc.dc_gate_sweep import (
     shutdown_temperature_controller,
 )
 from dc.dc_sweep_utils import linear_sweep, parse_value_list
+from instruments.data_dir import DataDirPickerScreen, validate_directory
 from instruments.data_naming import (
     TEST_SAMPLE,
     RunContext,
     allocate_run,
+    ensure_sample,
     finalize_index_row,
     make_incremental_writer,
     preview_raw_filename,
@@ -102,10 +104,11 @@ from instruments.tui_sample_picker import (
 
 log = logging.getLogger("dc_gate_sweep_tui")
 
-# Data/settings live outside "bridge" (a sibling of it). _DATA_DIR doubles
-# as the data-convention "data root" -- see dc_hall_measurement_tui.py.
-_DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
-SETTINGS_PATH = _DATA_DIR / "dc_gate_sweep_tui_settings.json"
+# Data/settings live outside "bridge" (a sibling of it). _DEFAULT_DATA_DIR is
+# the fallback data-convention "data root"; the real root is chosen per run in
+# the identity bar's "Data root" field -- see dc_hall_measurement_tui.py.
+_DEFAULT_DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
+SETTINGS_PATH = _DEFAULT_DATA_DIR / "dc_gate_sweep_tui_settings.json"
 
 # Locked type code (see instruments/data_naming.py) — never deviates.
 MEASUREMENT_TYPE = "GSWP"
@@ -188,7 +191,7 @@ NUMERIC_FIELDS: dict = {
 TEXT_FIELDS = ["source_visa_resource", "voltmeter_visa_resource", "gate_visa_resource",
                "device", "cooldown", "magnet_visa_resource",
                "gaussmeter_visa_resource", "field_current_values",
-               "temperature_visa_resource", "temperature_sensor_uids"]
+               "temperature_visa_resource", "temperature_sensor_uids", "data_dir"]
 OPTIONAL_NUMERIC_FIELDS = ["temperature_setpoint_K"]
 FIELD_FIELD_IDS = [
     "magnet_visa_resource", "current_limit_A", "voltage_compliance_V",
@@ -257,6 +260,7 @@ class MeasurementPlan:
     field_settle_s: float = 1.0
     field_settle_tolerance_mT: float = 0.02
     temp_cfg: Optional[TemperatureControllerConfig] = None
+    data_root: Path = _DEFAULT_DATA_DIR
 
     @property
     def series_values(self) -> List[Optional[float]]:
@@ -345,6 +349,11 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     errors: list[str] = []
 
     # ── Sample / run identity ───────────────────────────────────────────────
+    dir_warn, dir_err = validate_directory(state.get("data_dir", ""))
+    if dir_err:
+        errors.append(f"Data root: {dir_err}")
+    elif dir_warn:
+        warnings.append(f"Data root: {dir_warn}")
     if not state.get("sample") or state["sample"] == NEW_SAMPLE_SENTINEL:
         errors.append("Choose a sample (or create a new one).")
     if not state.get("device"):
@@ -665,7 +674,8 @@ class RunScreen(Screen):
             if self._run_contexts:
                 first, last = self._run_contexts[0], self._run_contexts[-1]
                 run_label = first.run_str if first is last else f"{first.run_str}-{last.run_str}"
-                png_path = proc_path(_DATA_DIR, self.plan.sample, run_label, self.plan.device,
+                png_path = proc_path(self.plan.data_root, self.plan.sample, run_label,
+                                      self.plan.device,
                                       MEASUREMENT_TYPE, "combined", combined=True)
                 _save_measurement_png(self._records, png_path)
         except Exception:
@@ -689,7 +699,7 @@ class RunScreen(Screen):
                 # only a run that never wrote a point gets a header-only write.
                 if iter_records or not ctx.raw_path.exists():
                     write_record(ctx.raw_path, iter_records, header_fields)
-                finalize_index_row(_DATA_DIR, ctx.sample, ctx.run_number, header_fields)
+                finalize_index_row(self.plan.data_root, ctx.sample, ctx.run_number, header_fields)
             except Exception:
                 log.exception("Could not save final status/comment for run %d", ctx.run_number)
 
@@ -764,7 +774,7 @@ class RunScreen(Screen):
                 # iteration -- never reuse one across the magnet-current
                 # series.
                 ctx = allocate_run(
-                    _DATA_DIR, plan.sample, plan.device, MEASUREMENT_TYPE,
+                    plan.data_root, plan.sample, plan.device, MEASUREMENT_TYPE,
                     temperature_setpoint_K=plan.temperature_setpoint_K,
                     key_axis=key_axis, series=plan.series,
                 )
@@ -807,7 +817,7 @@ class RunScreen(Screen):
                     if current_A is not None else None,
                 )
                 write_record(ctx.raw_path, iter_records, header_fields)
-                finalize_index_row(_DATA_DIR, ctx.sample, ctx.run_number, header_fields)
+                finalize_index_row(self.plan.data_root, ctx.sample, ctx.run_number, header_fields)
 
                 if iter_error is not None:
                     raise iter_error
@@ -856,6 +866,10 @@ class DCGateSweepApp(App):
     TITLE = "DC Gate Sweep"
     SUB_TITLE = "Keithley 6221 + 2182 + 2400 · gate voltage sweep"
 
+    # Session data root — fallback until _load_settings()/the identity bar's
+    # "Data root" field replaces it. Read in compose(), so it must exist here.
+    data_root: Path = _DEFAULT_DATA_DIR
+
     CSS = """
     #body { height: 1fr; }
     #form { width: 1fr; padding: 1 2; }
@@ -863,6 +877,9 @@ class DCGateSweepApp(App):
 
     #identity_bar { height: auto; border: round $accent; padding: 1 2; margin-bottom: 1; }
     #filename_preview { text-style: bold; margin-bottom: 1; }
+    #data_dir_row { height: 3; margin-bottom: 1; }
+    #data_dir_row Input { width: 1fr; }
+    #data_dir_row Button { margin-left: 1; }
     #identity_fields { layout: grid; grid-size: 4; grid-gutter: 0 2; height: auto; }
     #identity_fields > Vertical { height: auto; }
 
@@ -898,10 +915,14 @@ class DCGateSweepApp(App):
                 # ── File & run identity ── changes every run, always on top ──
                 with Vertical(id="identity_bar"):
                     yield Static("", id="filename_preview")
+                    with Horizontal(id="data_dir_row"):
+                        yield Input(value=str(_DEFAULT_DATA_DIR), id="data_dir",
+                                    placeholder="Absolute path to the data root")
+                        yield Button("Browse…", id="browse_data_dir")
                     with Vertical(id="identity_fields"):
                         yield Vertical(
                             Label("Sample", classes="field-label"),
-                            Select(sample_options(_DATA_DIR), id="sample_select",
+                            Select(sample_options(self.data_root), id="sample_select",
                                    allow_blank=False, value=TEST_SAMPLE),
                             classes="field",
                         )
@@ -1051,15 +1072,39 @@ class DCGateSweepApp(App):
 
     def _refresh_sample_options(self, *, select_value: Optional[str] = None) -> None:
         select = self.query_one("#sample_select", Select)
-        select.set_options(sample_options(_DATA_DIR))
+        select.set_options(sample_options(self.data_root))
         if select_value is not None:
             select.value = select_value
+
+    def _sync_data_root(self) -> None:
+        """Point self.data_root at the identity bar's "Data root" field when
+        it names an existing directory, and re-list samples from there.
+        Gated on is_dir() so a half-typed path doesn't scatter _test/
+        folders across the disk (sample_options() creates them)."""
+        path = Path(self.query_one("#data_dir", Input).value.strip()).expanduser()
+        if not path.is_dir():
+            return
+        self.data_root = path.resolve()
+        opts = [v for _, v in sample_options(self.data_root)]
+        cur = self.query_one("#sample_select", Select).value
+        self._refresh_sample_options(select_value=cur if cur in opts else TEST_SAMPLE)
+
+    def _browse_data_dir(self) -> None:
+        start = self.query_one("#data_dir", Input).value.strip() or str(_DEFAULT_DATA_DIR)
+        self.push_screen(DataDirPickerScreen(start), self._on_data_dir_picked)
+
+    def _on_data_dir_picked(self, picked: Optional[str]) -> None:
+        if not picked:
+            return
+        self.query_one("#data_dir", Input).value = picked
+        self._sync_data_root()
+        self.refresh_summary()
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id != "sample_select":
             return
         if event.value == NEW_SAMPLE_SENTINEL:
-            self.push_screen(NewSampleScreen(_DATA_DIR), self._on_new_sample_created)
+            self.push_screen(NewSampleScreen(self.data_root), self._on_new_sample_created)
             return
         self.refresh_summary()
 
@@ -1102,8 +1147,11 @@ class DCGateSweepApp(App):
             self.query_one("#enable_field", Switch).value = bool(saved["enable_field"])
         if "enable_temperature" in saved:
             self.query_one("#enable_temperature", Switch).value = bool(saved["enable_temperature"])
+        # data_dir was just restored into the Input by the loop above — adopt
+        # it before listing samples, so the dropdown and the run agree.
+        self._sync_data_root()
         saved_sample = saved.get("sample")
-        if saved_sample and saved_sample in [v for _, v in sample_options(_DATA_DIR)]:
+        if saved_sample and saved_sample in [v for _, v in sample_options(self.data_root)]:
             self.query_one("#sample_select", Select).value = saved_sample
 
     def _save_settings(self, raw: dict) -> None:
@@ -1155,6 +1203,8 @@ class DCGateSweepApp(App):
     # ── Reactivity ───────────────────────────────────────────────────────────
 
     def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "data_dir":
+            self._sync_data_root()
         self.refresh_summary()
 
     def on_switch_changed(self, event: Switch.Changed) -> None:
@@ -1211,6 +1261,12 @@ class DCGateSweepApp(App):
             self.bell()
             return
 
+        # Honour a valid path that doesn't exist yet (build_summary only
+        # warned) — _sync_data_root() adopts existing dirs only.
+        self.data_root = Path(state["data_dir"]).expanduser()
+        # Typed a not-yet-existing root? bootstrap it now, so the run has
+        # somewhere to write (allocate_run() itself stays strict).
+        ensure_sample(self.data_root, state["sample"], create=True)
         self._save_settings(self.collect_raw())
         plan = self._build_plan(state)
         self.push_screen(RunScreen(plan))
@@ -1218,6 +1274,8 @@ class DCGateSweepApp(App):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "start":
             self.action_start()
+        elif event.button.id == "browse_data_dir":
+            self._browse_data_dir()
 
     def _build_plan(self, state: dict) -> MeasurementPlan:
         src_cfg = SourceConfig(
@@ -1288,7 +1346,7 @@ class DCGateSweepApp(App):
 
         return MeasurementPlan(
             src_cfg=src_cfg, volt_cfg=volt_cfg, gate_cfg=gate_cfg, acq_cfg=acq_cfg,
-            gate_voltages_V=gate_voltages_V,
+            gate_voltages_V=gate_voltages_V, data_root=self.data_root,
             sample=state["sample"], device=state["device"],
             temperature_setpoint_K=state["temperature_setpoint_K"],
             cooldown=state["cooldown"], header_extra=header_extra, series=series,

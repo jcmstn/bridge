@@ -40,6 +40,7 @@ def _state(**overrides) -> dict:
 
 def test_build_plan_series_tag_only_set_for_a_real_family(tmp_path) -> None:
     app = tui.DCHallMeasurementApp()
+    app.data_root = tmp_path
 
     plan_single = app._build_plan(_state())
     assert plan_single.series == ""
@@ -50,9 +51,10 @@ def test_build_plan_series_tag_only_set_for_a_real_family(tmp_path) -> None:
 
 
 def test_multi_file_session_allocates_one_run_per_sense_current(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(tui, "_DATA_DIR", tmp_path)
+    monkeypatch.setattr(tui, "_DEFAULT_DATA_DIR", tmp_path)
     ensure_sample(tmp_path, "A", create=True)
     app = tui.DCHallMeasurementApp()
+    app.data_root = tmp_path
     plan = app._build_plan(_state(sense_current_values="0.001, -0.002"))
 
     # Mirror what RunScreen.do_run()'s loop does: allocate_run() fresh per

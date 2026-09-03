@@ -30,9 +30,10 @@ def _state(**overrides) -> dict:
 
 
 def test_tui_build_plan_series(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(tui, "_DATA_DIR", tmp_path)
+    monkeypatch.setattr(tui, "_DEFAULT_DATA_DIR", tmp_path)
     ensure_sample(tmp_path, "A", create=True)
     app = tui.DCGateSweepApp()
+    app.data_root = tmp_path
     plan = app._build_plan(_state())
     assert plan.series.startswith("A_HB3_GSWP_")
 

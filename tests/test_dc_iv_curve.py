@@ -26,9 +26,10 @@ def _tui_state(**overrides) -> dict:
 
 
 def test_tui_build_plan(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(tui, "_DATA_DIR", tmp_path)
+    monkeypatch.setattr(tui, "_DEFAULT_DATA_DIR", tmp_path)
     ensure_sample(tmp_path, "A", create=True)
     app = tui.DCIVCurveApp()
+    app.data_root = tmp_path
     plan = app._build_plan(_tui_state())
     assert plan.series == ""
 

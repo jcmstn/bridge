@@ -41,6 +41,7 @@ def _state(**overrides) -> dict:
 
 def test_build_plan_series_tag_only_set_for_a_real_family(tmp_path: Path) -> None:
     app = tui.DCSpinValveApp()
+    app.data_root = tmp_path
 
     plan_multi = app._build_plan(_state())
     assert plan_multi.series != ""
@@ -58,9 +59,10 @@ def test_build_plan_series_tag_only_set_for_a_real_family(tmp_path: Path) -> Non
 
 
 def test_multi_file_session_allocates_one_run_per_gate_voltage(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(tui, "_DATA_DIR", tmp_path)
+    monkeypatch.setattr(tui, "_DEFAULT_DATA_DIR", tmp_path)
     ensure_sample(tmp_path, "A", create=True)
     app = tui.DCSpinValveApp()
+    app.data_root = tmp_path
     plan = app._build_plan(_state())
 
     # Mirror what RunScreen.do_run()'s loop does: allocate_run() fresh per
@@ -81,9 +83,10 @@ def test_multi_file_session_allocates_one_run_per_gate_voltage(tmp_path: Path, m
 
 
 def test_multi_file_session_cross_product_of_current_and_gate(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(tui, "_DATA_DIR", tmp_path)
+    monkeypatch.setattr(tui, "_DEFAULT_DATA_DIR", tmp_path)
     ensure_sample(tmp_path, "A", create=True)
     app = tui.DCSpinValveApp()
+    app.data_root = tmp_path
     plan = app._build_plan(_state(
         sense_current_values="0.001, 0.002",
         sense_current_list=[0.001, 0.002],
