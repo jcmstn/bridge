@@ -51,6 +51,12 @@ docs/          Physics/theory background for specific measurements
 
 ## docs/
 
+- [`docs/architecture.md`](docs/architecture.md) — cross-cutting layout:
+  the three-layer (measurement / TUI / web) pattern, the
+  `run_measurement()` contract, the instrument layer, and a "change X →
+  touch these files" map. Start here to navigate the code.
+- [`docs/data_convention.md`](docs/data_convention.md) — how every run is
+  named and saved, and the `instruments/data_naming.py` writer/reader API.
 - [`docs/current-reversal.md`](docs/current-reversal.md) — the V_odd/V_even
   current-reversal decomposition used by every DC measurement program.
 
