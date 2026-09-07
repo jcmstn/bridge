@@ -46,10 +46,14 @@ def identity_bar(*, default_data_dir: str, default_sample: str,
     """Renders the bar and returns handles for reading field values in
     collect_raw()/parse_state() and for updating the filename preview from
     refresh_summary() (`.filename_label.set_text(...)`)."""
-    with ui.card().classes("w-full mb-3"):
+    # Natural height, top-aligned in the band -- the row in
+    # measurement_layout() is items-start, so this card and the Summary card
+    # beside it each size to their own content and any height difference
+    # sits below whichever is shorter, not as gaps between this card's rows.
+    with ui.card().classes("w-full gap-3"):
         filename_label = ui.label().classes("font-bold")
         data_dir_input = directory_field("Data root directory", default_data_dir)
-        with ui.grid(columns=4).classes("w-full gap-2"):
+        with ui.grid(columns=2).classes("w-full gap-2"):
             sample_dropdown, refresh_sample_options = sample_select(
                 lambda: data_dir_input.value, default=default_sample)
             device_input = text_field("Device (e.g. HB3, SV2)", default_device)

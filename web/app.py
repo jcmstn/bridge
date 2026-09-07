@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import os
 
-from nicegui import ui
+from nicegui import app, ui
 
 from web.dc import hall, iv_curve, gate_sweep, spin_valve
 from web.mfli import dual_harmonic, diff_resistance, phase_calibration
@@ -43,6 +43,44 @@ from web import run_index
 from web.run_controller import busy_banner
 
 APP_TITLE = "Bridge Measurement Suite"
+
+# --- Visual theme (application-wide, no per-page edits) -----------------------
+# Primary is the deep indigo already used as a plot colour in dc/iv_curve.py;
+# negative harmonises with that module's plot red. positive / negative /
+# warning are kept in three clearly separate hues (green / red / amber) and
+# dark enough to stay legible as text on white (run-status colours use them).
+app.colors(
+    primary="#2E3192",    # deep indigo — buttons, headers, links
+    secondary="#5A6B8C",   # muted slate-blue — secondary actions
+    accent="#7E57C2",      # violet — highlights (distinct from status hues)
+    positive="#2E7D32",    # green 800 — run succeeded
+    negative="#C62828",    # red 800 — run failed / abort
+    warning="#B26A00",     # amber 800 — warnings
+    info="#0277BD",        # blue 800 — informational
+    dark="#1E1E26",
+    dark_page="#15151C",
+)
+
+ui.add_head_html(
+    """
+    <style>
+      body:not(.body--dark), body:not(.body--dark) .q-page { background: #f5f6f8; }
+      .q-card {
+        border: 1px solid rgba(46, 49, 146, 0.10);
+        box-shadow: 0 1px 2px rgba(23, 25, 71, 0.06),
+                    0 1px 10px rgba(23, 25, 71, 0.04);
+      }
+      * { scrollbar-width: thin; }
+      ::-webkit-scrollbar { width: 10px; height: 10px; }
+      ::-webkit-scrollbar-thumb {
+        background: rgba(46, 49, 146, 0.25); border-radius: 5px;
+      }
+      ::-webkit-scrollbar-thumb:hover { background: rgba(46, 49, 146, 0.45); }
+    </style>
+    """,
+    shared=True,
+)
+# ---------------------------------------------------------------------------
 
 
 @ui.page("/dc/hall")

@@ -44,6 +44,7 @@ from textual.screen import Screen
 from textual.validation import Number
 from textual.widgets import (
     Button,
+    Collapsible,
     DataTable,
     Footer,
     Header,
@@ -813,6 +814,11 @@ class MFLIDiffResistanceApp(App):
     .param-grid { layout: grid; grid-size: 3; grid-gutter: 1 2; height: auto; }
     .param-card { border: round $primary; padding: 1 2; height: auto; }
     .stable-grid { layout: grid; grid-size: 3; grid-gutter: 1 2; height: auto; }
+
+    /* Collapsible tiers -- precision knobs + instrument wiring, folded by default */
+    Collapsible { height: auto; margin: 1 0; }
+    Collapsible > Contents { padding: 1 0 0 1; }
+    CollapsibleTitle { text-style: bold; color: $text-muted; }
     .stable-card { border: round $panel-darken-1; padding: 1 2; height: auto; }
     .stable-card .card-title { color: $text-muted; }
     .stable-card .field-label { color: $text-muted; }
@@ -850,13 +856,16 @@ class MFLIDiffResistanceApp(App):
                             hint="Drives only the filename's T###K token.",
                         ))
 
+                # ── Tier 1: what defines this run — always visible ──────────
                 with Vertical(classes="param-grid"):
                     yield card(
-                        "Devices",
-                        field("leader_device", "Leader MFLI (bias + AC excitation, I-sense)",
-                              DEFAULTS["leader_device"], kind="text"),
-                        field("follower_device", "Follower MFLI (V-sense across DUT)",
-                              DEFAULTS["follower_device"], kind="text"),
+                        "Bias sweep",
+                        field("bias_min_V", "DC bias sweep min (V)", DEFAULTS["bias_min_V"]),
+                        field("bias_max_V", "DC bias sweep max (V)", DEFAULTS["bias_max_V"]),
+                        field("n_points", "Points per sweep direction",
+                              DEFAULTS["n_points"], kind="integer",
+                              hint="Bidirectional: min → max → min (reveals hysteresis).",
+                              validators=[Number(minimum=2, failure_description="must be ≥ 2")]),
                     )
                     yield card(
                         "Excitation",
@@ -876,77 +885,77 @@ class MFLIDiffResistanceApp(App):
                               validators=[Number(minimum=1.0, failure_description="must be > 0")]),
                     )
                     yield card(
-                        "Bias sweep",
-                        field("bias_min_V", "DC bias sweep min (V)", DEFAULTS["bias_min_V"]),
-                        field("bias_max_V", "DC bias sweep max (V)", DEFAULTS["bias_max_V"]),
-                        field("n_points", "Points per sweep direction",
-                              DEFAULTS["n_points"], kind="integer",
-                              hint="Bidirectional: min → max → min (reveals hysteresis).",
-                              validators=[Number(minimum=2, failure_description="must be ≥ 2")]),
-                    )
-                    yield card(
-                        "Lock-in filter",
-                        field("time_constant_s", "Filter time constant (s)",
-                              DEFAULTS["time_constant_s"],
-                              hint="Bigger = quieter but slower & longer settling.",
-                              validators=[Number(minimum=1e-6, failure_description="must be > 0")]),
-                        select_field("order", "Filter order", list(range(1, 9)),
-                                     int(DEFAULTS["order"])),
-                        switch_field("sinc_filter", "Sinc filter (extra harmonic rejection)",
-                                     DEFAULTS["sinc_filter"]),
-                    )
-                    yield card(
-                        "Input ranges",
-                        field("current_input_range_A", "Current-sense input range (A)",
-                              DEFAULTS["current_input_range_A"],
-                              hint="Leader's Current Input 1 — size to the actual DUT current.",
-                              validators=[Number(minimum=1e-6, failure_description="must be > 0")]),
-                        field("voltage_input_range_V", "Voltage-sense input range (V)",
-                              DEFAULTS["voltage_input_range_V"],
-                              hint="Follower input, across the DUT.",
-                              validators=[Number(minimum=1e-6, failure_description="must be > 0")]),
-                        field("sample_rate_Hz", "Demodulator sample rate (Sa/s)",
-                              DEFAULTS["sample_rate_Hz"],
-                              validators=[Number(minimum=1e-3, failure_description="must be > 0")]),
-                    )
-                    yield card(
-                        "Acquisition timing",
-                        field("settling_time_s", "Settling time per bias point (s)",
-                              DEFAULTS["settling_time_s"],
-                              hint="Rule of thumb: ≥ 5 × time constant.",
-                              validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
-                        field("n_averages", "Samples to average per point (each demod)",
-                              DEFAULTS["n_averages"], kind="integer",
-                              validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
-                    )
-                    yield card(
                         "Temperature logging",
                         switch_field("enable_temperature",
                                      "Log temperature (Oxford Instruments MercuryiTC)",
                                      DEFAULTS["enable_temperature"]),
                     )
 
-                yield Static("Instrument configuration", classes="section-title")
-                with Vertical(classes="stable-grid"):
-                    yield card(
-                        "Connection",
-                        field("daq_host", "LabOne data server host",
-                              DEFAULTS["daq_host"], kind="text"),
-                        field("daq_port", "LabOne data server port",
-                              DEFAULTS["daq_port"], kind="integer"),
-                        muted=True,
-                    )
-                    yield card(
-                        "Temperature controller",
-                        field("temperature_visa_resource", "MercuryiTC VISA resource",
-                              DEFAULTS["temperature_visa_resource"], kind="text",
-                              hint="e.g. TCPIP0::<ip>::7020::SOCKET or an ASRL resource."),
-                        field("temperature_sensor_uids", "Sensor board UID(s)",
-                              DEFAULTS["temperature_sensor_uids"], kind="text",
-                              hint="1 or 2 board UIDs, comma-separated, e.g. 'MB1.T1, DB5.T1'. "
-                                   "Missing readings just leave the column empty."),
-                        muted=True,
-                    )
+                # ── Tier 2: precision / speed knobs — collapsed ─────────────
+                with Collapsible(title="Acquisition & filter settings", collapsed=True):
+                    with Vertical(classes="param-grid"):
+                        yield card(
+                            "Lock-in filter",
+                            field("time_constant_s", "Filter time constant (s)",
+                                  DEFAULTS["time_constant_s"],
+                                  hint="Bigger = quieter but slower & longer settling.",
+                                  validators=[Number(minimum=1e-6, failure_description="must be > 0")]),
+                            select_field("order", "Filter order", list(range(1, 9)),
+                                         int(DEFAULTS["order"])),
+                            switch_field("sinc_filter", "Sinc filter (extra harmonic rejection)",
+                                         DEFAULTS["sinc_filter"]),
+                        )
+                        yield card(
+                            "Input ranges",
+                            field("current_input_range_A", "Current-sense input range (A)",
+                                  DEFAULTS["current_input_range_A"],
+                                  hint="Leader's Current Input 1 — size to the actual DUT current.",
+                                  validators=[Number(minimum=1e-6, failure_description="must be > 0")]),
+                            field("voltage_input_range_V", "Voltage-sense input range (V)",
+                                  DEFAULTS["voltage_input_range_V"],
+                                  hint="Follower input, across the DUT.",
+                                  validators=[Number(minimum=1e-6, failure_description="must be > 0")]),
+                            field("sample_rate_Hz", "Demodulator sample rate (Sa/s)",
+                                  DEFAULTS["sample_rate_Hz"],
+                                  validators=[Number(minimum=1e-3, failure_description="must be > 0")]),
+                        )
+                        yield card(
+                            "Acquisition timing",
+                            field("settling_time_s", "Settling time per bias point (s)",
+                                  DEFAULTS["settling_time_s"],
+                                  hint="Rule of thumb: ≥ 5 × time constant.",
+                                  validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
+                            field("n_averages", "Samples to average per point (each demod)",
+                                  DEFAULTS["n_averages"], kind="integer",
+                                  validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
+                        )
+
+                # ── Tier 3: instrument wiring — collapsed ───────────────────
+                with Collapsible(title="Instrument configuration & addresses", collapsed=True):
+                    with Vertical(classes="stable-grid"):
+                        yield card(
+                            "Devices & connection",
+                            field("leader_device", "Leader MFLI (bias + AC excitation, I-sense)",
+                                  DEFAULTS["leader_device"], kind="text"),
+                            field("follower_device", "Follower MFLI (V-sense across DUT)",
+                                  DEFAULTS["follower_device"], kind="text"),
+                            field("daq_host", "LabOne data server host",
+                                  DEFAULTS["daq_host"], kind="text"),
+                            field("daq_port", "LabOne data server port",
+                                  DEFAULTS["daq_port"], kind="integer"),
+                            muted=True,
+                        )
+                        yield card(
+                            "Temperature controller",
+                            field("temperature_visa_resource", "MercuryiTC VISA resource",
+                                  DEFAULTS["temperature_visa_resource"], kind="text",
+                                  hint="e.g. TCPIP0::<ip>::7020::SOCKET or an ASRL resource."),
+                            field("temperature_sensor_uids", "Sensor board UID(s)",
+                                  DEFAULTS["temperature_sensor_uids"], kind="text",
+                                  hint="1 or 2 board UIDs, comma-separated, e.g. 'MB1.T1, DB5.T1'. "
+                                       "Missing readings just leave the column empty."),
+                            muted=True,
+                        )
 
             with Vertical(id="sidebar"):
                 yield Static("Summary", classes="sidebar-title")

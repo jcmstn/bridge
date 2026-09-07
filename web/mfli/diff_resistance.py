@@ -41,7 +41,7 @@ from instruments.data_naming import (
 )
 from web.run_controller import (
     RunController, RunCallbacks, FinalStatus, num_field, text_field, bool_switch,
-    param_card, param_grid, section_title, stable_card, stable_grid,
+    param_card, param_grid, advanced_section, stable_card, stable_grid, measurement_layout,
     render_summary, busy_banner, is_busy,
 )
 from web.directory_picker import validate_directory
@@ -169,6 +169,7 @@ def _save_measurement_png(records: list[dict], png_path: Path) -> None:
 
 def page() -> None:
     ui.page_title(PAGE_TITLE)
+    page_client = ui.context.client  # has slot context now; reused by the detached status/comment task
     busy_banner()
     ui.link("← Back to measurement suite", "/").classes("text-sm")
     ui.label(PAGE_TITLE).classes("text-2xl font-bold mt-1")
@@ -186,19 +187,24 @@ def page() -> None:
     controller: dict[str, Optional[RunController]] = {"c": None}
 
     _t_default = d("temperature_setpoint_K")
-    identity = identity_bar(
-        default_data_dir=saved.get("data_dir") or str(_DATA_DIR),
-        default_sample=saved.get("sample") or TEST_SAMPLE,
-        default_device=d("device"), default_cooldown=d("cooldown"),
-        default_temperature_K=float(_t_default) if _t_default not in ("", None) else None,
-    )
 
-    with ui.row().classes("w-full gap-4 items-start no-wrap"):
-        with ui.column().classes("flex-grow gap-3 max-w-4xl"):
+    with measurement_layout() as regions:
+        with regions.identity:
+            identity = identity_bar(
+                default_data_dir=saved.get("data_dir") or str(_DATA_DIR),
+                default_sample=saved.get("sample") or TEST_SAMPLE,
+                default_device=d("device"), default_cooldown=d("cooldown"),
+                default_temperature_K=float(_t_default) if _t_default not in ("", None) else None,
+            )
+        with regions.params:
+            # ── Tier 1: what defines this run — always visible ───────────────
             with param_grid():
-                with param_card("Devices"):
-                    inputs["leader_device"] = text_field("Leader MFLI (bias + AC excitation, I-sense)", d("leader_device"))
-                    inputs["follower_device"] = text_field("Follower MFLI (V-sense across DUT)", d("follower_device"))
+                with param_card("Bias sweep"):
+                    inputs["bias_min_V"] = num_field("DC bias sweep min (V)", float(d("bias_min_V")))
+                    inputs["bias_max_V"] = num_field("DC bias sweep max (V)", float(d("bias_max_V")))
+                    inputs["n_points"] = num_field(
+                        "Points per sweep direction", float(d("n_points")), integer=True,
+                        hint="Bidirectional: min → max → min (reveals hysteresis).")
 
                 with param_card("Excitation"):
                     inputs["frequency_Hz"] = num_field(
@@ -211,85 +217,84 @@ def page() -> None:
                         "Series resistor (Ω)", float(d("series_R_ohm")),
                         hint="Current-limiting/protection resistor — not used to compute I.")
 
-                with param_card("Bias sweep"):
-                    inputs["bias_min_V"] = num_field("DC bias sweep min (V)", float(d("bias_min_V")))
-                    inputs["bias_max_V"] = num_field("DC bias sweep max (V)", float(d("bias_max_V")))
-                    inputs["n_points"] = num_field(
-                        "Points per sweep direction", float(d("n_points")), integer=True,
-                        hint="Bidirectional: min → max → min (reveals hysteresis).")
-
-                with param_card("Lock-in filter"):
-                    inputs["time_constant_s"] = num_field(
-                        "Filter time constant (s)", float(d("time_constant_s")),
-                        hint="Bigger = quieter but slower & longer settling.")
-                    order_select = ui.select(list(range(1, 9)), value=int(d("order")), label="Filter order").classes("w-full")
-                    switches["sinc_filter"] = bool_switch("Sinc filter (extra harmonic rejection)", d("sinc_filter"))
-
-                with param_card("Input ranges"):
-                    inputs["current_input_range_A"] = num_field(
-                        "Current-sense input range (A)", float(d("current_input_range_A")),
-                        hint="Leader's Current Input 1 — size to the actual DUT current.")
-                    inputs["voltage_input_range_V"] = num_field(
-                        "Voltage-sense input range (V)", float(d("voltage_input_range_V")),
-                        hint="Follower input, across the DUT.")
-                    inputs["sample_rate_Hz"] = num_field("Demodulator sample rate (Sa/s)", float(d("sample_rate_Hz")))
-
-                with param_card("Acquisition timing"):
-                    inputs["settling_time_s"] = num_field(
-                        "Settling time per bias point (s)", float(d("settling_time_s")),
-                        hint="Rule of thumb: ≥ 5 × time constant.")
-                    inputs["n_averages"] = num_field(
-                        "Samples to average per point (each demod)", float(d("n_averages")), integer=True)
-
                 with param_card("Temperature logging"):
                     switches["enable_temperature"] = bool_switch(
                         "Log temperature (Oxford Instruments MercuryiTC)", d("enable_temperature"))
 
-            section_title("Instrument configuration")
-            with stable_grid():
-                with stable_card("Connection"):
-                    inputs["daq_host"] = text_field("LabOne data server host", d("daq_host"))
-                    inputs["daq_port"] = num_field("LabOne data server port", float(d("daq_port")), integer=True)
+            # ── Tier 2: precision / speed knobs — collapsed ─────────────────
+            with advanced_section("Acquisition & filter settings"):
+                with stable_grid():
+                    with param_card("Lock-in filter"):
+                        inputs["time_constant_s"] = num_field(
+                            "Filter time constant (s)", float(d("time_constant_s")),
+                            hint="Bigger = quieter but slower & longer settling.")
+                        order_select = ui.select(list(range(1, 9)), value=int(d("order")), label="Filter order").classes("w-full")
+                        switches["sinc_filter"] = bool_switch("Sinc filter (extra harmonic rejection)", d("sinc_filter"))
 
-                with stable_card("Temperature controller"):
-                    inputs["temperature_visa_resource"] = text_field("MercuryiTC VISA resource", d("temperature_visa_resource"))
-                    inputs["temperature_sensor_uids"] = text_field("Sensor board UID(s)", d("temperature_sensor_uids"))
+                    with param_card("Input ranges"):
+                        inputs["current_input_range_A"] = num_field(
+                            "Current-sense input range (A)", float(d("current_input_range_A")),
+                            hint="Leader's Current Input 1 — size to the actual DUT current.")
+                        inputs["voltage_input_range_V"] = num_field(
+                            "Voltage-sense input range (V)", float(d("voltage_input_range_V")),
+                            hint="Follower input, across the DUT.")
+                        inputs["sample_rate_Hz"] = num_field("Demodulator sample rate (Sa/s)", float(d("sample_rate_Hz")))
 
-        with ui.column().classes("w-96 gap-2"):
-            ui.label("Summary").classes("text-lg font-bold")
+                    with param_card("Acquisition timing"):
+                        inputs["settling_time_s"] = num_field(
+                            "Settling time per bias point (s)", float(d("settling_time_s")),
+                            hint="Rule of thumb: ≥ 5 × time constant.")
+                        inputs["n_averages"] = num_field(
+                            "Samples to average per point (each demod)", float(d("n_averages")), integer=True)
+
+            # ── Tier 3: instrument wiring & safety — collapsed ──────────────
+            with advanced_section("Instrument configuration & addresses", icon="settings"):
+                with stable_grid():
+                    with stable_card("Devices & connection"):
+                        inputs["leader_device"] = text_field("Leader MFLI (bias + AC excitation, I-sense)", d("leader_device"))
+                        inputs["follower_device"] = text_field("Follower MFLI (V-sense across DUT)", d("follower_device"))
+                        inputs["daq_host"] = text_field("LabOne data server host", d("daq_host"))
+                        inputs["daq_port"] = num_field("LabOne data server port", float(d("daq_port")), integer=True)
+
+                    with stable_card("Temperature controller"):
+                        inputs["temperature_visa_resource"] = text_field("MercuryiTC VISA resource", d("temperature_visa_resource"))
+                        inputs["temperature_sensor_uids"] = text_field("Sensor board UID(s)", d("temperature_sensor_uids"))
+
+        with regions.summary:
             summary_box = ui.column().classes("w-full")
             start_btn = ui.button("▶  Start measurement", color="primary").classes("w-full")
 
-    ui.separator().classes("my-3")
-    status_label = ui.label("Idle.").classes("text-sm font-bold")
-    abort_btn = ui.button("Abort (safe ramp-down)", color="negative").props("outline")
-    abort_btn.set_visibility(False)
+        with regions.output:
+            status_label = ui.label("Idle.").classes("text-sm font-bold")
+            abort_btn = ui.button("Abort (safe ramp-down)", color="negative").props("outline")
+            abort_btn.set_visibility(False)
 
-    fig = make_subplots(rows=3, cols=1, shared_xaxes=True)
-    fig.update_yaxes(title_text="R_diff (Ω)", row=1, col=1)
-    fig.update_yaxes(title_text="Reactive (Ω)", row=2, col=1)
-    fig.update_yaxes(title_text="Phase (deg)", row=3, col=1)
-    fig.update_xaxes(title_text="DC bias (V)", row=3, col=1)
-    fig.update_layout(margin=dict(l=60, r=20, t=20, b=50), height=760, showlegend=False)
-    fig.add_scatter(x=[], y=[], mode="lines+markers", line=dict(color="#2E3192"), row=1, col=1)
-    fig.add_scatter(x=[], y=[], mode="lines+markers", line=dict(color="#e34948"), row=2, col=1)
-    fig.add_scatter(x=[], y=[], mode="lines+markers", line=dict(color="#00AEEF"), row=3, col=1)
-    plot = ui.plotly(fig).classes("w-full")
+            fig = make_subplots(rows=3, cols=1, shared_xaxes=True)
+            fig.update_yaxes(title_text="R_diff (Ω)", row=1, col=1)
+            fig.update_yaxes(title_text="Reactive (Ω)", row=2, col=1)
+            fig.update_yaxes(title_text="Phase (deg)", row=3, col=1)
+            fig.update_xaxes(title_text="DC bias (V)", row=3, col=1)
+            fig.update_layout(margin=dict(l=60, r=20, t=20, b=50), showlegend=False)
+            fig.add_scatter(x=[], y=[], mode="lines+markers", line=dict(color="#2E3192"), row=1, col=1)
+            fig.add_scatter(x=[], y=[], mode="lines+markers", line=dict(color="#e34948"), row=2, col=1)
+            fig.add_scatter(x=[], y=[], mode="lines+markers", line=dict(color="#00AEEF"), row=3, col=1)
+            with ui.element("div").classes("w-full").style("aspect-ratio: 1 / 3; max-height: 90vh"):
+                plot = ui.plotly(fig).classes("w-full h-full")
 
-    columns = [
-        {"name": "n", "label": "#", "field": "n"},
-        {"name": "Vb", "label": "V_bias (V)", "field": "Vb"},
-        {"name": "Iac", "label": "I_ac (A)", "field": "Iac"},
-        {"name": "Vdut", "label": "V_dut (V)", "field": "Vdut"},
-        {"name": "R", "label": "R_diff (Ω)", "field": "R"},
-        {"name": "X", "label": "X_react (Ω)", "field": "X"},
-        {"name": "Z", "label": "|Z| (Ω)", "field": "Z"},
-        {"name": "phase", "label": "phase (°)", "field": "phase"},
-        {"name": "T1", "label": "T1 (K)", "field": "T1"},
-        {"name": "T2", "label": "T2 (K)", "field": "T2"},
-    ]
-    table = ui.table(columns=columns, rows=[], row_key="n").classes("w-full").props("dense")
-    log_area = ui.log(max_lines=2000).classes("w-full h-48 font-mono text-xs")
+            columns = [
+                {"name": "n", "label": "#", "field": "n"},
+                {"name": "Vb", "label": "V_bias (V)", "field": "Vb"},
+                {"name": "Iac", "label": "I_ac (A)", "field": "Iac"},
+                {"name": "Vdut", "label": "V_dut (V)", "field": "Vdut"},
+                {"name": "R", "label": "R_diff (Ω)", "field": "R"},
+                {"name": "X", "label": "X_react (Ω)", "field": "X"},
+                {"name": "Z", "label": "|Z| (Ω)", "field": "Z"},
+                {"name": "phase", "label": "phase (°)", "field": "phase"},
+                {"name": "T1", "label": "T1 (K)", "field": "T1"},
+                {"name": "T2", "label": "T2 (K)", "field": "T2"},
+            ]
+            table = ui.table(columns=columns, rows=[], row_key="n").classes("w-full").props("dense")
+            log_area = ui.log(max_lines=2000).classes("w-full h-48 font-mono text-xs")
 
     def parse_state() -> tuple[dict, list[str]]:
         errors: list[str] = []
@@ -303,6 +308,9 @@ def page() -> None:
                 state[fid] = 0
         for fid in TEXT_FIELDS:
             if fid in ("device", "cooldown"):
+                continue
+            if fid == "data_dir":
+                state[fid] = (identity.data_dir_input.value or "").strip()
                 continue
             state[fid] = (inputs[fid].value or "").strip()
         state["temperature_setpoint_K"] = identity.temperature_input.value
@@ -390,7 +398,7 @@ def page() -> None:
         log_area.push(text)
 
     async def _prompt_status_comment(plan: MeasurementPlan, records: list[dict]) -> None:
-        result = await status_comment_dialog()
+        result = await status_comment_dialog(page_client)
         if result is None:
             return
         status, comment = result

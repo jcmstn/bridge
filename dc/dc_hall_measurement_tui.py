@@ -44,6 +44,7 @@ from textual.screen import Screen
 from textual.validation import Number
 from textual.widgets import (
     Button,
+    Collapsible,
     DataTable,
     Footer,
     Header,
@@ -911,6 +912,11 @@ class DCHallMeasurementApp(App):
     .param-card { border: solid $primary; padding: 1 2; height: auto; }
 
     .stable-grid { layout: grid; grid-size: 3; grid-gutter: 1 2; height: auto; }
+
+    /* Collapsible tiers -- precision knobs + instrument wiring, folded by default */
+    Collapsible { height: auto; margin: 1 0; }
+    Collapsible > Contents { padding: 1 0 0 1; }
+    CollapsibleTitle { text-style: bold; color: $text-muted; }
     .stable-card { border: round $panel-darken-1; padding: 1 2; height: auto; }
     .stable-card .card-title { color: $text-muted; text-style: none; }
     .stable-card .field-label { color: $text-muted; text-style: none; }
@@ -958,36 +964,15 @@ class DCHallMeasurementApp(App):
                                               valid_empty=True, hint="Filename's T###K token only."),
                                        classes="field")
 
-                # ── Parameters that decide the physics of this run ──────────
+                # ── Tier 1: what defines this run — always visible ──────────
                 with Vertical(classes="param-grid"):
                     yield card(
-                        "Source (Keithley 6221)",
+                        "Source current (Keithley 6221)",
                         field("sense_current_values", "Sense current (A)",
                               DEFAULTS["sense_current_values"], kind="text",
                               hint="Reversed +I/-I each rep to cancel thermal-EMF offsets. "
                                    "Single value, or comma-separated list — one complete "
                                    "measurement runs per value, each saved to its own file."),
-                        field("compliance_V", "Compliance voltage (V)",
-                              DEFAULTS["compliance_V"],
-                              validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
-                    )
-                    yield card(
-                        "Voltmeter (Keithley 2182)",
-                        field("nplc", "NPLC (integration time)", DEFAULTS["nplc"],
-                              hint="Bigger = quieter but slower.",
-                              validators=[Number(minimum=0.01, failure_description="must be > 0")]),
-                        switch_field("auto_range", "Auto-range", DEFAULTS["auto_range"]),
-                    )
-                    yield card(
-                        "Acquisition timing",
-                        field("settling_time_s", "Settling time per point (s)",
-                              DEFAULTS["settling_time_s"],
-                              hint="Dead-time after a field change, before acquiring.",
-                              validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
-                        field("n_reversals", "+I/-I reversal pairs averaged",
-                              DEFAULTS["n_reversals"], kind="integer",
-                              hint="(V(+I)-V(-I))/2 is the reported R.",
-                              validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
                     )
                     yield card(
                         "Field sweep (Kepco magnet)",
@@ -1007,54 +992,79 @@ class DCHallMeasurementApp(App):
                                      DEFAULTS["enable_temperature"]),
                     )
 
-                # ── Instrument wiring & timing constants ── rarely change ───
-                yield Static("Instrument configuration", classes="section-title")
-                with Vertical(classes="stable-grid"):
-                    yield card(
-                        "Instrument addresses",
-                        field("source_visa_resource", "6221 (current source)",
-                              DEFAULTS["source_visa_resource"], kind="text"),
-                        field("voltmeter_visa_resource", "2182 (Hall voltage)",
-                              DEFAULTS["voltmeter_visa_resource"], kind="text"),
-                        field("magnet_visa_resource", "Magnet (Kepco)",
-                              DEFAULTS["magnet_visa_resource"], kind="text"),
-                        field("gaussmeter_visa_resource", "Gaussmeter (Lake Shore 475)",
-                              DEFAULTS["gaussmeter_visa_resource"], kind="text"),
-                        field("temperature_visa_resource", "MercuryiTC",
-                              DEFAULTS["temperature_visa_resource"], kind="text"),
-                        muted=True,
-                    )
-                    yield card(
-                        "Source & ramp safety",
-                        field("source_delay_s", "6221 source delay (s)", DEFAULTS["source_delay_s"]),
-                        field("current_limit_A", "Magnet software current limit (A)",
-                              DEFAULTS["current_limit_A"],
-                              hint="Hard safety ceiling."),
-                        field("voltage_compliance_V", "Magnet voltage compliance (V)",
-                              DEFAULTS["voltage_compliance_V"]),
-                        field("ramp_step_A", "Magnet ramp step (A)", DEFAULTS["ramp_step_A"]),
-                        field("ramp_delay_s", "Magnet ramp delay (s)", DEFAULTS["ramp_delay_s"]),
-                        muted=True,
-                    )
-                    yield card(
-                        "Averaging & sensors",
-                        field("gaussmeter_n_averages", "Field readings averaged per point",
-                              DEFAULTS["gaussmeter_n_averages"], kind="integer",
-                              validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
-                        field("gaussmeter_read_delay_s", "Delay between field readings (s)",
-                              DEFAULTS["gaussmeter_read_delay_s"]),
-                        field("field_settle_tolerance_mT", "Field-settle tolerance (mT)",
-                              DEFAULTS["field_settle_tolerance_mT"],
-                              hint="Advanced: after each magnet step, the field counts as "
-                                   "settled once a short window of gaussmeter readings spans "
-                                   "less than this. Raise it if points stall waiting; lower "
-                                   "for tighter field control before acquiring.",
-                              validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
-                        field("temperature_sensor_uids", "MercuryiTC sensor board UID(s)",
-                              DEFAULTS["temperature_sensor_uids"], kind="text",
-                              hint="1-2 UIDs, comma-separated."),
-                        muted=True,
-                    )
+                # ── Tier 2: precision / speed knobs — collapsed ─────────────
+                with Collapsible(title="Acquisition & filter settings", collapsed=True):
+                    with Vertical(classes="param-grid"):
+                        yield card(
+                            "Source & voltmeter",
+                            field("compliance_V", "Compliance voltage (V)",
+                                  DEFAULTS["compliance_V"],
+                                  validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
+                            field("nplc", "NPLC (integration time)", DEFAULTS["nplc"],
+                                  hint="Bigger = quieter but slower.",
+                                  validators=[Number(minimum=0.01, failure_description="must be > 0")]),
+                            switch_field("auto_range", "Auto-range", DEFAULTS["auto_range"]),
+                        )
+                        yield card(
+                            "Acquisition timing",
+                            field("settling_time_s", "Settling time per point (s)",
+                                  DEFAULTS["settling_time_s"],
+                                  hint="Dead-time after a field change, before acquiring.",
+                                  validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
+                            field("n_reversals", "+I/-I reversal pairs averaged",
+                                  DEFAULTS["n_reversals"], kind="integer",
+                                  hint="(V(+I)-V(-I))/2 is the reported R.",
+                                  validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
+                        )
+
+                # ── Tier 3: instrument wiring & timing constants — collapsed ─
+                with Collapsible(title="Instrument configuration & addresses", collapsed=True):
+                    with Vertical(classes="stable-grid"):
+                        yield card(
+                            "Instrument addresses",
+                            field("source_visa_resource", "6221 (current source)",
+                                  DEFAULTS["source_visa_resource"], kind="text"),
+                            field("voltmeter_visa_resource", "2182 (Hall voltage)",
+                                  DEFAULTS["voltmeter_visa_resource"], kind="text"),
+                            field("magnet_visa_resource", "Magnet (Kepco)",
+                                  DEFAULTS["magnet_visa_resource"], kind="text"),
+                            field("gaussmeter_visa_resource", "Gaussmeter (Lake Shore 475)",
+                                  DEFAULTS["gaussmeter_visa_resource"], kind="text"),
+                            field("temperature_visa_resource", "MercuryiTC",
+                                  DEFAULTS["temperature_visa_resource"], kind="text"),
+                            muted=True,
+                        )
+                        yield card(
+                            "Source & ramp safety",
+                            field("source_delay_s", "6221 source delay (s)", DEFAULTS["source_delay_s"]),
+                            field("current_limit_A", "Magnet software current limit (A)",
+                                  DEFAULTS["current_limit_A"],
+                                  hint="Hard safety ceiling."),
+                            field("voltage_compliance_V", "Magnet voltage compliance (V)",
+                                  DEFAULTS["voltage_compliance_V"]),
+                            field("ramp_step_A", "Magnet ramp step (A)", DEFAULTS["ramp_step_A"]),
+                            field("ramp_delay_s", "Magnet ramp delay (s)", DEFAULTS["ramp_delay_s"]),
+                            muted=True,
+                        )
+                        yield card(
+                            "Averaging & sensors",
+                            field("gaussmeter_n_averages", "Field readings averaged per point",
+                                  DEFAULTS["gaussmeter_n_averages"], kind="integer",
+                                  validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
+                            field("gaussmeter_read_delay_s", "Delay between field readings (s)",
+                                  DEFAULTS["gaussmeter_read_delay_s"]),
+                            field("field_settle_tolerance_mT", "Field-settle tolerance (mT)",
+                                  DEFAULTS["field_settle_tolerance_mT"],
+                                  hint="Advanced: after each magnet step, the field counts as "
+                                       "settled once a short window of gaussmeter readings spans "
+                                       "less than this. Raise it if points stall waiting; lower "
+                                       "for tighter field control before acquiring.",
+                                  validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
+                            field("temperature_sensor_uids", "MercuryiTC sensor board UID(s)",
+                                  DEFAULTS["temperature_sensor_uids"], kind="text",
+                                  hint="1-2 UIDs, comma-separated."),
+                            muted=True,
+                        )
 
             with Vertical(id="sidebar"):
                 yield Static("Description", classes="sidebar-title")

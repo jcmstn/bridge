@@ -47,7 +47,7 @@ from instruments.data_naming import (
 from web.run_controller import (
     RunController, RunCallbacks, FinalStatus, num_field, optional_num_field, text_field,
     bool_switch, render_summary, busy_banner, is_busy, format_duration,
-    param_card, stable_card, param_grid, stable_grid, section_title,
+    param_card, stable_card, param_grid, stable_grid, advanced_section, measurement_layout,
 )
 from web.directory_picker import validate_directory
 from web.identity_bar import identity_bar
@@ -200,6 +200,7 @@ def _save_combined_png(records: list[dict], png_path: Path) -> None:
 
 def page() -> None:
     ui.page_title(PAGE_TITLE)
+    page_client = ui.context.client  # has slot context now; reused by the detached status/comment task
     busy_banner()
     ui.link("← Back to measurement suite", "/").classes("text-sm")
     ui.label(PAGE_TITLE).classes("text-2xl font-bold mt-1")
@@ -220,39 +221,24 @@ def page() -> None:
     controller: dict[str, Optional[RunController]] = {"c": None}
 
     _t_default = d("temperature_setpoint_K")
-    identity = identity_bar(
-        default_data_dir=saved.get("data_dir") or str(_DATA_DIR),
-        default_sample=saved.get("sample") or TEST_SAMPLE,
-        default_device=d("device"), default_cooldown=d("cooldown"),
-        default_temperature_K=float(_t_default) if _t_default not in ("", None) else None,
-    )
 
-    with ui.row().classes("w-full gap-4 items-start no-wrap"):
-        with ui.column().classes("flex-grow gap-1"):
+    with measurement_layout() as regions:
+        with regions.identity:
+            identity = identity_bar(
+                default_data_dir=saved.get("data_dir") or str(_DATA_DIR),
+                default_sample=saved.get("sample") or TEST_SAMPLE,
+                default_device=d("device"), default_cooldown=d("cooldown"),
+                default_temperature_K=float(_t_default) if _t_default not in ("", None) else None,
+            )
+        with regions.params:
+            # ── Tier 1: what defines this run — always visible ───────────────
             with param_grid():
-                with param_card("Source (Keithley 6221)"):
+                with param_card("Sense current (Keithley 6221)"):
                     inputs["sense_current_values"] = text_field(
                         "Sense current (A)", d("sense_current_values"),
                         hint="Reversed +I/-I each rep to cancel thermal-EMF offsets. "
                              "Single value, or comma-separated list — one complete "
                              "measurement runs per value, each saved to its own file.")
-                    inputs["compliance_V"] = num_field(
-                        "Compliance voltage (V)", float(d("compliance_V")))
-
-                with param_card("Voltmeter (Keithley 2182)"):
-                    inputs["nplc"] = num_field(
-                        "NPLC (integration time)", float(d("nplc")),
-                        hint="Bigger = quieter but slower. 1 line cycle = 1/50 or 1/60 s.")
-                    switches["auto_range"] = bool_switch("Auto-range", d("auto_range"))
-
-                with param_card("Acquisition timing"):
-                    inputs["settling_time_s"] = num_field(
-                        "Settling time per point (s)", float(d("settling_time_s")),
-                        hint="Dead-time after a field change, before acquiring.")
-                    inputs["n_reversals"] = num_field(
-                        "+I/-I reversal pairs averaged per point", float(d("n_reversals")), integer=True,
-                        hint="Splits each point into (V(+I)-V(-I))/2 [reported R] and "
-                             "(V(+I)+V(-I))/2 [recorded, not discarded].")
 
                 with param_card("Field sweep (Kepco magnet)"):
                     switches["enable_sweep"] = bool_switch(
@@ -267,78 +253,97 @@ def page() -> None:
                     switches["enable_temperature"] = bool_switch(
                         "Log temperature (Oxford Instruments MercuryiTC)", d("enable_temperature"))
 
-            section_title("Instrument configuration")
-            with stable_grid():
-                with stable_card("Instrument addresses"):
-                    inputs["source_visa_resource"] = text_field(
-                        "Keithley 6221 (current source)", d("source_visa_resource"))
-                    inputs["voltmeter_visa_resource"] = text_field(
-                        "Keithley 2182 (Hall voltage)", d("voltmeter_visa_resource"))
-                    inputs["magnet_visa_resource"] = text_field(
-                        "Magnet VISA resource", d("magnet_visa_resource"))
-                    inputs["gaussmeter_visa_resource"] = text_field(
-                        "Gaussmeter VISA resource", d("gaussmeter_visa_resource"),
-                        hint="Lake Shore 475 — measures the actual field at each point.")
-                    inputs["temperature_visa_resource"] = text_field(
-                        "MercuryiTC VISA resource", d("temperature_visa_resource"),
-                        hint="e.g. TCPIP0::<ip>::7020::SOCKET, or an ASRL resource.")
+            # ── Tier 2: precision / speed knobs — collapsed ─────────────────
+            with advanced_section("Acquisition & filter settings"):
+                with stable_grid():
+                    with param_card("Source & voltmeter"):
+                        inputs["compliance_V"] = num_field(
+                            "Compliance voltage (V)", float(d("compliance_V")))
+                        inputs["nplc"] = num_field(
+                            "NPLC (integration time)", float(d("nplc")),
+                            hint="Bigger = quieter but slower. 1 line cycle = 1/50 or 1/60 s.")
+                        switches["auto_range"] = bool_switch("Auto-range", d("auto_range"))
 
-                with stable_card("Source & ramp safety"):
-                    inputs["source_delay_s"] = num_field(
-                        "6221 source delay (s)", float(d("source_delay_s")))
-                    inputs["current_limit_A"] = num_field(
-                        "Software current limit (A)", float(d("current_limit_A")),
-                        hint="Hard safety ceiling — independent of the supply's own range.")
-                    inputs["voltage_compliance_V"] = num_field(
-                        "Voltage compliance (V)", float(d("voltage_compliance_V")))
-                    inputs["ramp_step_A"] = num_field("Ramp step (A)", float(d("ramp_step_A")))
-                    inputs["ramp_delay_s"] = num_field("Ramp delay (s)", float(d("ramp_delay_s")))
+                    with param_card("Acquisition timing"):
+                        inputs["settling_time_s"] = num_field(
+                            "Settling time per point (s)", float(d("settling_time_s")),
+                            hint="Dead-time after a field change, before acquiring.")
+                        inputs["n_reversals"] = num_field(
+                            "+I/-I reversal pairs averaged per point", float(d("n_reversals")), integer=True,
+                            hint="Splits each point into (V(+I)-V(-I))/2 [reported R] and "
+                                 "(V(+I)+V(-I))/2 [recorded, not discarded].")
 
-                with stable_card("Averaging & sensors"):
-                    inputs["gaussmeter_n_averages"] = num_field(
-                        "Field readings averaged per point", float(d("gaussmeter_n_averages")), integer=True)
-                    inputs["gaussmeter_read_delay_s"] = num_field(
-                        "Delay between readings (s)", float(d("gaussmeter_read_delay_s")))
-                    inputs["field_settle_tolerance_mT"] = num_field(
-                        "Field-settle tolerance (mT)", float(d("field_settle_tolerance_mT")),
-                        hint="Advanced: after each magnet step, the field counts as settled "
-                             "once a short window of gaussmeter readings spans less than this. "
-                             "Raise it if points stall; lower for tighter field control.")
-                    inputs["temperature_sensor_uids"] = text_field(
-                        "Sensor board UID(s)", d("temperature_sensor_uids"),
-                        hint="1 or 2 board UIDs, comma-separated, e.g. 'MB1.T1, DB5.T1'.")
+            # ── Tier 3: instrument wiring & safety — collapsed ──────────────
+            with advanced_section("Instrument configuration & addresses", icon="settings"):
+                with stable_grid():
+                    with stable_card("Instrument addresses"):
+                        inputs["source_visa_resource"] = text_field(
+                            "Keithley 6221 (current source)", d("source_visa_resource"))
+                        inputs["voltmeter_visa_resource"] = text_field(
+                            "Keithley 2182 (Hall voltage)", d("voltmeter_visa_resource"))
+                        inputs["magnet_visa_resource"] = text_field(
+                            "Magnet VISA resource", d("magnet_visa_resource"))
+                        inputs["gaussmeter_visa_resource"] = text_field(
+                            "Gaussmeter VISA resource", d("gaussmeter_visa_resource"),
+                            hint="Lake Shore 475 — measures the actual field at each point.")
+                        inputs["temperature_visa_resource"] = text_field(
+                            "MercuryiTC VISA resource", d("temperature_visa_resource"),
+                            hint="e.g. TCPIP0::<ip>::7020::SOCKET, or an ASRL resource.")
 
-        with ui.column().classes("w-96 gap-2"):
-            ui.label("Summary").classes("text-lg font-bold")
+                    with stable_card("Source & ramp safety"):
+                        inputs["source_delay_s"] = num_field(
+                            "6221 source delay (s)", float(d("source_delay_s")))
+                        inputs["current_limit_A"] = num_field(
+                            "Software current limit (A)", float(d("current_limit_A")),
+                            hint="Hard safety ceiling — independent of the supply's own range.")
+                        inputs["voltage_compliance_V"] = num_field(
+                            "Voltage compliance (V)", float(d("voltage_compliance_V")))
+                        inputs["ramp_step_A"] = num_field("Ramp step (A)", float(d("ramp_step_A")))
+                        inputs["ramp_delay_s"] = num_field("Ramp delay (s)", float(d("ramp_delay_s")))
+
+                    with stable_card("Averaging & sensors"):
+                        inputs["gaussmeter_n_averages"] = num_field(
+                            "Field readings averaged per point", float(d("gaussmeter_n_averages")), integer=True)
+                        inputs["gaussmeter_read_delay_s"] = num_field(
+                            "Delay between readings (s)", float(d("gaussmeter_read_delay_s")))
+                        inputs["field_settle_tolerance_mT"] = num_field(
+                            "Field-settle tolerance (mT)", float(d("field_settle_tolerance_mT")),
+                            hint="Advanced: after each magnet step, the field counts as settled "
+                                 "once a short window of gaussmeter readings spans less than this. "
+                                 "Raise it if points stall; lower for tighter field control.")
+                        inputs["temperature_sensor_uids"] = text_field(
+                            "Sensor board UID(s)", d("temperature_sensor_uids"),
+                            hint="1 or 2 board UIDs, comma-separated, e.g. 'MB1.T1, DB5.T1'.")
+
+        with regions.summary:
             summary_box = ui.column().classes("w-full")
             start_btn = ui.button("▶  Start measurement", color="primary").classes("w-full")
 
-    # ── Live run area (built once, populated on Start) ──────────────────
-    ui.separator().classes("my-3")
-    status_label = ui.label("Idle.").classes("text-sm font-bold")
-    with ui.row().classes("w-full gap-2"):
-        abort_btn = ui.button("Abort (safe ramp-down)", color="negative").props("outline")
-        abort_btn.set_visibility(False)
+        with regions.output:
+            status_label = ui.label("Idle.").classes("text-sm font-bold")
+            abort_btn = ui.button("Abort (safe ramp-down)", color="negative").props("outline")
+            abort_btn.set_visibility(False)
 
-    fig = go.Figure()
-    fig.update_layout(
-        xaxis_title="Magnetic field (mT)", yaxis_title="Hall voltage (V)",
-        margin=dict(l=60, r=20, t=30, b=50), height=420, showlegend=True,
-    )
-    plot = ui.plotly(fig).classes("w-full")
+            fig = go.Figure()
+            fig.update_layout(
+                xaxis_title="Magnetic field (mT)", yaxis_title="Hall voltage (V)",
+                margin=dict(l=60, r=20, t=30, b=50), showlegend=True,
+            )
+            with ui.element("div").classes("w-full").style("aspect-ratio: 1 / 1; min-height: 320px"):
+                plot = ui.plotly(fig).classes("w-full h-full")
 
-    columns = [
-        {"name": "n", "label": "#", "field": "n"},
-        {"name": "Isense", "label": "I_sense (A)", "field": "Isense"},
-        {"name": "I", "label": "I_magnet (A)", "field": "I"},
-        {"name": "B", "label": "B (mT)", "field": "B"},
-        {"name": "V", "label": "V_Hall (V)", "field": "V"},
-        {"name": "R", "label": "R_Hall (Ω)", "field": "R"},
-        {"name": "T1", "label": "T1 (K)", "field": "T1"},
-        {"name": "T2", "label": "T2 (K)", "field": "T2"},
-    ]
-    table = ui.table(columns=columns, rows=[], row_key="n").classes("w-full").props("dense")
-    log_area = ui.log(max_lines=2000).classes("w-full h-48 font-mono text-xs")
+            columns = [
+                {"name": "n", "label": "#", "field": "n"},
+                {"name": "Isense", "label": "I_sense (A)", "field": "Isense"},
+                {"name": "I", "label": "I_magnet (A)", "field": "I"},
+                {"name": "B", "label": "B (mT)", "field": "B"},
+                {"name": "V", "label": "V_Hall (V)", "field": "V"},
+                {"name": "R", "label": "R_Hall (Ω)", "field": "R"},
+                {"name": "T1", "label": "T1 (K)", "field": "T1"},
+                {"name": "T2", "label": "T2 (K)", "field": "T2"},
+            ]
+            table = ui.table(columns=columns, rows=[], row_key="n").classes("w-full").props("dense")
+            log_area = ui.log(max_lines=2000).classes("w-full h-48 font-mono text-xs")
 
     # ── Validation / summary refresh ─────────────────────────────────────
 
@@ -370,6 +375,8 @@ def page() -> None:
                 state[fid] = (identity.device_input.value or "").strip()
             elif fid == "cooldown":
                 state[fid] = (identity.cooldown_input.value or "").strip()
+            elif fid == "data_dir":
+                state[fid] = (identity.data_dir_input.value or "").strip()
             else:
                 state[fid] = (inputs[fid].value or "").strip()
         for fid in OPTIONAL_NUMERIC_FIELDS:
@@ -453,7 +460,7 @@ def page() -> None:
 
     async def _prompt_status_comment(plan: MeasurementPlan, run_contexts: list[RunContext],
                                       data_root: str, records: list[dict]) -> None:
-        result = await status_comment_dialog()
+        result = await status_comment_dialog(page_client)
         if result is None:
             return
         status, comment = result

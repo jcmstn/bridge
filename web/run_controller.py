@@ -121,21 +121,79 @@ def stable_card(title: str) -> Iterator[ui.card]:
 
 
 def param_grid() -> ui.grid:
-    """3-column grid of param_card()s -- NiceGUI analog of the TUI's
-    .param-grid. Use as `with param_grid(): ...`."""
-    return ui.grid(columns=3).classes("w-full gap-4")
+    """2-column grid of param_card()s -- NiceGUI analog of the TUI's
+    .param-grid. 2 (not 3) columns because it now sits in the left half of
+    measurement_layout(), not the full page width. Use as
+    `with param_grid(): ...`."""
+    return ui.grid(columns=2).classes("w-full gap-4")
 
 
 def stable_grid() -> ui.grid:
-    """3-column grid of stable_card()s -- NiceGUI analog of the TUI's
+    """2-column grid of stable_card()s -- NiceGUI analog of the TUI's
     .stable-grid. Use as `with stable_grid(): ...`."""
-    return ui.grid(columns=3).classes("w-full gap-4")
+    return ui.grid(columns=2).classes("w-full gap-4")
 
 
-def section_title(text: str) -> None:
-    """Divider label between param_grid() and stable_grid(), matching the
-    TUI's "Instrument configuration" .section-title Static."""
-    ui.label(text).classes("text-sm font-bold text-grey-6 mt-3 mb-1")
+@dataclass
+class PageRegions:
+    """The four slots measurement_layout() hands back. A page fills each with
+    `with regions.<slot>:` -- Python `with` on a NiceGUI element re-enters it
+    as the current parent, no scope of its own."""
+    identity: ui.element   # top band, left 2/3 -- identity_bar() goes here
+    summary: ui.element    # top band, right 1/3 -- summary_box + start button
+    params: ui.element     # body, left column -- param_grid() + stable_grid()
+    output: ui.element     # body, right column -- square plot(s) + table + log
+
+
+@contextmanager
+def measurement_layout(*, summary_title: str = "Summary") -> Iterator[PageRegions]:
+    """Shared 3-region skeleton for every measurement page:
+
+        ┌───────────────── top band (full width) ─────────────────┐
+        │  identity (data root, sample, device …)  2fr │ summary 1fr│
+        ├──────────────────────────────┬──────────────────────────┤
+        │  params  (left column)       │  output: square plot(s), │
+        │                              │  table, log  (right col) │
+        └──────────────────────────────┴──────────────────────────┘
+
+    The top band is 2:1 *internally* (identity : summary+run), not a literal
+    2:1 outer box -- a real aspect-ratio band that wide would push both body
+    columns off-screen. The plot in `regions.output` should be sized
+    `.style("aspect-ratio: 1 / <n_panels>")` with NO fixed Plotly `height`
+    so each panel stays square (nicegui's ui.plotly ResizeObserver + default
+    responsive=True keep it in sync)."""
+    with ui.row().classes("w-full gap-4 items-start no-wrap mb-3"):
+        identity = ui.column().classes("gap-0").style("flex: 2 1 0; min-width: 0")
+        with ui.card().classes("w-full").style("flex: 1 1 0; min-width: 0"):
+            ui.label(summary_title).classes("text-lg font-bold")
+            summary = ui.column().classes("w-full gap-2")
+    with ui.row().classes("w-full gap-4 items-start no-wrap"):
+        params = ui.column().classes("gap-3").style("flex: 1 1 0; min-width: 0")
+        output = ui.column().classes("gap-2").style("flex: 1 1 0; min-width: 0")
+    yield PageRegions(identity=identity, summary=summary, params=params, output=output)
+
+
+@contextmanager
+def advanced_section(title: str, *, icon: str = "tune") -> Iterator[ui.expansion]:
+    """Collapsed-by-default group for parameters that are set once and then
+    rarely retuned run to run -- the NiceGUI analog of a Textual
+    Collapsible, and the replacement for the old always-open
+    "Instrument configuration" grid under a plain heading.
+
+    Tier-1 run-defining params (sweep range, excitation magnitude, enable_*
+    toggles) stay in param_grid() above, always visible. The precision /
+    timing knobs and the instrument wiring each go inside one of these, so
+    the page opens showing only what actually changes between runs and the
+    important values can be confirmed at a glance.
+
+    Inputs inside a collapsed ui.expansion still exist and still fire
+    on_value_change, so the live summary keeps validating them even while
+    the section is folded away."""
+    with ui.expansion(title, icon=icon).classes(
+        "w-full bg-grey-1 dark:bg-grey-9 rounded"
+    ).props("dense header-class=text-grey-6") as exp:
+        with ui.column().classes("w-full gap-4 pt-1 pb-2 px-1"):
+            yield exp
 
 
 def render_summary(info: list[str], warnings: list[str], errors: list[str]) -> None:

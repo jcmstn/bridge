@@ -39,6 +39,7 @@ from textual.screen import Screen
 from textual.validation import Number
 from textual.widgets import (
     Button,
+    Collapsible,
     DataTable,
     Footer,
     Header,
@@ -819,6 +820,11 @@ class MFLIPhaseCalibrationApp(App):
     .param-grid { layout: grid; grid-size: 3; grid-gutter: 1 2; height: auto; }
     .param-card { border: round $primary; padding: 1 2; height: auto; }
     .stable-grid { layout: grid; grid-size: 3; grid-gutter: 1 2; height: auto; }
+
+    /* Collapsible tiers -- precision knobs + instrument wiring, folded by default */
+    Collapsible { height: auto; margin: 1 0; }
+    Collapsible > Contents { padding: 1 0 0 1; }
+    CollapsibleTitle { text-style: bold; color: $text-muted; }
     .stable-card { border: round $panel-darken-1; padding: 1 2; height: auto; }
     .stable-card .card-title { color: $text-muted; text-style: bold underline; }
     .stable-card .field-label { color: $text-muted; }
@@ -857,28 +863,8 @@ class MFLIPhaseCalibrationApp(App):
                                  "T_K uses the measured temperature when available.",
                         ))
 
+                # ── Tier 1: what defines this calibration — always visible ──
                 with Vertical(classes="param-grid"):
-                    yield card(
-                        "Devices",
-                        field("leader_device", "Leader MFLI (current source + 1f)",
-                              DEFAULTS["leader_device"], kind="text"),
-                        field("follower_device", "Follower MFLI (2f)",
-                              DEFAULTS["follower_device"], kind="text"),
-                    )
-                    yield card(
-                        "Excitation",
-                        field("frequency_Hz", "Excitation frequency (Hz)",
-                              DEFAULTS["frequency_Hz"],
-                              hint="Avoid exact multiples of 50/60 Hz (mains pickup).",
-                              validators=[Number(minimum=1e-3, failure_description="must be > 0")]),
-                        field("amplitude_V", "Output amplitude (V, peak)",
-                              DEFAULTS["amplitude_V"],
-                              validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
-                        field("series_R_ohm", "Series resistor (Ω)",
-                              DEFAULTS["series_R_ohm"],
-                              hint="Sets excitation current: I ≈ V / R.",
-                              validators=[Number(minimum=1.0, failure_description="must be > 0")]),
-                    )
                     yield card(
                         "Field sweep & calibration point",
                         field("calibration_current_A", "Calibration magnet current (A)",
@@ -893,19 +879,18 @@ class MFLIPhaseCalibrationApp(App):
                               validators=[Number(minimum=2, failure_description="must be ≥ 2")]),
                     )
                     yield card(
-                        "Phase null",
-                        field("null_n_averages", "Averages per phase read",
-                              DEFAULTS["null_n_averages"], kind="integer",
-                              validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
-                        field("null_max_iterations", "Max null iterations",
-                              DEFAULTS["null_max_iterations"], kind="integer",
-                              validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
-                        field("null_tol_deg", "Convergence tolerance (°)",
-                              DEFAULTS["null_tol_deg"],
-                              hint="Nulls the leader's 1f Y quadrature by adjusting its demod "
-                                   "phaseshift node — the resistive PHE/AHE response at 1f must "
-                                   "be exactly in phase with the drive current, so any measured "
-                                   "Y there is pure instrumental delay."),
+                        "Excitation",
+                        field("frequency_Hz", "Excitation frequency (Hz)",
+                              DEFAULTS["frequency_Hz"],
+                              hint="Avoid exact multiples of 50/60 Hz (mains pickup).",
+                              validators=[Number(minimum=1e-3, failure_description="must be > 0")]),
+                        field("amplitude_V", "Output amplitude (V, peak)",
+                              DEFAULTS["amplitude_V"],
+                              validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
+                        field("series_R_ohm", "Series resistor (Ω)",
+                              DEFAULTS["series_R_ohm"],
+                              hint="Sets excitation current: I ≈ V / R.",
+                              validators=[Number(minimum=1.0, failure_description="must be > 0")]),
                     )
                     yield card(
                         "Amplitude check (optional)",
@@ -937,113 +922,134 @@ class MFLIPhaseCalibrationApp(App):
                                      DEFAULTS["enable_temperature"]),
                     )
 
-                yield Static("Instrument configuration", classes="section-title")
-                with Vertical(classes="stable-grid"):
-                    yield card(
-                        "Connection",
-                        field("daq_host", "LabOne data server host",
-                              DEFAULTS["daq_host"], kind="text"),
-                        field("daq_port", "LabOne data server port",
-                              DEFAULTS["daq_port"], kind="integer"),
-                        muted=True,
-                    )
-                    yield card(
-                        "Lock-in filter",
-                        field("time_constant_s", "Filter time constant (s)",
-                              DEFAULTS["time_constant_s"],
-                              hint="Bigger = quieter but slower & longer settling.",
-                              validators=[Number(minimum=1e-6, failure_description="must be > 0")]),
-                        select_field("order", "Filter order", list(range(1, 9)),
-                                     int(DEFAULTS["order"])),
-                        switch_field("sinc_filter", "Sinc filter (extra harmonic rejection)",
-                                     DEFAULTS["sinc_filter"]),
-                        field("input_range_1f_V", "1f input range (V)",
-                              DEFAULTS["input_range_1f_V"],
-                              hint="Match expected 1f signal size — avoid clipping/poor resolution.",
-                              validators=[Number(minimum=1e-6, failure_description="must be > 0")]),
-                        field("input_range_2f_V", "2f input range (V)",
-                              DEFAULTS["input_range_2f_V"],
-                              hint="2f is usually much smaller than 1f — set separately.",
-                              validators=[Number(minimum=1e-6, failure_description="must be > 0")]),
-                        field("sample_rate_Hz", "Demodulator sample rate (Sa/s)",
-                              DEFAULTS["sample_rate_Hz"],
-                              validators=[Number(minimum=1e-3, failure_description="must be > 0")]),
-                        muted=True,
-                    )
-                    yield card(
-                        "Magnet & ramp safety",
-                        field("visa_resource", "Magnet VISA resource",
-                              DEFAULTS["visa_resource"], kind="text"),
-                        field("current_limit_A", "Software current limit (A)",
-                              DEFAULTS["current_limit_A"],
-                              hint="Hard safety ceiling — independent of the supply's own range."),
-                        field("voltage_compliance_V", "Voltage compliance (V)",
-                              DEFAULTS["voltage_compliance_V"]),
-                        field("ramp_step_A", "Ramp step (A)", DEFAULTS["ramp_step_A"]),
-                        field("ramp_delay_s", "Ramp delay (s)", DEFAULTS["ramp_delay_s"]),
-                        muted=True,
-                    )
-                    yield card(
-                        "Gaussmeter",
-                        field("gaussmeter_visa_resource", "Gaussmeter VISA resource",
-                              DEFAULTS["gaussmeter_visa_resource"], kind="text",
-                              hint="Lake Shore 475 — measures the actual field at each point."),
-                        field("gaussmeter_n_averages", "Field readings averaged per point",
-                              DEFAULTS["gaussmeter_n_averages"], kind="integer",
-                              validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
-                        field("gaussmeter_read_delay_s", "Delay between readings (s)",
-                              DEFAULTS["gaussmeter_read_delay_s"]),
-                        muted=True,
-                    )
-                    yield card(
-                        "Sweep timing & hold check",
-                        field("sweep_settling_time_s", "Settling time per sweep point (s)",
-                              DEFAULTS["sweep_settling_time_s"],
-                              hint="Rule of thumb: ≥ 5 × time constant.",
-                              validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
-                        field("field_settle_tolerance_mT", "Field-settle tolerance (mT)",
-                              DEFAULTS["field_settle_tolerance_mT"],
-                              hint="Advanced: after each magnet step, wait until a short window "
-                                   "of gaussmeter readings spans less than this before the "
-                                   "settling time above.",
-                              validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
-                        field("sweep_n_averages", "Samples to average per sweep point",
-                              DEFAULTS["sweep_n_averages"], kind="integer",
-                              validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
-                        field("hold_tol_ratio",
-                              "Max acceptable |Y|/R away from the calibration point",
-                              DEFAULTS["hold_tol_ratio"],
-                              hint="Flags drift if the null residual exceeds this "
-                                   "anywhere in the sweep."),
-                        muted=True,
-                    )
-                    yield card(
-                        "Scaling-check advanced",
-                        field("amp_n_averages", "Averages per amplitude point",
-                              DEFAULTS["amp_n_averages"], kind="integer",
-                              validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
-                        field("freq_n_averages", "Averages per phase read",
-                              DEFAULTS["freq_n_averages"], kind="integer",
-                              validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
-                        field("freq_max_iterations", "Max null iterations per frequency",
-                              DEFAULTS["freq_max_iterations"], kind="integer",
-                              validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
-                        field("freq_tol_deg", "Convergence tolerance per frequency (°)",
-                              DEFAULTS["freq_tol_deg"]),
-                        muted=True,
-                    )
-                    yield card(
-                        "Temperature controller",
-                        field("temperature_visa_resource", "MercuryiTC VISA resource",
-                              DEFAULTS["temperature_visa_resource"], kind="text",
-                              hint="e.g. TCPIP0::<ip>::7020::SOCKET (Ethernet) or an ASRL resource."),
-                        field("temperature_sensor_uids", "Sensor board UID(s)",
-                              DEFAULTS["temperature_sensor_uids"], kind="text",
-                              hint="1 or 2 board UIDs, comma-separated, e.g. 'MB1.T1, DB5.T1'. "
-                                   "Not connected, or only one probe wired up? Fine either way — "
-                                   "missing readings just leave the column empty."),
-                        muted=True,
-                    )
+                # ── Tier 2: precision / speed knobs — collapsed ─────────────
+                with Collapsible(title="Acquisition & filter settings", collapsed=True):
+                    with Vertical(classes="param-grid"):
+                        yield card(
+                            "Lock-in filter",
+                            field("time_constant_s", "Filter time constant (s)",
+                                  DEFAULTS["time_constant_s"],
+                                  hint="Bigger = quieter but slower & longer settling.",
+                                  validators=[Number(minimum=1e-6, failure_description="must be > 0")]),
+                            select_field("order", "Filter order", list(range(1, 9)),
+                                         int(DEFAULTS["order"])),
+                            switch_field("sinc_filter", "Sinc filter (extra harmonic rejection)",
+                                         DEFAULTS["sinc_filter"]),
+                            field("input_range_1f_V", "1f input range (V)",
+                                  DEFAULTS["input_range_1f_V"],
+                                  hint="Match expected 1f signal size — avoid clipping/poor resolution.",
+                                  validators=[Number(minimum=1e-6, failure_description="must be > 0")]),
+                            field("input_range_2f_V", "2f input range (V)",
+                                  DEFAULTS["input_range_2f_V"],
+                                  hint="2f is usually much smaller than 1f — set separately.",
+                                  validators=[Number(minimum=1e-6, failure_description="must be > 0")]),
+                            field("sample_rate_Hz", "Demodulator sample rate (Sa/s)",
+                                  DEFAULTS["sample_rate_Hz"],
+                                  validators=[Number(minimum=1e-3, failure_description="must be > 0")]),
+                        )
+                        yield card(
+                            "Phase null",
+                            field("null_n_averages", "Averages per phase read",
+                                  DEFAULTS["null_n_averages"], kind="integer",
+                                  validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
+                            field("null_max_iterations", "Max null iterations",
+                                  DEFAULTS["null_max_iterations"], kind="integer",
+                                  validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
+                            field("null_tol_deg", "Convergence tolerance (°)",
+                                  DEFAULTS["null_tol_deg"],
+                                  hint="Nulls the leader's 1f Y quadrature by adjusting its demod "
+                                       "phaseshift node — the resistive PHE/AHE response at 1f must "
+                                       "be exactly in phase with the drive current, so any measured "
+                                       "Y there is pure instrumental delay."),
+                        )
+                        yield card(
+                            "Sweep timing & hold check",
+                            field("sweep_settling_time_s", "Settling time per sweep point (s)",
+                                  DEFAULTS["sweep_settling_time_s"],
+                                  hint="Rule of thumb: ≥ 5 × time constant.",
+                                  validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
+                            field("sweep_n_averages", "Samples to average per sweep point",
+                                  DEFAULTS["sweep_n_averages"], kind="integer",
+                                  validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
+                            field("hold_tol_ratio",
+                                  "Max acceptable |Y|/R away from the calibration point",
+                                  DEFAULTS["hold_tol_ratio"],
+                                  hint="Flags drift if the null residual exceeds this "
+                                       "anywhere in the sweep."),
+                        )
+                        yield card(
+                            "Scaling-check advanced",
+                            field("amp_n_averages", "Averages per amplitude point",
+                                  DEFAULTS["amp_n_averages"], kind="integer",
+                                  validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
+                            field("freq_n_averages", "Averages per phase read",
+                                  DEFAULTS["freq_n_averages"], kind="integer",
+                                  validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
+                            field("freq_max_iterations", "Max null iterations per frequency",
+                                  DEFAULTS["freq_max_iterations"], kind="integer",
+                                  validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
+                            field("freq_tol_deg", "Convergence tolerance per frequency (°)",
+                                  DEFAULTS["freq_tol_deg"]),
+                        )
+
+                # ── Tier 3: instrument wiring — collapsed ───────────────────
+                with Collapsible(title="Instrument configuration & addresses", collapsed=True):
+                    with Vertical(classes="stable-grid"):
+                        yield card(
+                            "Devices & connection",
+                            field("leader_device", "Leader MFLI (current source + 1f)",
+                                  DEFAULTS["leader_device"], kind="text"),
+                            field("follower_device", "Follower MFLI (2f)",
+                                  DEFAULTS["follower_device"], kind="text"),
+                            field("daq_host", "LabOne data server host",
+                                  DEFAULTS["daq_host"], kind="text"),
+                            field("daq_port", "LabOne data server port",
+                                  DEFAULTS["daq_port"], kind="integer"),
+                            muted=True,
+                        )
+                        yield card(
+                            "Magnet & ramp safety",
+                            field("visa_resource", "Magnet VISA resource",
+                                  DEFAULTS["visa_resource"], kind="text"),
+                            field("current_limit_A", "Software current limit (A)",
+                                  DEFAULTS["current_limit_A"],
+                                  hint="Hard safety ceiling — independent of the supply's own range."),
+                            field("voltage_compliance_V", "Voltage compliance (V)",
+                                  DEFAULTS["voltage_compliance_V"]),
+                            field("ramp_step_A", "Ramp step (A)", DEFAULTS["ramp_step_A"]),
+                            field("ramp_delay_s", "Ramp delay (s)", DEFAULTS["ramp_delay_s"]),
+                            muted=True,
+                        )
+                        yield card(
+                            "Gaussmeter",
+                            field("gaussmeter_visa_resource", "Gaussmeter VISA resource",
+                                  DEFAULTS["gaussmeter_visa_resource"], kind="text",
+                                  hint="Lake Shore 475 — measures the actual field at each point."),
+                            field("gaussmeter_n_averages", "Field readings averaged per point",
+                                  DEFAULTS["gaussmeter_n_averages"], kind="integer",
+                                  validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
+                            field("gaussmeter_read_delay_s", "Delay between readings (s)",
+                                  DEFAULTS["gaussmeter_read_delay_s"]),
+                            field("field_settle_tolerance_mT", "Field-settle tolerance (mT)",
+                                  DEFAULTS["field_settle_tolerance_mT"],
+                                  hint="Advanced: after each magnet step, wait until a short window "
+                                       "of gaussmeter readings spans less than this before the "
+                                       "settling time.",
+                                  validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
+                            muted=True,
+                        )
+                        yield card(
+                            "Temperature controller",
+                            field("temperature_visa_resource", "MercuryiTC VISA resource",
+                                  DEFAULTS["temperature_visa_resource"], kind="text",
+                                  hint="e.g. TCPIP0::<ip>::7020::SOCKET (Ethernet) or an ASRL resource."),
+                            field("temperature_sensor_uids", "Sensor board UID(s)",
+                                  DEFAULTS["temperature_sensor_uids"], kind="text",
+                                  hint="1 or 2 board UIDs, comma-separated, e.g. 'MB1.T1, DB5.T1'. "
+                                       "Not connected, or only one probe wired up? Fine either way — "
+                                       "missing readings just leave the column empty."),
+                            muted=True,
+                        )
 
             with Vertical(id="sidebar"):
                 yield Static("Summary", classes="sidebar-title")

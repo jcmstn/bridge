@@ -14,10 +14,12 @@ across 7 pages.
 from __future__ import annotations
 
 import re
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Callable, Optional
 
 from nicegui import ui
+from nicegui.client import Client
 
 from instruments.data_naming import TEST_SAMPLE, ensure_sample, ensure_test_sample, list_samples
 
@@ -70,15 +72,21 @@ async def new_sample_dialog(data_root: Path) -> Optional[str]:
     return await dialog
 
 
-async def status_comment_dialog() -> Optional[tuple[str, str]]:
+async def status_comment_dialog(client: Optional[Client] = None) -> Optional[tuple[str, str]]:
     """
     Post-run prompt: physical judgement (good/open/short/noisy) + a free
     comment, only knowable after the run finishes. Returns (status,
     comment), or None if skipped -- skipping leaves the record at whatever
     outcome-derived status ("completed"/"aborted"/"error") the page already
     wrote unconditionally right when the run finished.
+
+    Pages call this from a `background_tasks.create()` task (the run's
+    on_finished hook is sync), which has no slot/client context of its own,
+    so `ui.dialog()` would raise "slot stack ... is empty". Pass the page's
+    `ui.context.client` (captured while the page body still had context) so
+    the dialog is built inside `with client:`.
     """
-    with ui.dialog() as dialog, ui.card():
+    with (client or nullcontext()), ui.dialog() as dialog, ui.card():
         ui.label("Run finished — record the outcome").classes("font-bold")
         status_select = ui.select(STATUS_OPTIONS, value="good", label="Status").classes("w-full")
         comment_input = ui.input(

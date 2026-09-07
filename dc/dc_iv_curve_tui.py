@@ -49,6 +49,7 @@ from textual.screen import Screen
 from textual.validation import Number
 from textual.widgets import (
     Button,
+    Collapsible,
     DataTable,
     Footer,
     Header,
@@ -845,6 +846,11 @@ class DCIVCurveApp(App):
     .param-card { border: solid $primary; padding: 1 2; height: auto; }
 
     .stable-grid { layout: grid; grid-size: 3; grid-gutter: 1 2; height: auto; }
+
+    /* Collapsible tiers -- precision knobs + instrument wiring, folded by default */
+    Collapsible { height: auto; margin: 1 0; }
+    Collapsible > Contents { padding: 1 0 0 1; }
+    CollapsibleTitle { text-style: bold; color: $text-muted; }
     .stable-card { border: round $panel-darken-1; padding: 1 2; height: auto; }
     .stable-card .card-title { color: $text-muted; text-style: none; }
     .stable-card .field-label { color: $text-muted; text-style: none; }
@@ -892,36 +898,16 @@ class DCIVCurveApp(App):
                                               valid_empty=True, hint="Filename's T###K token only."),
                                        classes="field")
 
-                # ── Parameters that decide the physics of this run ──────────
+                # ── Tier 1: what defines this run — always visible ──────────
                 with Vertical(classes="param-grid"):
                     yield card(
-                        "Source (Keithley 6221) — current sweep",
+                        "Current sweep (Keithley 6221)",
                         field("current_min_A", "Sweep current min (A)", DEFAULTS["current_min_A"]),
                         field("current_max_A", "Sweep current max (A)", DEFAULTS["current_max_A"]),
                         field("step_A", "Sweep step size (A)", DEFAULTS["step_A"],
                               validators=[Number(minimum=1e-12, failure_description="must be > 0")]),
                         switch_field("bidirectional_sweep", "Bidirectional (min → max → min)",
                                      DEFAULTS["bidirectional_sweep"]),
-                        field("compliance_V", "Compliance voltage (V)", DEFAULTS["compliance_V"],
-                              hint="Set high enough to reach the expected voltage at "
-                                   "current_max_A, or the sweep clips against compliance.",
-                              validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
-                    )
-                    yield card(
-                        "Voltmeter (Keithley 2182)",
-                        field("nplc", "NPLC (integration time)", DEFAULTS["nplc"],
-                              hint="Bigger = quieter but slower.",
-                              validators=[Number(minimum=0.01, failure_description="must be > 0")]),
-                        switch_field("auto_range", "Auto-range", DEFAULTS["auto_range"]),
-                    )
-                    yield card(
-                        "Acquisition timing",
-                        field("settling_time_s", "Settling time per current step (s)",
-                              DEFAULTS["settling_time_s"],
-                              validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
-                        field("n_averages", "Voltage samples averaged per point",
-                              DEFAULTS["n_averages"], kind="integer",
-                              validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
                     )
                     yield card(
                         "Gate voltage (Keithley 2400, optional)",
@@ -937,38 +923,62 @@ class DCIVCurveApp(App):
                                      DEFAULTS["enable_temperature"]),
                     )
 
-                # ── Instrument wiring & timing constants ── rarely change ───
-                yield Static("Instrument configuration", classes="section-title")
-                with Vertical(classes="stable-grid"):
-                    yield card(
-                        "Instrument addresses",
-                        field("source_visa_resource", "6221 (current source)",
-                              DEFAULTS["source_visa_resource"], kind="text"),
-                        field("voltmeter_visa_resource", "2182 (DUT voltage)",
-                              DEFAULTS["voltmeter_visa_resource"], kind="text"),
-                        field("gate_visa_resource", "2400 (gate)",
-                              DEFAULTS["gate_visa_resource"], kind="text"),
-                        field("temperature_visa_resource", "MercuryiTC",
-                              DEFAULTS["temperature_visa_resource"], kind="text"),
-                        muted=True,
-                    )
-                    yield card(
-                        "Source & gate limits",
-                        field("source_delay_s", "6221 source delay (s)", DEFAULTS["source_delay_s"]),
-                        field("gate_voltage_limit_V", "Gate voltage software limit (V)",
-                              DEFAULTS["gate_voltage_limit_V"],
-                              hint="Hard safety ceiling."),
-                        field("gate_compliance_current_A", "Gate leakage compliance (A)",
-                              DEFAULTS["gate_compliance_current_A"]),
-                        muted=True,
-                    )
-                    yield card(
-                        "Temperature sensors",
-                        field("temperature_sensor_uids", "MercuryiTC sensor board UID(s)",
-                              DEFAULTS["temperature_sensor_uids"], kind="text",
-                              hint="1-2 UIDs, comma-separated."),
-                        muted=True,
-                    )
+                # ── Tier 2: precision / speed knobs — collapsed ─────────────
+                with Collapsible(title="Acquisition & filter settings", collapsed=True):
+                    with Vertical(classes="param-grid"):
+                        yield card(
+                            "Source & voltmeter",
+                            field("compliance_V", "Compliance voltage (V)", DEFAULTS["compliance_V"],
+                                  hint="Set high enough to reach the expected voltage at "
+                                       "current_max_A, or the sweep clips against compliance.",
+                                  validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
+                            field("nplc", "NPLC (integration time)", DEFAULTS["nplc"],
+                                  hint="Bigger = quieter but slower.",
+                                  validators=[Number(minimum=0.01, failure_description="must be > 0")]),
+                            switch_field("auto_range", "Auto-range", DEFAULTS["auto_range"]),
+                        )
+                        yield card(
+                            "Acquisition timing",
+                            field("settling_time_s", "Settling time per current step (s)",
+                                  DEFAULTS["settling_time_s"],
+                                  validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
+                            field("n_averages", "Voltage samples averaged per point",
+                                  DEFAULTS["n_averages"], kind="integer",
+                                  validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
+                        )
+
+                # ── Tier 3: instrument wiring & timing constants — collapsed ─
+                with Collapsible(title="Instrument configuration & addresses", collapsed=True):
+                    with Vertical(classes="stable-grid"):
+                        yield card(
+                            "Instrument addresses",
+                            field("source_visa_resource", "6221 (current source)",
+                                  DEFAULTS["source_visa_resource"], kind="text"),
+                            field("voltmeter_visa_resource", "2182 (DUT voltage)",
+                                  DEFAULTS["voltmeter_visa_resource"], kind="text"),
+                            field("gate_visa_resource", "2400 (gate)",
+                                  DEFAULTS["gate_visa_resource"], kind="text"),
+                            field("temperature_visa_resource", "MercuryiTC",
+                                  DEFAULTS["temperature_visa_resource"], kind="text"),
+                            muted=True,
+                        )
+                        yield card(
+                            "Source & gate limits",
+                            field("source_delay_s", "6221 source delay (s)", DEFAULTS["source_delay_s"]),
+                            field("gate_voltage_limit_V", "Gate voltage software limit (V)",
+                                  DEFAULTS["gate_voltage_limit_V"],
+                                  hint="Hard safety ceiling."),
+                            field("gate_compliance_current_A", "Gate leakage compliance (A)",
+                                  DEFAULTS["gate_compliance_current_A"]),
+                            muted=True,
+                        )
+                        yield card(
+                            "Temperature sensors",
+                            field("temperature_sensor_uids", "MercuryiTC sensor board UID(s)",
+                                  DEFAULTS["temperature_sensor_uids"], kind="text",
+                                  hint="1-2 UIDs, comma-separated."),
+                            muted=True,
+                        )
 
             with Vertical(id="sidebar"):
                 yield Static("Description", classes="sidebar-title")

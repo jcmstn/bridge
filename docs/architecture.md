@@ -245,7 +245,13 @@ units sub-header row as data. Use `read_raw()`.
 5. **`{suite}/{suite}_tui.py`** — register the new `App` + its schematic in
    the suite picker.
 6. **`web/{suite}/{name}.py`** — import the pure names from step 4; supply
-   the page-specific callables to `RunController`.
+   the page-specific callables to `RunController`. Build the layout with
+   `measurement_layout()` from `web/run_controller.py`: identity bar into
+   `regions.identity`, the param/stable grids into `regions.params`,
+   `summary_box` + start button into `regions.summary`, and status / plot /
+   table / log into `regions.output` — the plot wrapped in a
+   `ui.element("div").style("aspect-ratio: 1 / <n_panels>")` with no fixed
+   Plotly `height`.
 7. **`web/app.py`** — register the new page.
 8. **`tests/`** — `test_{name}_tui.py` for the parse/plan/summary logic and
    `test_web_{name}.py` for the page's state→config mapping (see §9).
@@ -261,6 +267,7 @@ units sub-header row as data. Use `read_raw()`.
 | Current-reversal averaging | `instruments/keithley6221.py` `acquire_reversal_averaged_voltage` + `current-reversal.md` |
 | An instrument's SCPI / connect / shutdown behaviour | `instruments/{instr}.py` only |
 | Live-plot / run-lock / run-history behaviour (web) | `web/run_controller.py` / `web/run_manager.py` / `web/run_index.py` |
+| Web page layout skeleton (top band + params/output columns, square plot) | `web/run_controller.py` `measurement_layout()` — every page fills `regions.identity` / `.params` / `.summary` / `.output`; the app-wide colour theme is `web/app.py` (`app.colors()` + shared head CSS) |
 | The identity bar / data-root picker | `web/identity_bar.py` + `web/directory_picker.py`; TUI side `instruments/data_dir.py` |
 | Suite picker text or schematic | `{suite}/{suite}_tui.py` and the `{NAME}_DESCRIPTION` in the TUI module |
 

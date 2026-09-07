@@ -48,7 +48,7 @@ from instruments.data_naming import (
 from web.run_controller import (
     RunController, RunCallbacks, FinalStatus, num_field, optional_num_field, text_field,
     bool_switch, render_summary, busy_banner, is_busy,
-    param_card, stable_card, param_grid, stable_grid, section_title,
+    param_card, stable_card, param_grid, stable_grid, advanced_section, measurement_layout,
 )
 from web.directory_picker import validate_directory
 from web.identity_bar import identity_bar
@@ -173,6 +173,7 @@ def _save_combined_png(records: list[dict], png_path: Path) -> None:
 
 def page() -> None:
     ui.page_title(PAGE_TITLE)
+    page_client = ui.context.client  # has slot context now; reused by the detached status/comment task
     busy_banner()
     ui.link("← Back to measurement suite", "/").classes("text-sm")
     ui.label(PAGE_TITLE).classes("text-2xl font-bold mt-1")
@@ -190,35 +191,26 @@ def page() -> None:
     controller: dict[str, Optional[RunController]] = {"c": None}
 
     _t_default = d("temperature_setpoint_K")
-    identity = identity_bar(
-        default_data_dir=saved.get("data_dir") or str(_DATA_DIR),
-        default_sample=saved.get("sample") or TEST_SAMPLE,
-        default_device=d("device"), default_cooldown=d("cooldown"),
-        default_temperature_K=float(_t_default) if _t_default not in ("", None) else None,
-    )
 
-    with ui.row().classes("w-full gap-4 items-start no-wrap"):
-        with ui.column().classes("flex-grow gap-1"):
+    with measurement_layout() as regions:
+        with regions.identity:
+            identity = identity_bar(
+                default_data_dir=saved.get("data_dir") or str(_DATA_DIR),
+                default_sample=saved.get("sample") or TEST_SAMPLE,
+                default_device=d("device"), default_cooldown=d("cooldown"),
+                default_temperature_K=float(_t_default) if _t_default not in ("", None) else None,
+            )
+        with regions.params:
+            # ── Tier 1: what defines this run — always visible ───────────────
             with param_grid():
-                with param_card("Source (6221) — current sweep"):
+                with param_card("Current sweep (Keithley 6221)"):
                     inputs["current_min_A"] = num_field("Sweep current min (A)", float(d("current_min_A")))
                     inputs["current_max_A"] = num_field("Sweep current max (A)", float(d("current_max_A")))
                     inputs["step_A"] = num_field("Sweep step size (A)", float(d("step_A")))
                     switches["bidirectional_sweep"] = bool_switch(
                         "Bidirectional sweep (min → max → min)", d("bidirectional_sweep"))
-                    inputs["compliance_V"] = num_field(
-                        "Compliance voltage (V)", float(d("compliance_V")),
-                        hint="Set high enough to reach the expected voltage at current_max_A.")
 
-                with param_card("Voltmeter (2182)"):
-                    inputs["nplc"] = num_field("NPLC (integration time)", float(d("nplc")))
-                    switches["auto_range"] = bool_switch("Auto-range", d("auto_range"))
-
-                with param_card("Acquisition timing"):
-                    inputs["settling_time_s"] = num_field("Settling time per current step (s)", float(d("settling_time_s")))
-                    inputs["n_averages"] = num_field("Voltage samples averaged per point", float(d("n_averages")), integer=True)
-
-                with param_card("Gate voltage (2400, optional)"):
+                with param_card("Gate voltage (Keithley 2400, optional)"):
                     switches["enable_gate"] = bool_switch("Enable gate (Keithley 2400)", d("enable_gate"))
                     inputs["gate_voltage_values"] = text_field(
                         "Gate voltage (V)", d("gate_voltage_values"),
@@ -229,51 +221,66 @@ def page() -> None:
                     switches["enable_temperature"] = bool_switch(
                         "Log temperature (Oxford Instruments MercuryiTC)", d("enable_temperature"))
 
-            section_title("Instrument configuration")
-            with stable_grid():
-                with stable_card("Instrument addresses"):
-                    inputs["source_visa_resource"] = text_field("Keithley 6221 (current source)", d("source_visa_resource"))
-                    inputs["voltmeter_visa_resource"] = text_field("Keithley 2182 (DUT voltage)", d("voltmeter_visa_resource"))
-                    inputs["gate_visa_resource"] = text_field("Keithley 2400 (gate) VISA resource", d("gate_visa_resource"))
-                    inputs["temperature_visa_resource"] = text_field("MercuryiTC VISA resource", d("temperature_visa_resource"))
+            # ── Tier 2: precision / speed knobs — collapsed ─────────────────
+            with advanced_section("Acquisition & filter settings"):
+                with stable_grid():
+                    with param_card("Source & voltmeter"):
+                        inputs["compliance_V"] = num_field(
+                            "Compliance voltage (V)", float(d("compliance_V")),
+                            hint="Set high enough to reach the expected voltage at current_max_A.")
+                        inputs["nplc"] = num_field("NPLC (integration time)", float(d("nplc")))
+                        switches["auto_range"] = bool_switch("Auto-range", d("auto_range"))
 
-                with stable_card("Source & gate limits"):
-                    inputs["source_delay_s"] = num_field("6221 source delay (s)", float(d("source_delay_s")))
-                    inputs["gate_voltage_limit_V"] = num_field("Gate voltage software limit (V)", float(d("gate_voltage_limit_V")))
-                    inputs["gate_compliance_current_A"] = num_field("Gate leakage compliance (A)", float(d("gate_compliance_current_A")))
+                    with param_card("Acquisition timing"):
+                        inputs["settling_time_s"] = num_field("Settling time per current step (s)", float(d("settling_time_s")))
+                        inputs["n_averages"] = num_field("Voltage samples averaged per point", float(d("n_averages")), integer=True)
 
-                with stable_card("Temperature sensors"):
-                    inputs["temperature_sensor_uids"] = text_field("Sensor board UID(s)", d("temperature_sensor_uids"))
+            # ── Tier 3: instrument wiring & safety — collapsed ──────────────
+            with advanced_section("Instrument configuration & addresses", icon="settings"):
+                with stable_grid():
+                    with stable_card("Instrument addresses"):
+                        inputs["source_visa_resource"] = text_field("Keithley 6221 (current source)", d("source_visa_resource"))
+                        inputs["voltmeter_visa_resource"] = text_field("Keithley 2182 (DUT voltage)", d("voltmeter_visa_resource"))
+                        inputs["gate_visa_resource"] = text_field("Keithley 2400 (gate) VISA resource", d("gate_visa_resource"))
+                        inputs["temperature_visa_resource"] = text_field("MercuryiTC VISA resource", d("temperature_visa_resource"))
 
-        with ui.column().classes("w-96 gap-2"):
-            ui.label("Summary").classes("text-lg font-bold")
+                    with stable_card("Source & gate limits"):
+                        inputs["source_delay_s"] = num_field("6221 source delay (s)", float(d("source_delay_s")))
+                        inputs["gate_voltage_limit_V"] = num_field("Gate voltage software limit (V)", float(d("gate_voltage_limit_V")))
+                        inputs["gate_compliance_current_A"] = num_field("Gate leakage compliance (A)", float(d("gate_compliance_current_A")))
+
+                    with stable_card("Temperature sensors"):
+                        inputs["temperature_sensor_uids"] = text_field("Sensor board UID(s)", d("temperature_sensor_uids"))
+
+        with regions.summary:
             summary_box = ui.column().classes("w-full")
             start_btn = ui.button("▶  Start measurement", color="primary").classes("w-full")
 
-    ui.separator().classes("my-3")
-    status_label = ui.label("Idle.").classes("text-sm font-bold")
-    abort_btn = ui.button("Abort (safe ramp-down)", color="negative").props("outline")
-    abort_btn.set_visibility(False)
+        with regions.output:
+            status_label = ui.label("Idle.").classes("text-sm font-bold")
+            abort_btn = ui.button("Abort (safe ramp-down)", color="negative").props("outline")
+            abort_btn.set_visibility(False)
 
-    fig = make_subplots(rows=2, cols=1, subplot_titles=("I-V curve", "Differential resistance (dV/dI)"))
-    fig.update_xaxes(title_text="Current (A)", row=1, col=1)
-    fig.update_yaxes(title_text="Voltage (V)", row=1, col=1)
-    fig.update_xaxes(title_text="Current (A)", row=2, col=1)
-    fig.update_yaxes(title_text="dV/dI (Ω)", row=2, col=1)
-    fig.update_layout(margin=dict(l=60, r=20, t=40, b=50), height=650, showlegend=True)
-    plot = ui.plotly(fig).classes("w-full")
+            fig = make_subplots(rows=2, cols=1, subplot_titles=("I-V curve", "Differential resistance (dV/dI)"))
+            fig.update_xaxes(title_text="Current (A)", row=1, col=1)
+            fig.update_yaxes(title_text="Voltage (V)", row=1, col=1)
+            fig.update_xaxes(title_text="Current (A)", row=2, col=1)
+            fig.update_yaxes(title_text="dV/dI (Ω)", row=2, col=1)
+            fig.update_layout(margin=dict(l=60, r=20, t=40, b=50), showlegend=True)
+            with ui.element("div").classes("w-full").style("aspect-ratio: 1 / 2; max-height: 90vh"):
+                plot = ui.plotly(fig).classes("w-full h-full")
 
-    columns = [
-        {"name": "n", "label": "#", "field": "n"},
-        {"name": "Vg", "label": "Vg (V)", "field": "Vg"},
-        {"name": "I", "label": "I (A)", "field": "I"},
-        {"name": "V", "label": "V (V)", "field": "V"},
-        {"name": "R", "label": "R (Ω)", "field": "R"},
-        {"name": "T1", "label": "T1 (K)", "field": "T1"},
-        {"name": "T2", "label": "T2 (K)", "field": "T2"},
-    ]
-    table = ui.table(columns=columns, rows=[], row_key="n").classes("w-full").props("dense")
-    log_area = ui.log(max_lines=2000).classes("w-full h-48 font-mono text-xs")
+            columns = [
+                {"name": "n", "label": "#", "field": "n"},
+                {"name": "Vg", "label": "Vg (V)", "field": "Vg"},
+                {"name": "I", "label": "I (A)", "field": "I"},
+                {"name": "V", "label": "V (V)", "field": "V"},
+                {"name": "R", "label": "R (Ω)", "field": "R"},
+                {"name": "T1", "label": "T1 (K)", "field": "T1"},
+                {"name": "T2", "label": "T2 (K)", "field": "T2"},
+            ]
+            table = ui.table(columns=columns, rows=[], row_key="n").classes("w-full").props("dense")
+            log_area = ui.log(max_lines=2000).classes("w-full h-48 font-mono text-xs")
 
     def parse_state() -> tuple[dict, list[str]]:
         errors: list[str] = []
@@ -290,6 +297,8 @@ def page() -> None:
                 state[fid] = (identity.device_input.value or "").strip()
             elif fid == "cooldown":
                 state[fid] = (identity.cooldown_input.value or "").strip()
+            elif fid == "data_dir":
+                state[fid] = (identity.data_dir_input.value or "").strip()
             else:
                 state[fid] = (inputs[fid].value or "").strip()
         for fid in OPTIONAL_NUMERIC_FIELDS:
@@ -408,7 +417,7 @@ def page() -> None:
 
     async def _prompt_status_comment(plan: MeasurementPlan, run_contexts: list[RunContext],
                                       data_root: str, records: list[dict]) -> None:
-        result = await status_comment_dialog()
+        result = await status_comment_dialog(page_client)
         if result is None:
             return
         status, comment = result
