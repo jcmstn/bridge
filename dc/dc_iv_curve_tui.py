@@ -339,7 +339,10 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     if state["compliance_V"] <= 0:
         errors.append("Compliance voltage must be > 0 V.")
 
-    if state["current_min_A"] == state["current_max_A"]:
+    if state["current_min_A"] > state["current_max_A"]:
+        errors.append("Sweep current min must be ≤ max — the 6221 range guard rejects any "
+                      "point outside [min, max], so a reversed range fails on the first step.")
+    elif state["current_min_A"] == state["current_max_A"]:
         warnings.append("current_min equals current_max — sweep will repeat a single point.")
 
     info.append(f"Current range: {format_si(state['current_min_A'], 'A')} → "

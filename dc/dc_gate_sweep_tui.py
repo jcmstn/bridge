@@ -365,7 +365,7 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         errors.append("Source (6221), voltmeter (2182), and gate (2400) VISA resources must all be different.")
 
     if state["sense_current_A"] == 0:
-        warnings.append("Sense current is zero — resistance (V/I) will be undefined.")
+        errors.append("Sense current must be nonzero (resistance divides by it).")
     else:
         info.append(f"Sense current I = {format_si(state['sense_current_A'], 'A')}")
 
