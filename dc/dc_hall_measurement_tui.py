@@ -1036,7 +1036,10 @@ class DCHallMeasurementApp(App):
                         )
                         yield card(
                             "Source & ramp safety",
-                            field("source_delay_s", "6221 source delay (s)", DEFAULTS["source_delay_s"]),
+                            field("source_delay_s", "6221 source delay (s)", DEFAULTS["source_delay_s"],
+                                  hint="Also the settle time between a current reversal and "
+                                       "reading the voltmeter, so the reversal has actually "
+                                       "finished before the 2182 integrates."),
                             field("current_limit_A", "Magnet software current limit (A)",
                                   DEFAULTS["current_limit_A"],
                                   hint="Hard safety ceiling."),

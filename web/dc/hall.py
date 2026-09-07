@@ -292,7 +292,10 @@ def page() -> None:
 
                     with stable_card("Source & ramp safety"):
                         inputs["source_delay_s"] = num_field(
-                            "6221 source delay (s)", float(d("source_delay_s")))
+                            "6221 source delay (s)", float(d("source_delay_s")),
+                            hint="Also the settle time between a current reversal and reading "
+                                 "the voltmeter, so the reversal has actually finished before "
+                                 "the 2182 integrates.")
                         inputs["current_limit_A"] = num_field(
                             "Software current limit (A)", float(d("current_limit_A")),
                             hint="Hard safety ceiling — independent of the supply's own range.")

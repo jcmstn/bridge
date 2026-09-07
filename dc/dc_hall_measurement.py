@@ -20,7 +20,7 @@ Sources a fixed DC sense current with the 6221 and reads the transverse
 (Hall) voltage with the 2182, reversing the current (+I / -I) at each field
 point and decomposing the voltage into odd (the reported Hall voltage) and
 even parts — see docs/current-reversal.md for why both are recorded
-(columns hall_voltage_even_V / hall_voltage_even_std_V).
+(columns hall_voltage_even_V / hall_voltage_even_sem_V).
 
 Magnetic field sweep
 --------------------
@@ -226,11 +226,15 @@ def run_measurement(
             log.info("   B=%.4f mT (measured)", field_mT)
 
         # ── 4. Acquire reversal-averaged Hall voltage ───────────────────────
+        # source_delay_s is slept after each +I/-I flip before the 2182 is
+        # read -- a bare source_current write does not itself wait for the
+        # reversed current to settle (same as dc_spin_valve.py).
         hv = acquire_reversal_averaged_voltage(
-            source, voltmeter, src_cfg.sense_current_A, acq_cfg.n_reversals, stop_event)
+            source, voltmeter, src_cfg.sense_current_A, acq_cfg.n_reversals,
+            stop_event, source_delay_s=src_cfg.source_delay_s)
         r_hall = hv["mean"] / src_cfg.sense_current_A
-        log.info("   V_Hall=%.4e V  σ=%.2e V  R_Hall=%.5g Ω  V_even=%.4e V  (n=%d reversals)",
-                  hv["mean"], hv["std"], r_hall, hv["even_mean"], hv["n_reversals"])
+        log.info("   V_Hall=%.4e V  SEM=%.2e V  R_Hall=%.5g Ω  V_even=%.4e V  (n=%d reversals)",
+                  hv["mean"], hv["sem"], r_hall, hv["even_mean"], hv["n_reversals"])
 
         # ── 4b. Read temperature (MercuryiTC, optional) ─────────────────────
         temp_1_K, temp_2_K = read_temperature(temp_ctrl, temp_cfg) \
@@ -246,9 +250,9 @@ def run_measurement(
             "temperature_2_K":  temp_2_K,
             "sense_current_A":  src_cfg.sense_current_A,
             "hall_voltage_V":   hv["mean"],
-            "hall_voltage_std_V": hv["std"],
+            "hall_voltage_sem_V": hv["sem"],
             "hall_voltage_even_V":     hv["even_mean"],
-            "hall_voltage_even_std_V": hv["even_std"],
+            "hall_voltage_even_sem_V": hv["even_sem"],
             "hall_resistance_ohm": r_hall,
             "n_reversals":      hv["n_reversals"],
         }
