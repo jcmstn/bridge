@@ -195,6 +195,31 @@ def test_write_record_header_and_body_round_trip(tmp_path: Path) -> None:
     assert df.iloc[0]["B_T"] == -2.0
 
 
+def test_allocate_run_puts_setpoint_in_T_setpoint_not_measured_T_K(tmp_path: Path) -> None:
+    # allocate_run() knows only the nominal setpoint; the measured T_K column
+    # must stay blank until finalize time, so a hard-crashed run never leaves
+    # an unmeasured number in T_K.
+    ensure_sample(tmp_path, "A", create=True)
+    ctx = allocate_run(tmp_path, "A", "HB3", "IV", temperature_setpoint_K=300)
+
+    df = pd.read_csv(tmp_path / "A" / "index.csv")
+    row = df[df["run"] == ctx.run_number].iloc[0]
+    assert row["T_setpoint_K"] == 300
+    assert pd.isna(row["T_K"])
+
+
+def test_write_record_is_atomic_and_leaves_no_tmp(tmp_path: Path) -> None:
+    ensure_sample(tmp_path, "A", create=True)
+    ctx = allocate_run(tmp_path, "A", "HB3", "IV", temperature_setpoint_K=300)
+
+    write_record(ctx.raw_path, [{"x": 1, "y": 2}],
+                 {"run": ctx.run_number, "status": "in_progress"})
+
+    assert ctx.raw_path.exists()
+    assert list(ctx.raw_path.parent.glob("*.tmp")) == []
+    assert read_raw(ctx.raw_path)["x"].tolist() == [1]
+
+
 def test_write_record_can_be_called_repeatedly_incremental_style(tmp_path: Path) -> None:
     ensure_sample(tmp_path, "A", create=True)
     ctx = allocate_run(tmp_path, "A", "HB3", "IV", temperature_setpoint_K=300)

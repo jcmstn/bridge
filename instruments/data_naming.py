@@ -36,6 +36,7 @@ and once more at end-of-run with the real outcome/status/comment.
 from __future__ import annotations
 
 import csv
+import os
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -341,7 +342,10 @@ def allocate_run(
             "sample": sample,
             "device": device,
             "type": type_code,
-            "T_K": "" if temperature_setpoint_K is None else temperature_setpoint_K,
+            # The nominal setpoint goes in T_setpoint_K. T_K is the MEASURED
+            # temperature -- left blank here and filled in at finalize time,
+            # so a crashed run never leaves an unmeasured number in T_K.
+            "T_setpoint_K": "" if temperature_setpoint_K is None else temperature_setpoint_K,
             "cooldown": "",
             "status": "in_progress",
             "comment": "",
@@ -448,13 +452,20 @@ def write_record(raw_path: Path, records: list[dict], header_fields: dict) -> No
     raw_path.parent.mkdir(parents=True, exist_ok=True)
     header_lines = [f"# {k}: {_format_header_value(v)}" for k, v in header_fields.items()]
     df = pd.DataFrame(records)
-    with open(raw_path, "w", newline="") as f:
+    # Write to a sibling temp file, then os.replace() it into place: a crash
+    # mid-write can then only leave a stray *.csv.tmp, never a truncated raw
+    # file -- the previous complete version stays intact until the atomic
+    # rename. Same directory so os.replace stays on one filesystem (atomic);
+    # the .tmp suffix keeps a leftover out of raw/*.csv globs.
+    tmp_path = raw_path.with_name(raw_path.name + ".tmp")
+    with open(tmp_path, "w", newline="") as f:
         f.write("\n".join(header_lines) + "\n")
         if len(df.columns):
             names, units = zip(*(_split_column_unit(c) for c in df.columns))
             f.write(",".join(names) + "\n")
             f.write(",".join(units) + "\n")
         df.to_csv(f, index=False, header=False)
+    os.replace(tmp_path, raw_path)
 
 
 def read_raw(raw_path: Path) -> pd.DataFrame:
