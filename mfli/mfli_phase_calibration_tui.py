@@ -132,7 +132,7 @@ DEFAULTS: dict = {
     "follower_device": "dev7886",
     "daq_host": "localhost",
     "daq_port": "8004",
-    "frequency_Hz": "17.777",
+    "frequency_Hz": "317.3",
     "amplitude_V": "0.1",
     "series_R_ohm": "10000",
     "time_constant_s": "0.3",
@@ -164,7 +164,7 @@ DEFAULTS: dict = {
     "amplitudes_V": "0.05, 0.1",
     "amp_n_averages": "20",
     "enable_frequency_check": False,
-    "frequencies_Hz": "13.333, 17.777, 23.333",
+    "frequencies_Hz": "263.3, 317.3, 383.3",
     "freq_n_averages": "20",
     "freq_max_iterations": "5",
     "freq_tol_deg": "0.02",
@@ -882,7 +882,9 @@ class MFLIPhaseCalibrationApp(App):
                         "Excitation",
                         field("frequency_Hz", "Excitation frequency (Hz)",
                               DEFAULTS["frequency_Hz"],
-                              hint="Avoid exact multiples of 50/60 Hz (mains pickup).",
+                              hint="Must match the frequency the harmonic-Hall run uses — "
+                                   "the calibrated phase is frequency-specific. Avoid exact "
+                                   "multiples of 50/60 Hz (mains pickup).",
                               validators=[Number(minimum=1e-3, failure_description="must be > 0")]),
                         field("amplitude_V", "Output amplitude (V, peak)",
                               DEFAULTS["amplitude_V"],
@@ -1321,7 +1323,7 @@ class MFLIPhaseCalibrationApp(App):
         )
         frequency_check_cfg = FrequencyCheckConfig(
             enabled=state["enable_frequency_check"],
-            frequencies_Hz=state["frequencies_Hz"] or [13.333, 17.777, 23.333],
+            frequencies_Hz=state["frequencies_Hz"] or [263.3, 317.3, 383.3],
             n_averages=state["freq_n_averages"],
             max_iterations=state["freq_max_iterations"],
             tol_deg=state["freq_tol_deg"],

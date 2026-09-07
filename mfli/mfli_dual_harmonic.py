@@ -133,8 +133,11 @@ class OutputConfig:
                                       #   contacts/amplifier/thermal drift.
                                       #   Also avoid exact multiples of 50/60 Hz.
     amplitude_V: float  = 0.1         # Output amplitude      [V, peak)
-    series_R_ohm: float = 1e6         # Series resistor       [Ω]
+    series_R_ohm: float = 10000       # Series resistor       [Ω]
                                       #   → I_exc ≈ amplitude_V / series_R_ohm
+                                      #   Matches the TUI/web default; a bare
+                                      #   OutputConfig() must give the same
+                                      #   current a form-driven run would.
 
 
 @dataclass
@@ -360,6 +363,7 @@ def build_run_metadata(
     demod1_cfg: DemodConfig,
     demod2_cfg: DemodConfig,
     geometry_cfg: Optional[SampleGeometryConfig] = None,
+    demod2_phase_null_1f_deg: Optional[float] = None,
 ) -> dict:
     """
     Assemble the run-level metadata a harmonic-Hall analysis needs to turn
@@ -385,10 +389,16 @@ def build_run_metadata(
     `geometry_cfg` (Hall bar dimensions, external-field angle from the
     out-of-plane axis) is never available from an instrument — pass None
     (the default) to leave those columns blank rather than blocking a run.
+
+    `demod2_phase_null_1f_deg` (from null_follower_reference_via_1f(), run
+    once at phase-calibration time) is the follower path's delay angle at
+    f — recorded so analysis can rotate the 2f X/Y into the current frame
+    (by -2× this). Left blank when no follower calibration was done.
     """
     geometry_cfg = geometry_cfg or SampleGeometryConfig()
     I_peak_A = out_cfg.amplitude_V / out_cfg.series_R_ohm
     return {
+        "demod2_phase_null_1f_deg": demod2_phase_null_1f_deg,
         "excitation_frequency_Hz":       out_cfg.frequency_Hz,
         "excitation_current_A_peak":     I_peak_A,
         "excitation_current_A_rms":      I_peak_A / math.sqrt(2.0),
@@ -507,6 +517,71 @@ def auto_null_phase(
     return result
 
 
+def null_follower_reference_via_1f(
+    daq: zi.ziDAQServer,
+    demod2_cfg: DemodConfig,
+    n_averages: int = 20,
+    max_iterations: int = 5,
+    tol_deg: float = 0.02,
+    settle_time_s: Optional[float] = None,
+) -> float:
+    """
+    Measure the follower signal chain's own delay angle at the excitation
+    frequency f, so a harmonic-Hall analysis can put the recorded 2f X/Y
+    into the drive current's reference frame.
+
+    MDS aligns the two devices' sample clocks and start trigger but leaves
+    each demodulator's reference phase alone, and auto_null_phase() only
+    ever touches the leader's 1f demod — so 2f_X_V / 2f_Y_V are otherwise
+    recorded in an arbitrary rotated frame and the damping-like (in-phase)
+    and thermal (quadrature) 2ω terms can't be separated.
+
+    This switches the follower demod to the 1st harmonic, nulls its Y
+    against the same (split) transverse voltage — purely resistive PHE/AHE
+    at 1f, in phase with the drive current — and reads back the phaseshift.
+    That angle is the follower path's electrical delay at f; for a pure
+    delay the 2f delay is twice it, so analysis rotates the recorded 2f X/Y
+    by -2× this value.
+
+    It then restores the follower demod to the 2nd harmonic and its
+    phaseshift to where it started: this only *measures* the anchor, it
+    does not rotate the acquired data. Whether writing phaseshift on a
+    harmonic=2 demod rotates the 2ω reference by that angle or by twice it
+    is a LabOne-node-semantics question kept out of the acquisition path on
+    purpose. The return value is saved as the run-metadata column
+    demod2_phase_null_1f_deg (see build_run_metadata()).
+
+    Returns the nulled 1f phaseshift in degrees.
+    """
+    d, di = demod2_cfg.device, demod2_cfg.demod_index
+    if settle_time_s is None:
+        settle_time_s = 5.0 * demod2_cfg.filter.time_constant_s
+    original_phase = get_demod_phase_deg(daq, demod2_cfg)
+
+    daq.setInt(f"/{d}/demods/{di}/harmonic", 1)
+    daq.sync()
+    time.sleep(settle_time_s)
+    try:
+        result = auto_null_phase(daq, demod2_cfg, n_averages=n_averages,
+                                  max_iterations=max_iterations, tol_deg=tol_deg,
+                                  settle_time_s=settle_time_s)
+        delay_angle_deg = result.phase_after_deg
+        if not result.converged:
+            log.warning(
+                "Follower 1f null did not converge (|Y|/R=%.2e) — the 2f reference "
+                "anchor demod2_phase_null_1f_deg may be unreliable.", result.residual_ratio,
+            )
+    finally:
+        set_demod_phase_deg(daq, demod2_cfg, original_phase)
+        daq.setInt(f"/{d}/demods/{di}/harmonic", demod2_cfg.harmonic)
+        daq.sync()
+        time.sleep(settle_time_s)
+
+    log.info("Follower 2f reference anchor: 1f delay angle = %.4f° at f "
+             "(analysis rotates recorded 2f X/Y by -2× this).", delay_angle_deg)
+    return delay_angle_deg
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Magnet / gaussmeter control
 # ─────────────────────────────────────────────────────────────────────────────
@@ -599,6 +674,7 @@ def run_measurement(
     temp_ctrl: Optional[MercuryITC] = None,
     temp_cfg:  Optional[TemperatureControllerConfig] = None,
     geometry_cfg: Optional[SampleGeometryConfig] = None,
+    demod2_phase_null_1f_deg: Optional[float] = None,
     mds=None,
     write_csv: Optional[Callable[[List[dict]], None]] = None,
 ) -> pd.DataFrame:
@@ -646,6 +722,10 @@ def run_measurement(
     never available from an instrument; pass None (the default) to leave
     those columns blank rather than blocking the run — see
     SampleGeometryConfig.
+
+    `demod2_phase_null_1f_deg`, if given (from null_follower_reference_via_1f()
+    run at phase-calibration time), is written to every row as the follower
+    2f reference anchor — see that function and build_run_metadata().
 
     ── Adding more measurements per point ─────────────────────────────────
     Just extend the `record` dict below with any quantity you want to log:
@@ -708,7 +788,8 @@ def run_measurement(
         # ── 4d. Run metadata (excitation, filters, phases, geometry) ────────
         # Built fresh each point — see build_run_metadata()'s docstring for
         # why this isn't hoisted above the loop.
-        run_meta = build_run_metadata(daq, out_cfg, demod1_cfg, demod2_cfg, geometry_cfg)
+        run_meta = build_run_metadata(daq, out_cfg, demod1_cfg, demod2_cfg, geometry_cfg,
+                                      demod2_phase_null_1f_deg)
 
         # ── 5. Build record ────────────────────────────────────────────────
         record: dict = {

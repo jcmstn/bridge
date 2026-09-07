@@ -80,6 +80,7 @@ from mfli.mfli_dual_harmonic import (
     connect_gaussmeter,
     connect_magnet,
     connect_temperature_controller,
+    null_follower_reference_via_1f,
     run_measurement,
     set_magnet_current,
     setup_mds,
@@ -896,6 +897,7 @@ class RunScreen(Screen):
             else:
                 points = [MeasurementPoint()]
 
+            demod2_phase_null_1f_deg = None
             if plan.phase_cal_enabled:
                 self._set_status_threadsafe(
                     "Phase calibration: nulling 1f Y (leader demod phaseshift) …"
@@ -932,6 +934,19 @@ class RunScreen(Screen):
                     d2["x_mean"], d2["y_mean"], d2["r_mean"],
                 )
 
+                # Anchor the follower's 2f reference to the current: null the
+                # follower at 1f against the same (split) V_xy, record the
+                # delay angle as demod2_phase_null_1f_deg so analysis can
+                # rotate the recorded 2f X/Y into the current frame.
+                self._set_status_threadsafe(
+                    "Phase calibration: anchoring follower 2f reference (1f null) …"
+                )
+                demod2_phase_null_1f_deg = null_follower_reference_via_1f(
+                    daq, plan.demod2_cfg,
+                    n_averages=plan.phase_cal_n_averages,
+                    max_iterations=plan.phase_cal_max_iterations,
+                )
+
             self._set_status_threadsafe("Running measurement …")
             write_csv = make_incremental_writer(
                 plan.run_ctx.raw_path,
@@ -943,7 +958,8 @@ class RunScreen(Screen):
                 on_point=lambda record: self.app.call_from_thread(self._on_point, record),
                 gaussmeter=gaussmeter, gauss_cfg=plan.gauss_cfg,
                 temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg,
-                geometry_cfg=plan.geometry_cfg, mds=mds,
+                geometry_cfg=plan.geometry_cfg,
+                demod2_phase_null_1f_deg=demod2_phase_null_1f_deg, mds=mds,
                 write_csv=write_csv,
             )
             final = "Measurement aborted." if self._stop_event.is_set() else "Measurement complete."

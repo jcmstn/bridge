@@ -78,6 +78,7 @@ from mfli.mfli_dual_harmonic import (
     connect_gaussmeter,
     connect_magnet,
     connect_temperature_controller,
+    null_follower_reference_via_1f,
     read_field_mT,
     read_temperature,
     set_magnet_current,
@@ -130,7 +131,11 @@ class AmplitudeCheckConfig:
 class FrequencyCheckConfig:
     """Optional check: repeat the 1f null at several excitation frequencies."""
     enabled:         bool        = False
-    frequencies_Hz:  List[float] = field(default_factory=lambda: [13.333, 17.777, 23.333])
+    # Bracket the excitation frequency actually used for the harmonic-Hall
+    # measurement (mfli_dual_harmonic default 317.3 Hz) — a delay fit far
+    # from the operating point extrapolates badly. All ≥13 Hz from any
+    # 50/60 Hz harmonic.
+    frequencies_Hz:  List[float] = field(default_factory=lambda: [263.3, 317.3, 383.3])
     n_averages:      int         = 20
     max_iterations:  int         = 5
     tol_deg:         float       = 0.02
@@ -196,12 +201,13 @@ class FrequencyCheckResult:
 
 @dataclass
 class PhaseCalibrationReport:
-    null_result:       PhaseCalibrationResult
-    hold_check:        HoldCheckResult
-    channel_id:        ChannelIdResult
-    amplitude_check:   Optional[AmplitudeCheckResult]
-    frequency_check:   Optional[FrequencyCheckResult]
-    sweep_csv_path:    str
+    null_result:               PhaseCalibrationResult
+    follower_2f_reference_deg: float   # follower path delay angle at f (rotate 2f X/Y by -2x this)
+    hold_check:                HoldCheckResult
+    channel_id:                ChannelIdResult
+    amplitude_check:           Optional[AmplitudeCheckResult]
+    frequency_check:           Optional[FrequencyCheckResult]
+    sweep_csv_path:            str
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -500,7 +506,10 @@ def run_phase_calibration(
 
       1. Ramp the magnet to `calibration_current_A` (ideally saturation, so
          the PHE/AHE 1f signal is large and well-behaved) and null the
-         leader's 1f Y quadrature there.
+         leader's 1f Y quadrature there. Then anchor the follower's 2f
+         reference: null the follower at 1f against the same split V_xy and
+         record its delay angle (report.follower_2f_reference_deg) so
+         analysis can rotate the recorded 2f X/Y into the current frame.
       2. Sweep the field bidirectionally with the now-fixed phase and check
          the null *holds* across the whole range, not just the calibration
          point — the same sweep also gives the data needed to...
@@ -534,6 +543,12 @@ def run_phase_calibration(
             "check cabling/contacts before trusting the rest of this calibration.",
             null_result.iterations, null_result.residual_ratio,
         )
+
+    status("Anchoring the follower 2f reference (null the follower at 1f) ...")
+    follower_2f_reference_deg = null_follower_reference_via_1f(
+        daq, demod2_cfg, n_averages=null_n_averages,
+        max_iterations=null_max_iterations, tol_deg=null_tol_deg,
+    )
 
     status("Sweeping field to verify the null holds and identify the 2f signal channel ...")
     df = run_field_sweep_diagnostic(
@@ -584,7 +599,8 @@ def run_phase_calibration(
 
     status("Phase calibration complete.")
     return PhaseCalibrationReport(
-        null_result=null_result, hold_check=hold_check, channel_id=channel_id,
+        null_result=null_result, follower_2f_reference_deg=follower_2f_reference_deg,
+        hold_check=hold_check, channel_id=channel_id,
         amplitude_check=amplitude_check, frequency_check=frequency_check,
         sweep_csv_path=output_csv,
     )
@@ -603,6 +619,8 @@ def format_report(report: PhaseCalibrationReport) -> str:
         f"1f null:         {n.phase_before_deg:.4f}° → {n.phase_after_deg:.4f}°  "
         f"({n.iterations} iteration(s), {'converged' if n.converged else 'DID NOT CONVERGE'}, "
         f"|Y|/R={n.residual_ratio:.2e})",
+        f"2f anchor:       follower 1f delay angle = {report.follower_2f_reference_deg:.4f}°  "
+        f"(rotate recorded 2f X/Y by -2× this = {-2 * report.follower_2f_reference_deg:.4f}°)",
         f"Null holds?      max |Y|/R over full sweep = {h.max_residual_ratio:.2e}  "
         f"(mean {h.mean_residual_ratio:.2e})  "
         f"{'-> DRIFT DETECTED, see log' if h.drift_flag else '-> OK'}",
@@ -642,7 +660,13 @@ def main() -> None:
 
     out_cfg = OutputConfig(
         device       = LEADER,
-        frequency_Hz = 17.777,      # Hz — avoid 50/60 Hz harmonics
+        frequency_Hz = 317.3,       # Hz — MUST match the frequency the actual
+                                     #   harmonic-Hall run (mfli_dual_harmonic)
+                                     #   uses: instrumental phase delay scales
+                                     #   with f (φ = -360·f·t_d), so a null
+                                     #   done here at a different frequency
+                                     #   does not transfer. Away from 50/60 Hz
+                                     #   harmonics.
         amplitude_V  = 0.1,         # V
         series_R_ohm = 10000,       # Ω
     )
@@ -702,7 +726,7 @@ def main() -> None:
     )
     frequency_check_cfg = FrequencyCheckConfig(
         enabled         = False,
-        frequencies_Hz  = [13.333, 17.777, 23.333],
+        frequencies_Hz  = [263.3, 317.3, 383.3],   # bracket the measurement frequency
         n_averages      = 20,
         max_iterations  = 5,
         tol_deg         = 0.02,

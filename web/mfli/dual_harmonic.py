@@ -30,7 +30,8 @@ from mfli.mfli_dual_harmonic import (
     MeasurementPoint, OutputConfig, SampleGeometryConfig, TemperatureControllerConfig,
     acquire_averaged, auto_null_phase, bidirectional_current_sweep, configure_demodulator,
     configure_output, connect, connect_device, connect_gaussmeter, connect_magnet,
-    connect_temperature_controller, run_measurement, set_magnet_current, setup_mds,
+    connect_temperature_controller, null_follower_reference_via_1f, run_measurement,
+    set_magnet_current, setup_mds,
     shutdown_gaussmeter, shutdown_magnet, shutdown_output, shutdown_temperature_controller,
     sync_follower_oscillator,
 )
@@ -526,7 +527,7 @@ def page() -> None:
                 connect_device(daq, plan.follower, interface="1GbE")
 
                 cb.on_status("Synchronizing MDS …")
-                setup_mds(daq, leader=plan.leader, follower=plan.follower)
+                mds = setup_mds(daq, leader=plan.leader, follower=plan.follower)
 
                 cb.on_status("Configuring output & demodulators …")
                 configure_output(daq, plan.out_cfg)
@@ -553,6 +554,7 @@ def page() -> None:
                 else:
                     points = [MeasurementPoint()]
 
+                demod2_phase_null_1f_deg = None
                 if plan.phase_cal_enabled:
                     cb.on_status("Phase calibration: nulling 1f Y (leader demod phaseshift) …")
                     if magnet is not None and plan.phase_cal_current_A is not None:
@@ -579,6 +581,17 @@ def page() -> None:
                         d2["x_mean"], d2["y_mean"], d2["r_mean"],
                     )
 
+                    # Anchor the follower's 2f reference to the drive current
+                    # (null the follower at 1f against the same split V_xy) so
+                    # analysis can rotate the recorded 2f X/Y into the current
+                    # frame — saved as demod2_phase_null_1f_deg.
+                    cb.on_status("Phase calibration: anchoring follower 2f reference (1f null) …")
+                    demod2_phase_null_1f_deg = null_follower_reference_via_1f(
+                        daq, plan.demod2_cfg,
+                        n_averages=plan.phase_cal_n_averages,
+                        max_iterations=plan.phase_cal_max_iterations,
+                    )
+
                 cb.on_status("Running measurement …")
                 write_csv = make_incremental_writer(
                     plan.run_ctx.raw_path,
@@ -589,6 +602,7 @@ def page() -> None:
                     stop_event=stop_event, on_point=cb.on_point,
                     gaussmeter=gaussmeter, gauss_cfg=plan.gauss_cfg,
                     temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg, geometry_cfg=plan.geometry_cfg,
+                    demod2_phase_null_1f_deg=demod2_phase_null_1f_deg, mds=mds,
                     write_csv=write_csv,
                 )
             finally:

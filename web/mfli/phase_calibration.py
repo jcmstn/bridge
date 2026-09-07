@@ -122,7 +122,7 @@ def build_plan(state: dict) -> CalibrationPlan:
         n_averages=int(state["amp_n_averages"]),
     )
     frequency_check_cfg = FrequencyCheckConfig(
-        enabled=state["enable_frequency_check"], frequencies_Hz=state["frequencies_Hz"] or [13.333, 17.777, 23.333],
+        enabled=state["enable_frequency_check"], frequencies_Hz=state["frequencies_Hz"] or [263.3, 317.3, 383.3],
         n_averages=int(state["freq_n_averages"]), max_iterations=int(state["freq_max_iterations"]),
         tol_deg=state["freq_tol_deg"],
     )
