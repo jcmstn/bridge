@@ -30,18 +30,18 @@ from dc.dc_gate_sweep import (
     set_magnet_current, shutdown_gate, shutdown_gaussmeter, shutdown_magnet,
     shutdown_source, shutdown_temperature_controller,
 )
-from dc.dc_sweep_utils import linear_sweep, parse_value_list
+from dc.dc_sweep_utils import linear_sweep, parse_value_list, safe_shutdown
 from dc.dc_gate_sweep_tui import (
-    DEFAULTS, NUMERIC_FIELDS, TEXT_FIELDS, OPTIONAL_NUMERIC_FIELDS, MEASUREMENT_TYPE,
+    DEFAULTS, NUMERIC_FIELDS, TEXT_FIELDS, MEASUREMENT_TYPE,
     DC_GATE_SWEEP_DESCRIPTION, MeasurementPlan, build_header_fields, build_summary,
     compute_filename_preview, parse_sensor_uids,
 )
 from instruments.data_naming import (
     TEST_SAMPLE, RunContext, allocate_run, finalize_index_row,
-    make_incremental_writer, preview_raw_filename, proc_path, write_record,
+    make_incremental_writer, proc_path, write_record,
 )
 from web.run_controller import (
-    RunController, RunCallbacks, FinalStatus, num_field, optional_num_field, text_field,
+    RunController, RunCallbacks, FinalStatus, num_field, text_field,
     bool_switch, render_summary, busy_banner, is_busy,
     param_card, stable_card, param_grid, stable_grid, advanced_section, measurement_layout,
 )
@@ -532,15 +532,15 @@ def page() -> None:
                 return None
             finally:
                 if magnet is not None:
-                    shutdown_magnet(magnet, plan.magnet_cfg)
+                    safe_shutdown("magnet", lambda: shutdown_magnet(magnet, plan.magnet_cfg))
                 if gaussmeter is not None:
-                    shutdown_gaussmeter(gaussmeter)
+                    safe_shutdown("gaussmeter", lambda: shutdown_gaussmeter(gaussmeter))
                 if temp_ctrl is not None:
-                    shutdown_temperature_controller(temp_ctrl)
+                    safe_shutdown("MercuryiTC", lambda: shutdown_temperature_controller(temp_ctrl))
                 if gate is not None:
-                    shutdown_gate(gate)
+                    safe_shutdown("gate", lambda: shutdown_gate(gate))
                 if source is not None:
-                    shutdown_source(source)
+                    safe_shutdown("source", lambda: shutdown_source(source))
         return run_fn
 
     def _finish_artifacts(records: list[dict], run_contexts: list[RunContext], data_root: str) -> list[str]:

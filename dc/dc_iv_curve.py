@@ -59,7 +59,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Callable, List
 
-from pymeasure.instruments.keithley import Keithley2182, Keithley2400, Keithley6221
+from pymeasure.instruments.keithley import Keithley2182, Keithley6221
 
 from instruments.keithley6221 import (
     connect as connect_6221,
@@ -105,9 +105,12 @@ log = logging.getLogger(__name__)
 # Configuration dataclasses  ── change all your parameters here ──────────────
 # ─────────────────────────────────────────────────────────────────────────────
 # VoltmeterConfig and GateConfig live in instruments/ (see the imports
-# above). SourceConfig stays local: unlike the other DC programs (which
-# source a fixed sense current), this one sweeps the current itself, so it
-# needs sweep bounds instead of a single sense_current_A.
+# above -- GateConfig etc. are re-exported from here for dc_iv_curve_tui.py
+# / web/dc/iv_curve.py, which import instrument helpers through this
+# module rather than instruments/ directly). SourceConfig stays local:
+# unlike the other DC programs (which source a fixed sense current), this
+# one sweeps the current itself, so it needs sweep bounds instead of a
+# single sense_current_A.
 
 @dataclass
 class SourceConfig:
@@ -218,7 +221,7 @@ def run_measurement(
             time.sleep(settle)
 
         # ── 3. Acquire voltage ───────────────────────────────────────────────
-        v = acquire_averaged_voltage(voltmeter, acq_cfg.n_averages)
+        v = acquire_averaged_voltage(voltmeter, acq_cfg.n_averages, stop_event)
         r_chord = v["mean"] / pt.current_A if pt.current_A != 0 else float("nan")
         log.info("   V=%.4e V  SEM=%.2e V  R=%.5g Ω", v["mean"], v["sem"], r_chord)
 

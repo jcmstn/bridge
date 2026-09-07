@@ -80,7 +80,7 @@ from dc.dc_iv_curve import (
     shutdown_source,
     shutdown_temperature_controller,
 )
-from dc.dc_sweep_utils import linear_sweep, parse_value_list
+from dc.dc_sweep_utils import linear_sweep, parse_value_list, safe_shutdown
 from instruments.data_dir import DataDirPickerScreen, validate_directory
 from instruments.data_naming import (
     TEST_SAMPLE,
@@ -795,24 +795,12 @@ class RunScreen(Screen):
             final = f"ERROR: {exc}"
         finally:
             if gate is not None:
-                try:
-                    shutdown_gate(gate)
-                except Exception:
-                    log.exception("Error while shutting down gate")
+                safe_shutdown("gate", lambda: shutdown_gate(gate))
             if temp_ctrl is not None:
-                try:
-                    shutdown_temperature_controller(temp_ctrl)
-                except Exception:
-                    log.exception("Error while shutting down MercuryiTC")
+                safe_shutdown("MercuryiTC", lambda: shutdown_temperature_controller(temp_ctrl))
             if source is not None:
-                try:
-                    ramp_current_to_zero(source)
-                except Exception:
-                    log.exception("Error while ramping current to zero")
-                try:
-                    shutdown_source(source)
-                except Exception:
-                    log.exception("Error while shutting down source")
+                safe_shutdown("source (ramp)", lambda: ramp_current_to_zero(source))
+                safe_shutdown("source", lambda: shutdown_source(source))
             self.app.call_from_thread(self._on_finished, final)
 
     def _set_status_threadsafe(self, text: str) -> None:

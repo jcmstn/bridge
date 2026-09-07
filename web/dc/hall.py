@@ -34,7 +34,7 @@ from dc.dc_hall_measurement import (
     connect_voltmeter, run_measurement, set_magnet_current, shutdown_gaussmeter,
     shutdown_magnet, shutdown_source, shutdown_temperature_controller,
 )
-from dc.dc_sweep_utils import linear_sweep, parse_value_list
+from dc.dc_sweep_utils import linear_sweep, parse_value_list, safe_shutdown
 from dc.dc_hall_measurement_tui import (
     DEFAULTS, NUMERIC_FIELDS, TEXT_FIELDS, OPTIONAL_NUMERIC_FIELDS, DC_HALL_DESCRIPTION,
     MEASUREMENT_TYPE, MeasurementPlan, build_header_fields, build_summary,
@@ -42,11 +42,11 @@ from dc.dc_hall_measurement_tui import (
 )
 from instruments.data_naming import (
     TEST_SAMPLE, RunContext, allocate_run, finalize_index_row, make_incremental_writer,
-    preview_raw_filename, proc_path, write_record,
+    proc_path, write_record,
 )
 from web.run_controller import (
     RunController, RunCallbacks, FinalStatus, num_field, optional_num_field, text_field,
-    bool_switch, render_summary, busy_banner, is_busy, format_duration,
+    bool_switch, render_summary, busy_banner, is_busy,
     param_card, stable_card, param_grid, stable_grid, advanced_section, measurement_layout,
 )
 from web.directory_picker import validate_directory
@@ -600,13 +600,13 @@ def page() -> None:
                 return None
             finally:
                 if magnet is not None:
-                    shutdown_magnet(magnet, plan.magnet_cfg)
+                    safe_shutdown("magnet", lambda: shutdown_magnet(magnet, plan.magnet_cfg))
                 if gaussmeter is not None:
-                    shutdown_gaussmeter(gaussmeter)
+                    safe_shutdown("gaussmeter", lambda: shutdown_gaussmeter(gaussmeter))
                 if temp_ctrl is not None:
-                    shutdown_temperature_controller(temp_ctrl)
+                    safe_shutdown("MercuryiTC", lambda: shutdown_temperature_controller(temp_ctrl))
                 if source is not None:
-                    shutdown_source(source)
+                    safe_shutdown("source", lambda: shutdown_source(source))
         return run_fn
 
     def _finish_artifacts(records: list[dict], run_contexts: list[RunContext], data_root: str) -> list[str]:

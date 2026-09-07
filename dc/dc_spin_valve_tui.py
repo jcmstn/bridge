@@ -82,7 +82,7 @@ from dc.dc_spin_valve import (
     shutdown_source,
     shutdown_temperature_controller,
 )
-from dc.dc_sweep_utils import linear_sweep, parse_value_list
+from dc.dc_sweep_utils import linear_sweep, parse_value_list, safe_shutdown
 from instruments.data_dir import DataDirPickerScreen, validate_directory
 from instruments.data_naming import (
     TEST_SAMPLE,
@@ -912,30 +912,15 @@ class RunScreen(Screen):
             final = f"ERROR: {exc}"
         finally:
             if magnet is not None:
-                try:
-                    shutdown_magnet(magnet, plan.magnet_cfg)
-                except Exception:
-                    log.exception("Error while shutting down magnet")
+                safe_shutdown("magnet", lambda: shutdown_magnet(magnet, plan.magnet_cfg))
             if gaussmeter is not None:
-                try:
-                    shutdown_gaussmeter(gaussmeter)
-                except Exception:
-                    log.exception("Error while shutting down gaussmeter")
+                safe_shutdown("gaussmeter", lambda: shutdown_gaussmeter(gaussmeter))
             if temp_ctrl is not None:
-                try:
-                    shutdown_temperature_controller(temp_ctrl)
-                except Exception:
-                    log.exception("Error while shutting down MercuryiTC")
+                safe_shutdown("MercuryiTC", lambda: shutdown_temperature_controller(temp_ctrl))
             if gate is not None:
-                try:
-                    shutdown_gate(gate)
-                except Exception:
-                    log.exception("Error while shutting down gate")
+                safe_shutdown("gate", lambda: shutdown_gate(gate))
             if source is not None:
-                try:
-                    shutdown_source(source)
-                except Exception:
-                    log.exception("Error while shutting down source")
+                safe_shutdown("source", lambda: shutdown_source(source))
             self.app.call_from_thread(self._on_finished, final)
 
     def _set_status_threadsafe(self, text: str) -> None:

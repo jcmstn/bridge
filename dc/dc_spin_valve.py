@@ -50,7 +50,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Callable, List
 
-from pymeasure.instruments.keithley import Keithley2182, Keithley2400, Keithley6221
+from pymeasure.instruments.keithley import Keithley2182, Keithley6221
 
 from instruments.keithley6221 import (
     SourceConfig,

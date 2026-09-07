@@ -106,8 +106,11 @@ log = logging.getLogger(__name__)
 # Configuration dataclasses  ── change all your parameters here ──────────────
 # ─────────────────────────────────────────────────────────────────────────────
 # SourceConfig, VoltmeterConfig, GateConfig, MagnetConfig and GaussmeterConfig
-# live in instruments/ (see the imports above). Only what's specific to this
-# sweep (the gate points and acquisition timing) is defined below.
+# live in instruments/ (see the imports above -- re-exported from here for
+# dc_gate_sweep_tui.py / web/dc/gate_sweep.py, which import instrument
+# helpers through this module rather than instruments/ directly). Only
+# what's specific to this sweep (the gate points and acquisition timing)
+# is defined below.
 
 @dataclass
 class AcquisitionConfig:
@@ -188,7 +191,7 @@ def run_measurement(
             time.sleep(settle)
 
         # ── 3. Acquire voltage ───────────────────────────────────────────────
-        v = acquire_averaged_voltage(voltmeter, acq_cfg.n_averages)
+        v = acquire_averaged_voltage(voltmeter, acq_cfg.n_averages, stop_event)
         r_chord = v["mean"] / src_cfg.sense_current_A if src_cfg.sense_current_A != 0 else float("nan")
         log.info("   V=%.4e V  SEM=%.2e V  R=%.5g Ω", v["mean"], v["sem"], r_chord)
 

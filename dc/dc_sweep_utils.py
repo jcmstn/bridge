@@ -6,13 +6,19 @@ Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
 Created: 2026-08-05
 
 Small, pure-function utilities used by every DC measurement script so the
-step-size/bidirectional sweep logic and the "single value or
-comma-separated list" parsing are each implemented exactly once.
+step-size/bidirectional sweep logic, the "single value or comma-separated
+list" parsing, and the guarded-shutdown pattern are each implemented
+exactly once.
 """
 
 from __future__ import annotations
 
+import logging
+from typing import Callable
+
 import numpy as np
+
+log = logging.getLogger(__name__)
 
 
 def linear_sweep(start: float, stop: float, step: float, bidirectional: bool = True) -> np.ndarray:
@@ -52,3 +58,20 @@ def parse_value_list(text: str) -> list[float]:
         except ValueError:
             raise ValueError(f"'{token}' is not a valid number.") from None
     return values
+
+
+def safe_shutdown(label: str, fn: Callable[[], None]) -> None:
+    """
+    Run one shutdown_*() cleanup step, logging (not raising) on failure so
+    the remaining steps in the same `finally:` block still run.
+
+    Every shutdown_*() helper in instruments/ (shutdown_magnet,
+    shutdown_gate, shutdown_source, ...) is a plain VISA call with no
+    internal try/except -- one instrument raising during cleanup must
+    never skip the others (the magnet is an inductive load; the 6221 may
+    still be sourcing current into the DUT).
+    """
+    try:
+        fn()
+    except Exception:
+        log.exception("Error while shutting down %s", label)
