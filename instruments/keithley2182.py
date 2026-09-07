@@ -13,7 +13,7 @@ Usage example:
 
     volt_cfg = VoltmeterConfig(visa_resource="GPIB0::7::INSTR", nplc=5)
     voltmeter = connect_voltmeter(volt_cfg)
-    v = acquire_averaged_voltage(voltmeter, n_averages=5)   # {"mean": ..., "std": ...}
+    v = acquire_averaged_voltage(voltmeter, n_averages=5)   # {"mean": ..., "sem": ...}
 """
 
 import logging
@@ -51,11 +51,14 @@ def acquire_averaged_voltage(
 ) -> dict:
     """
     Read `n_averages` voltage samples off the 2182 (current held fixed,
-    unlike acquire_reversal_averaged_voltage) and return mean/std.
+    unlike acquire_reversal_averaged_voltage) and return the mean and the
+    standard error of that mean (``sem`` = sample stdev / sqrt(n); the raw
+    sample scatter is ``sem * sqrt(n)`` if it's ever wanted).
 
     `stop_event`, if given, is checked between samples — set it to break
-    out early and return the mean/std of whatever was already collected
-    (at least one sample).
+    out early and return the mean/sem of whatever was already collected.
+    ``sem`` is ``nan`` if only a single sample was taken (no scatter to
+    estimate an uncertainty from).
     """
     samples = np.empty(n_averages)
     n_used = 0
@@ -65,4 +68,5 @@ def acquire_averaged_voltage(
         if stop_event is not None and stop_event.is_set():
             break
     used = samples[:n_used]
-    return {"mean": float(np.mean(used)), "std": float(np.std(used))}
+    sem = float(np.std(used, ddof=1) / np.sqrt(n_used)) if n_used >= 2 else float("nan")
+    return {"mean": float(np.mean(used)), "sem": sem}

@@ -220,7 +220,7 @@ def run_measurement(
         # ── 3. Acquire voltage ───────────────────────────────────────────────
         v = acquire_averaged_voltage(voltmeter, acq_cfg.n_averages)
         r_chord = v["mean"] / pt.current_A if pt.current_A != 0 else float("nan")
-        log.info("   V=%.4e V  σ=%.2e V  R=%.5g Ω", v["mean"], v["std"], r_chord)
+        log.info("   V=%.4e V  SEM=%.2e V  R=%.5g Ω", v["mean"], v["sem"], r_chord)
 
         # ── 3b. Read temperature (MercuryiTC, optional) ─────────────────────
         temp_1_K, temp_2_K = read_temperature(temp_ctrl, temp_cfg) \
@@ -232,7 +232,7 @@ def run_measurement(
             "timestamp":       time.strftime("%Y-%m-%dT%H:%M:%S"),
             "current_A":       pt.current_A,
             "voltage_V":       v["mean"],
-            "voltage_std_V":   v["std"],
+            "voltage_sem_V":   v["sem"],
             "resistance_ohm":  r_chord,
             "gate_voltage_V":  gate_voltage_V,
             "temperature_1_K": temp_1_K,

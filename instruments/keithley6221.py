@@ -108,8 +108,11 @@ def acquire_reversal_averaged_voltage(
     reversed current to settle.
 
     Leaves the source at +sense_current_A on return. If `stop_event` fires
-    partway through, returns the mean/std of whatever pairs were already
-    collected (at least one).
+    partway through, returns the mean/sem of whatever pairs were already
+    collected. ``mean``/``even_mean`` are the odd/even components; ``sem``/
+    ``even_sem`` are the standard error of each of those means (sample
+    stdev over the reversal pairs / sqrt(n); ``nan`` if only one pair was
+    collected). The raw pair-to-pair scatter is ``sem * sqrt(n_reversals)``.
     """
     samples_odd = np.empty(n_reversals)
     samples_even = np.empty(n_reversals)
@@ -137,10 +140,12 @@ def acquire_reversal_averaged_voltage(
 
     used_odd = samples_odd[:n_used]
     used_even = samples_even[:n_used]
+    sem_odd = float(np.std(used_odd, ddof=1) / np.sqrt(n_used)) if n_used >= 2 else float("nan")
+    sem_even = float(np.std(used_even, ddof=1) / np.sqrt(n_used)) if n_used >= 2 else float("nan")
     return {
         "mean": float(np.mean(used_odd)),
-        "std": float(np.std(used_odd)),
+        "sem": sem_odd,
         "even_mean": float(np.mean(used_even)),
-        "even_std": float(np.std(used_even)),
+        "even_sem": sem_even,
         "n_reversals": n_used,
     }

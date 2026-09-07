@@ -29,7 +29,7 @@ Sources a fixed DC sense current with the 6221 and reads the longitudinal
 voltage with the 2182, reversing the current (+I / -I) at each field point
 and decomposing the voltage into odd (the reported voltage/R) and even
 parts. See docs/current-reversal.md for why both are recorded (columns
-voltage_even_V / voltage_even_std_V) — for spin-valve-type stacks with
+voltage_even_V / voltage_even_sem_V) — for spin-valve-type stacks with
 strong spin-orbit coupling, the even-in-current term can carry real
 physics (unidirectional SMR, Joule heating, rectification), not just
 instrumental offset.
@@ -234,20 +234,20 @@ def run_measurement(
             rv = acquire_reversal_averaged_voltage(
                 source, voltmeter, src_cfg.sense_current_A, acq_cfg.n_averages,
                 stop_event, source_delay_s=src_cfg.source_delay_s)
-            v_mean, v_std = rv["mean"], rv["std"]
-            v_even_mean, v_even_std = rv["even_mean"], rv["even_std"]
+            v_mean, v_sem = rv["mean"], rv["sem"]
+            v_even_mean, v_even_sem = rv["even_mean"], rv["even_sem"]
             n_used = rv["n_reversals"]
             r = v_mean / src_cfg.sense_current_A
-            log.info("   V=%.4e V  σ=%.2e V  R=%.5g Ω  V_even=%.4e V  (n=%d reversals)",
-                      v_mean, v_std, r, v_even_mean, n_used)
+            log.info("   V=%.4e V  SEM=%.2e V  R=%.5g Ω  V_even=%.4e V  (n=%d reversals)",
+                      v_mean, v_sem, r, v_even_mean, n_used)
         else:
             av = acquire_averaged_voltage(voltmeter, acq_cfg.n_averages, stop_event)
-            v_mean, v_std = av["mean"], av["std"]
-            v_even_mean, v_even_std = None, None
+            v_mean, v_sem = av["mean"], av["sem"]
+            v_even_mean, v_even_sem = None, None
             n_used = acq_cfg.n_averages
             r = v_mean / src_cfg.sense_current_A
-            log.info("   V=%.4e V  σ=%.2e V  R=%.5g Ω  (n=%d averages, reversal off)",
-                      v_mean, v_std, r, n_used)
+            log.info("   V=%.4e V  SEM=%.2e V  R=%.5g Ω  (n=%d averages, reversal off)",
+                      v_mean, v_sem, r, n_used)
 
         # ── 4b. Read temperature (MercuryiTC, optional) ─────────────────────
         temp_1_K, temp_2_K = read_temperature(temp_ctrl, temp_cfg) \
@@ -264,9 +264,9 @@ def run_measurement(
             "sense_current_A":  src_cfg.sense_current_A,
             "reversal_enabled": acq_cfg.reversal_enabled,
             "voltage_V":        v_mean,
-            "voltage_std_V":    v_std,
+            "voltage_sem_V":    v_sem,
             "voltage_even_V":     v_even_mean,
-            "voltage_even_std_V": v_even_std,
+            "voltage_even_sem_V": v_even_sem,
             "resistance_ohm":   r,
             "n_averages":       n_used,
             "gate_voltage_V":   gate_voltage_V,

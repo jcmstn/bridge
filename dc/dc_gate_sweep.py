@@ -190,7 +190,7 @@ def run_measurement(
         # ── 3. Acquire voltage ───────────────────────────────────────────────
         v = acquire_averaged_voltage(voltmeter, acq_cfg.n_averages)
         r_chord = v["mean"] / src_cfg.sense_current_A if src_cfg.sense_current_A != 0 else float("nan")
-        log.info("   V=%.4e V  σ=%.2e V  R=%.5g Ω", v["mean"], v["std"], r_chord)
+        log.info("   V=%.4e V  SEM=%.2e V  R=%.5g Ω", v["mean"], v["sem"], r_chord)
 
         # ── 3b. Read temperature (MercuryiTC, optional) ─────────────────────
         temp_1_K, temp_2_K = read_temperature(temp_ctrl, temp_cfg) \
@@ -203,7 +203,7 @@ def run_measurement(
             "gate_voltage_V":  pt.gate_voltage_V,
             "sense_current_A": src_cfg.sense_current_A,
             "voltage_V":       v["mean"],
-            "voltage_std_V":   v["std"],
+            "voltage_sem_V":   v["sem"],
             "resistance_ohm":  r_chord,
             "magnet_current_A": magnet_current_A,
             "magnet_field_mT":  magnet_field_mT,
