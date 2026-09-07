@@ -132,3 +132,24 @@ def test_hall_run_measurement_forwards_source_delay(tmp_path, monkeypatch):
     assert captured["source_delay_s"] == 0.077
     assert captured["n_reversals"] == 4
     assert len(df) == 1
+
+
+def test_hall_run_measurement_records_field_angle_from_oop(tmp_path, monkeypatch):
+    import dc.dc_hall_measurement as hall
+
+    monkeypatch.setattr(
+        hall, "acquire_reversal_averaged_voltage",
+        lambda *a, **k: {"mean": 1e-6, "sem": 1e-9, "even_mean": 0.0,
+                          "even_sem": 0.0, "n_reversals": k.get("n_reversals", 1)},
+    )
+    monkeypatch.setattr(hall.time, "sleep", lambda *_: None)
+
+    src_cfg = hall.SourceConfig(sense_current_A=1e-3)
+    acq_cfg = hall.AcquisitionConfig(settling_time_s=0.0, output_file=str(tmp_path / "h.csv"))
+
+    df = hall.run_measurement(object(), object(), src_cfg, acq_cfg, [hall.FieldPoint()],
+                              field_angle_from_oop_deg=42.0)
+    assert df["field_angle_from_oop_deg"].tolist() == [42.0]
+
+    df_none = hall.run_measurement(object(), object(), src_cfg, acq_cfg, [hall.FieldPoint()])
+    assert df_none["field_angle_from_oop_deg"].isna().all()

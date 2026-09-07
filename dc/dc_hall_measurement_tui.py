@@ -140,6 +140,7 @@ DEFAULTS: dict = {
     "device": "",
     "cooldown": "",
     "temperature_setpoint_K": "300",
+    "field_angle_from_oop_deg": "",
     "enable_sweep": True,
     "magnet_visa_resource": "GPIB0::6::INSTR",
     "current_limit_A": "35",
@@ -183,7 +184,7 @@ TEXT_FIELDS = ["source_visa_resource", "voltmeter_visa_resource", "device",
 # Parsed separately from NUMERIC_FIELDS -- unlike every other numeric field,
 # this one may be BLANK (valid_empty=True), which means "no temperature
 # setpoint" -> the T### K filename token is simply omitted.
-OPTIONAL_NUMERIC_FIELDS = ["temperature_setpoint_K"]
+OPTIONAL_NUMERIC_FIELDS = ["temperature_setpoint_K", "field_angle_from_oop_deg"]
 MAGNET_FIELD_IDS = [
     "magnet_visa_resource", "current_limit_A", "voltage_compliance_V",
     "ramp_step_A", "ramp_delay_s", "i_min_A", "i_max_A", "step_A",
@@ -246,6 +247,7 @@ class MeasurementPlan:
     sample: str
     device: str
     temperature_setpoint_K: Optional[float]
+    field_angle_from_oop_deg: Optional[float]
     cooldown: str
     header_extra: dict
     series: str = ""
@@ -439,6 +441,14 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
                          "if unreachable, columns are simply left empty.")
     else:
         info.append("Temperature logging off.")
+
+    # ── Sample geometry (optional) ─────────────────────────────────────────
+    angle = state.get("field_angle_from_oop_deg")
+    if angle is not None:
+        info.append(f"External field angle {angle:g}° from out-of-plane "
+                    f"({'out-of-plane' if angle == 0 else 'in-plane' if angle == 90 else 'tilted'}).")
+    else:
+        info.append("External field angle unset — field_angle_from_oop_deg column left blank.")
 
     return info, warnings, errors
 
@@ -828,6 +838,7 @@ class RunScreen(Screen):
                         on_point=self._make_on_point(series_idx, label),
                         gaussmeter=gaussmeter, gauss_cfg=plan.gauss_cfg,
                         temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg,
+                        field_angle_from_oop_deg=plan.field_angle_from_oop_deg,
                         write_csv=write_csv,
                     )
                 except Exception as exc:
@@ -990,6 +1001,16 @@ class DCHallMeasurementApp(App):
                         switch_field("enable_temperature",
                                      "Log temperature (MercuryiTC)",
                                      DEFAULTS["enable_temperature"]),
+                    )
+                    yield card(
+                        "Sample geometry",
+                        field("field_angle_from_oop_deg",
+                              "External field angle from out-of-plane (°)",
+                              DEFAULTS["field_angle_from_oop_deg"], kind="number",
+                              valid_empty=True,
+                              hint="0° = fully out-of-plane (film normal), 90° = in-plane. "
+                                   "Optional — stored in every row's "
+                                   "field_angle_from_oop_deg column."),
                     )
 
                 # ── Tier 2: precision / speed knobs — collapsed ─────────────
@@ -1371,6 +1392,7 @@ class DCHallMeasurementApp(App):
             temp_cfg=temp_cfg, data_root=self.data_root,
             sample=state["sample"], device=state["device"],
             temperature_setpoint_K=state["temperature_setpoint_K"],
+            field_angle_from_oop_deg=state["field_angle_from_oop_deg"],
             cooldown=state["cooldown"], header_extra=header_extra, series=series,
         )
 

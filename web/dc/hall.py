@@ -152,6 +152,7 @@ def build_plan(state: dict) -> MeasurementPlan:
         sense_currents_A=state["sense_current_list"],
         temp_cfg=temp_cfg, sample=state["sample"], device=state["device"],
         temperature_setpoint_K=state["temperature_setpoint_K"],
+        field_angle_from_oop_deg=state["field_angle_from_oop_deg"],
         cooldown=state["cooldown"], header_extra=header_extra, series=series,
     )
 
@@ -221,6 +222,7 @@ def page() -> None:
     controller: dict[str, Optional[RunController]] = {"c": None}
 
     _t_default = d("temperature_setpoint_K")
+    _angle_default = d("field_angle_from_oop_deg")
 
     with measurement_layout() as regions:
         with regions.identity:
@@ -252,6 +254,13 @@ def page() -> None:
                 with param_card("Temperature logging"):
                     switches["enable_temperature"] = bool_switch(
                         "Log temperature (Oxford Instruments MercuryiTC)", d("enable_temperature"))
+
+                with param_card("Sample geometry"):
+                    inputs["field_angle_from_oop_deg"] = optional_num_field(
+                        "External field angle from out-of-plane (°)",
+                        float(_angle_default) if str(_angle_default).strip() not in ("", "None") else None,
+                        hint="0° = fully out-of-plane (film normal), 90° = in-plane. "
+                             "Optional — stored in every row's field_angle_from_oop_deg column.")
 
             # ── Tier 2: precision / speed knobs — collapsed ─────────────────
             with advanced_section("Acquisition & filter settings"):
@@ -571,6 +580,7 @@ def page() -> None:
                             stop_event=stop_event, on_point=tagged_on_point,
                             gaussmeter=gaussmeter, gauss_cfg=plan.gauss_cfg,
                             temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg,
+                            field_angle_from_oop_deg=plan.field_angle_from_oop_deg,
                             write_csv=write_csv,
                         )
                     except Exception as exc:

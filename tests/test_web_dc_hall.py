@@ -23,6 +23,7 @@ def _state(data_dir: Path, **overrides) -> dict:
         compliance_V=2.0, source_delay_s=0.05, nplc=5,
         auto_range=True, settling_time_s=1.0, n_reversals=5,
         device="HB3", cooldown="3", temperature_setpoint_K=300.0,
+        field_angle_from_oop_deg=None,
         enable_sweep=False,
         magnet_visa_resource="GPIB0::6::INSTR", current_limit_A=35.0,
         voltage_compliance_V=15.0, ramp_step_A=0.1, ramp_delay_s=0.05,
