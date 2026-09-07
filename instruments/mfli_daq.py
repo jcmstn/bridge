@@ -230,11 +230,25 @@ def acquire_averaged(daq: zi.ziDAQServer, cfg, n_averages: int) -> dict:
     overload = (_read_overload(daq, cfg.device, input_ch)
                 if input_ch is not None and not uses_current_input else None)
 
+    x_mean = float(np.mean(raw["x"]))
+    y_mean = float(np.mean(raw["y"]))
+
+    # R and theta are the polar form of the VECTOR-averaged phasor
+    # (mean X, mean Y) -- NOT the mean of per-sample hypot()/atan2().
+    # Averaging per-sample magnitudes rectifies noise: E[|z+n|] > |z|, a
+    # positive bias that dominates once the signal is near the noise floor
+    # -- exactly the regime of a small 2f harmonic-Hall voltage. Averaging
+    # per-sample angles is worse still (undefined mean across the +/-180deg
+    # branch cut). X and Y average linearly and unbiasedly, so take R/theta
+    # from their means.
+    r_mean = float(np.hypot(x_mean, y_mean))
+    theta_mean = float(np.degrees(np.arctan2(y_mean, x_mean)))
+
     return {
-        "x_mean":     float(np.mean(raw["x"])),
-        "y_mean":     float(np.mean(raw["y"])),
-        "r_mean":     float(np.mean(raw["r"])),
-        "theta_mean": float(np.mean(raw["theta_deg"])),
+        "x_mean":     x_mean,
+        "y_mean":     y_mean,
+        "r_mean":     r_mean,
+        "theta_mean": theta_mean,
         "r_std":      float(np.std(raw["r"])),
         "x_std":      float(np.std(raw["x"])),
         "y_std":      float(np.std(raw["y"])),
