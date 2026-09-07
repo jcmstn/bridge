@@ -173,6 +173,16 @@ class LakeShore475(Instrument):
 _FIELD_TO_MT = {"T": 1e3, "G": 1e-1}   # → mT, for GaussmeterConfig.unit
 
 
+def field_to_mT(value: float, unit: str) -> float:
+    """Convert a raw 475 field reading in `unit` ('T' or 'G') to mT. Single
+    source of truth for the conversion -- kepco_magnet.set_magnet_current()'s
+    field-settle poll imports this rather than keeping its own copy."""
+    try:
+        return value * _FIELD_TO_MT[unit]
+    except KeyError:
+        raise ValueError(f"Unsupported gaussmeter unit {unit!r}; use 'T' or 'G'.") from None
+
+
 @dataclass
 class GaussmeterConfig:
     """Lake Shore 475 DSP Gaussmeter — measures the actual field, shared by every
@@ -189,7 +199,12 @@ def connect_gaussmeter(cfg: GaussmeterConfig) -> "LakeShore475":
         raise ValueError(f"Unsupported gaussmeter unit {cfg.unit!r}; use 'T' or 'G'.")
     gm = LakeShore475(cfg.visa_resource)
     gm.unit = cfg.unit
-    log.info("Gaussmeter connected: %s  unit=%s  id=%s",
+    # Steady-state (DC) field measurement mode. The 475 keeps whatever mode
+    # it was last left in across a power cycle, so set it explicitly rather
+    # than assume -- an AC/peak mode would return the wrong thing for a
+    # slowly-swept DC field.
+    gm.dc_mode()
+    log.info("Gaussmeter connected: %s  unit=%s  mode=DC  id=%s",
               cfg.visa_resource, cfg.unit, gm.identification)
     return gm
 
@@ -197,7 +212,7 @@ def connect_gaussmeter(cfg: GaussmeterConfig) -> "LakeShore475":
 def read_field_mT(gm: "LakeShore475", cfg: GaussmeterConfig) -> float:
     """Average `cfg.n_averages` field readings and return the result in mT."""
     mean, _std = gm.measure(cfg.n_averages, delay=cfg.read_delay_s)
-    return mean * _FIELD_TO_MT[cfg.unit]
+    return field_to_mT(mean, cfg.unit)
 
 
 def shutdown_gaussmeter(gm: "LakeShore475") -> None:

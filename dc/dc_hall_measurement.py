@@ -290,7 +290,7 @@ def run_measurement(
 def main() -> None:
     # ── Source & voltmeter ───────────────────────────────────────────────────
     src_cfg = SourceConfig(
-        visa_resource   = "GPIB0::12::INSTR",
+        visa_resource   = "GPIB0::20::INSTR",
         sense_current_A = 1e-3,     # A
         compliance_V    = 2.0,      # V
         source_delay_s  = 0.05,     # s

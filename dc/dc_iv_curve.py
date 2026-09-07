@@ -286,7 +286,7 @@ def plot_results(df: pd.DataFrame, out_path: Path) -> None:
 def main() -> None:
     # ── Source & voltmeter ───────────────────────────────────────────────────
     src_cfg = SourceConfig(
-        visa_resource  = "GPIB0::12::INSTR",
+        visa_resource  = "GPIB0::20::INSTR",
         compliance_V   = 2.0,
         source_delay_s = 0.05,
         current_min_A  = -1e-3,

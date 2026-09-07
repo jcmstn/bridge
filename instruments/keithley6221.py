@@ -11,7 +11,7 @@ functions shared by the DC measurement programs.
 Usage example (fixed sense-current case):
     from instruments.keithley6221 import SourceConfig, connect_source, shutdown_source
 
-    src_cfg = SourceConfig(visa_resource="GPIB0::12::INSTR", sense_current_A=1e-3)
+    src_cfg = SourceConfig(visa_resource="GPIB0::20::INSTR", sense_current_A=1e-3)
     source = connect_source(src_cfg)
     ...
     shutdown_source(source)

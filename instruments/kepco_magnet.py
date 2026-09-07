@@ -47,6 +47,8 @@ from dataclasses import dataclass
 from pymeasure.instruments import Instrument, SCPIMixin
 from pymeasure.instruments.validators import strict_range
 
+from instruments.lakeshore475 import field_to_mT
+
 log = logging.getLogger(__name__)
 
 
@@ -505,8 +507,6 @@ FIELD_SETTLE_WINDOW_N     = 4       # readings that must all fall within toleran
 FIELD_SETTLE_POLL_S       = 0.25    # delay between field readings  [s]  (→ ~1 s look-back)
 FIELD_SETTLE_TIMEOUT_S    = 30.0    # give up waiting on the field after this  [s]
 
-_UNIT_TO_MT = {"T": 1e3, "G": 1e-1}   # GaussmeterConfig.unit → mT
-
 
 def _window_settled(readings: list, tol: float) -> bool:
     """True once the last FIELD_SETTLE_WINDOW_N readings span <= tol (max - min)."""
@@ -617,11 +617,10 @@ def set_magnet_current(
     if gaussmeter is not None and gauss_cfg is not None:
         tol = (field_settle_tolerance_mT if field_settle_tolerance_mT is not None
                else FIELD_SETTLE_TOLERANCE_MT)
-        to_mT = _UNIT_TO_MT[gauss_cfg.unit]
         readings: list = []
         tf0 = time.monotonic()
         while True:
-            readings.append(float(gaussmeter.field) * to_mT)
+            readings.append(field_to_mT(float(gaussmeter.field), gauss_cfg.unit))
             if _window_settled(readings, tol):
                 field_settled = True
                 break

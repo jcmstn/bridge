@@ -232,7 +232,7 @@ def run_measurement(
 def main() -> None:
     # ── Source & voltmeter ───────────────────────────────────────────────────
     src_cfg = SourceConfig(
-        visa_resource   = "GPIB0::12::INSTR",
+        visa_resource   = "GPIB0::20::INSTR",
         sense_current_A = 1e-6,
         compliance_V    = 2.0,
         source_delay_s  = 0.05,
@@ -248,7 +248,7 @@ def main() -> None:
 
     # ── Gate (Keithley 2400) ──────────────────────────────────────────────────
     gate_cfg = GateConfig(
-        visa_resource        = "GPIB0::24::INSTR",
+        visa_resource        = "GPIB0::25::INSTR",
         gate_voltage_limit_V = 20.0,
         compliance_current_A = 1e-6,
     )
