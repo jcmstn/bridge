@@ -80,6 +80,7 @@ Example: `A_0001_HB3_NOISE_T293K_20260811T143022.csv`
 | `DIFFR` | Differential resistance vs. bias (`mfli_diff_resistance_vs_bias`) |
 | `PHCAL` | Phase calibration (`mfli_phase_calibration`)  |
 | `NOISE` | Noise spectrum (`mfli_noise_spectrum`)        |
+| `RT`    | Resistance vs. temperature (`examples/custom_program.py`) |
 
 A genuinely new measurement kind gets a new short all-caps code added
 here and to nowhere else — `type_code` is just a string parameter to

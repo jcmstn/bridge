@@ -147,6 +147,113 @@ raw driver classes.
   interrupted by it. Passing `temp_ctrl=None` just leaves the temperature
   columns blank.
 
+### Adding an instrument — the driver contract
+
+A new instrument is one new file, `instruments/{name}.py`, imported directly
+by whatever measurement/script needs it. **Nothing else registers it** — no
+TUI, no web, no suite picker. The module exposes plain module-level
+functions (not a class API — the class, if any, stays private):
+
+1. **`{Name}Config`** — a `@dataclass`. First field `visa_resource: str`,
+   then every knob the instrument needs, each with a default. This *is* the
+   parameter surface; a caller constructs one and passes it around.
+
+2. **`connect_{name}(cfg: {Name}Config) -> Handle`** — open the VISA
+   session, `reset()`, apply `cfg`, return a live handle (a pymeasure
+   instrument, or a hand-written driver instance). Log one line on success.
+
+3. **`shutdown_{name}(handle[, cfg]) -> None`** — put the instrument in a
+   safe state and close. Take `cfg` too only if teardown needs it (e.g. the
+   magnet ramps down using `cfg.ramp_step_A`). A *nice-to-have* shutdown
+   accepts `handle=None` and returns (`shutdown_temperature_controller`);
+   a *load-bearing* one assumes a live handle and is a plain VISA call with
+   no internal try/except (`shutdown_magnet`, `shutdown_gaussmeter`) —
+   callers wrap it in `dc_sweep_utils.safe_shutdown()`, one guard per call,
+   so one failing teardown never skips the rest.
+
+4. *(optional)* **`set_{name}(handle, cfg, value) -> None | dict`** — apply
+   a setpoint. Return a provenance `dict` if the caller should log how it
+   went (see `set_magnet_current` → `{"field_settled": ..., ...}`),
+   else `None`.
+
+5. *(optional)* **`read_{name}(handle, cfg) -> float`** for one scalar in
+   canonical units (`read_field_mT`), or a fixed-width tuple when the
+   instrument has several probes/channels (`read_temperature ->
+   (t1, t2)`); or **`acquire_{name}(handle, n, stop_event=None) -> dict`**
+   returning `{"mean": ..., "sem": ...}` for an averaged reading.
+   `stop_event: threading.Event | None` is checked between samples so a UI
+   abort can interrupt a long average.
+
+**Failure policy — decide per instrument, and write it in the docstring:**
+
+- *Load-bearing* (the measurement is meaningless without it — magnet,
+  gaussmeter): `connect_*` / `set_*` **raise** on any failure. The caller
+  does not pass `None` for these.
+- *Nice-to-have* (logging only — the iTC): `connect_*` returns `None` when
+  the **hardware** can't be reached (never raises for that), and every
+  other function accepts that `None` and no-ops (`read_* -> (None, None)`,
+  `shutdown_*` returns immediately). A malformed **config** still raises
+  (`connect_temperature_controller` rejects a `sensor_uids` that isn't 1–2
+  long). A `set_*` is load-bearing even on a nice-to-have instrument — you
+  only drive a setpoint because a measurement depends on it reaching it
+  (see `set_temperature`).
+
+**Driver class:** wrap a pymeasure driver directly if one fits — no
+subclass, just call it in `connect_*` (`keithley2182.py`:
+`Keithley2182(cfg.visa_resource)` then configure). Hand-write a private
+`class {Name}(Instrument, SCPIMixin)` with `control`/`measurement`
+properties only when pymeasure has no driver or a wrong one
+(`lakeshore475.py`, `kepco_magnet.py`, `mercury_itc.py`); keep it in the
+same file, keep it private.
+
+**Skeleton** — thin wrapper over a real pymeasure driver, the common case
+(drop in `instruments/newmeter.py`, rename):
+
+```python
+"""New Meter — connect/shutdown/read helpers. <wiring diagram + example>."""
+import logging
+import threading
+from dataclasses import dataclass
+from typing import Optional
+
+from pymeasure.instruments.keithley import Keithley2000   # ← the real driver
+
+log = logging.getLogger(__name__)
+
+
+@dataclass
+class NewMeterConfig:
+    visa_resource: str = "GPIB0::15::INSTR"
+    nplc: float = 1.0
+
+
+def connect_newmeter(cfg: NewMeterConfig) -> Keithley2000:
+    dev = Keithley2000(cfg.visa_resource)
+    dev.reset()
+    dev.measure_voltage()
+    dev.voltage_nplc = cfg.nplc          # ... apply the rest of cfg ...
+    log.info("New Meter connected: %s  NPLC=%.1f", cfg.visa_resource, cfg.nplc)
+    return dev
+
+
+def read_newmeter(dev: Keithley2000, cfg: NewMeterConfig) -> float:
+    return float(dev.voltage)
+
+
+def shutdown_newmeter(dev: Keithley2000) -> None:
+    dev.shutdown()
+```
+
+**Recorded-column naming:** when a reading lands in a measurement's
+`record` dict, suffix the column with its unit from
+`data_naming._COLUMN_UNITS` (`field_mT`, `voltage_V`, `temperature_K`) so
+`write_record()` splits it into OriginLab's Units sub-header row. A column
+with no known suffix keeps its full name and a blank unit — harmless, just
+not unit-tagged.
+
+The full "no-UI standalone script" wiring (this contract + the data
+convention) is in [`../examples/custom_program.py`](../examples/custom_program.py).
+
 
 ## 5. Data output
 
@@ -212,6 +319,13 @@ To sweep the field, give each `FieldPoint` a `magnet_current_A` **and** a
 + Lake Shore 475, and pass `gaussmeter=` / `gauss_cfg=` so the field axis
 comes from the measured field, not the magnet current — see
 `dc_hall_measurement.py`'s `main()` for the full pattern.
+
+The snippet above writes a **plain headerless CSV** (the `main()`s in
+`dc/` / `mfli/` do too). For a standalone script that also saves into the
+per-sample data convention — `ensure_sample` → `allocate_run` →
+`make_incremental_writer` → an unconditional `finalize_index_row` — and for
+the "roll your own loop with a new instrument driver" case, see
+[`../examples/custom_program.py`](../examples/custom_program.py).
 
 ### 7b. Read a run back
 
