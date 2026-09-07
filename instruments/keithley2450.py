@@ -21,22 +21,169 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 # THE SOFTWARE.
 #
+"""
+Keithley 2450 SourceMeter (SMU) — hand-written driver + easy-to-use helpers
+==========================================================================
+pymeasure ships a ``Keithley2450`` driver, but its buffer support speaks the
+2400-emulation SCPI dialect, which a *native* 2450 rejects. This module keeps
+a vendored ``Keithley2450`` class whose ``_Keithley2450Buffer`` mixin (just
+above the class, nothing else uses it) speaks the native ``:TRACe:…`` dialect
+— that is the only reason the class lives here rather than being imported
+from pymeasure.
+
+Two layers, use whichever fits:
+
+* ``Keithley2450`` — the full class. Source V or I, measure V/I/R, ranges,
+  NPLC, 2/4-wire, filters, front/rear terminals, native ``defbuffer1``
+  statistics. Wire it up yourself for anything unusual.
+
+* ``SMUConfig`` + ``connect_smu`` / ``set_source_level`` / ``read_measurement``
+  / ``acquire_measurement`` / ``measure_buffered`` / ``shutdown_smu`` — the
+  driver-contract wrapper (docs/architecture.md §4). One dataclass describes
+  the whole instrument state; the free functions apply it. This is the
+  surface a custom script should reach for first.
+
+Failure policy: an SMU that is sourcing into a device is **load-bearing** —
+``connect_smu`` and ``set_source_level`` raise on any failure; callers do not
+pass ``None`` for the handle.
+
+Usage example (custom script — source current, measure voltage, 4-wire):
+    from instruments.keithley2450 import (
+        SMUConfig, connect_smu, set_source_level, acquire_measurement, shutdown_smu)
+
+    cfg = SMUConfig(visa_resource="GPIB0::18::INSTR", source_function="current",
+                    compliance_voltage_V=2.0, four_wire=True, nplc=1.0,
+                    source_limit_A=1e-3)
+    smu = connect_smu(cfg)
+    try:
+        set_source_level(smu, cfg, 100e-6)          # 100 µA
+        out = acquire_measurement(smu, cfg, n=10)   # {"mean": V, "sem": V}
+    finally:
+        shutdown_smu(smu)
+"""
 
 import logging
+import threading
 import time
+from dataclasses import dataclass
+from typing import Optional
 from warnings import warn
 
 import numpy as np
 
 from pymeasure.instruments import Instrument, SCPIMixin
 from pymeasure.instruments.validators import truncated_range, strict_discrete_set
-from instruments.keithley2450Buffer import Keithley2450Buffer
 
 log = logging.getLogger(__name__)
 log.addHandler(logging.NullHandler())
 
 
-class Keithley2450(Keithley2450Buffer, SCPIMixin, Instrument):
+class _Keithley2450Buffer:
+    """ ``defbuffer1`` acquisition + statistics in the *native* 2450 SCPI
+    dialect (``:TRACe:…``), as opposed to pymeasure's ``KeithleyBuffer``
+    which uses the 2400-emulation commands a native 2450 rejects. Private
+    mixin for ``Keithley2450`` below — nothing else uses it, so it is not a
+    separate module. """
+
+    buffer_points = Instrument.control(
+        ":TRACe:POINts? \"defbuffer1\"", ":TRACe:POINts %d, \"defbuffer1\"",
+        """ Control the number of buffer points in defbuffer1. """,
+        validator=truncated_range,
+        values=[1, 250000],  # 2450 defbuffer1 max capacity
+        cast=int
+    )
+
+    def config_buffer(self, points=64, delay=0):
+        """ Configure measurement buffer for specified points. """
+        self.write("*CLS")
+        self.write(":TRACe:CLEar \"defbuffer1\"")
+        self.buffer_points = points
+
+        # Native 2450: Set measurement count to match buffer size
+        self.write(f":SENSe:COUNt {points}")
+        self.check_errors()
+
+    def is_buffer_full(self):
+        """ Return True if buffer has reached the requested number of points. """
+        # Native 2450: TRACe:ACTual? does NOT take buffer name parameter
+        actual = int(self.ask(":TRACe:ACTual?"))
+        return actual >= self.buffer_points
+
+    def wait_for_buffer(self, should_stop=lambda: False, timeout=60, interval=0.1):
+        """ Wait for full buffer or timeout/stop condition. """
+        t = time.time()
+        while not self.is_buffer_full():
+            time.sleep(interval)
+            if should_stop():
+                return
+            if (time.time() - t) > timeout:
+                # Print buffer status for debugging
+                actual = int(self.ask(":TRACe:ACTual?"))
+                log.error(f"Buffer timeout: {actual}/{self.buffer_points} points")
+                raise Exception("Timed out waiting for Keithley 2450 buffer to fill.")
+
+    @property
+    def buffer_data(self):
+        """ Get numpy array of raw buffer values (only the points actually
+        stored, which may be fewer than requested if wait_for_buffer()
+        returned early via should_stop). """
+        self.write(":FORMat:DATA ASCii")
+        # Read what is actually in the buffer, not buffer_points (the
+        # configured count) — asking for absent points errors on a 2450.
+        actual = int(self.ask(":TRACe:ACTual?"))
+        if actual < 1:
+            return np.array([], dtype=np.float64)
+        # Native 2450: TRACe:DATA? requires start, end, buffername, dataelement
+        data = self.values(f':TRACe:DATA? 1, {actual}, "defbuffer1", READ')
+        return np.array(data, dtype=np.float64)
+
+    # Native 2450: Statistics are queried without trailing commas
+    @property
+    def mean_voltage(self): return float(self.ask(":TRACe:STATistics:AVERage? \"defbuffer1\""))
+    @property
+    def mean_current(self): return float(self.ask(":TRACe:STATistics:AVERage? \"defbuffer1\""))
+    @property
+    def mean_resistance(self): return float(self.ask(":TRACe:STATistics:AVERage? \"defbuffer1\""))
+
+    @property
+    def std_voltage(self): return float(self.ask(":TRACe:STATistics:STDDev? \"defbuffer1\""))
+    @property
+    def std_current(self): return float(self.ask(":TRACe:STATistics:STDDev? \"defbuffer1\""))
+    @property
+    def std_resistance(self): return float(self.ask(":TRACe:STATistics:STDDev? \"defbuffer1\""))
+
+    @property
+    def max_voltage(self): return float(self.ask(":TRACe:STATistics:MAXimum? \"defbuffer1\""))
+    @property
+    def max_current(self): return float(self.ask(":TRACe:STATistics:MAXimum? \"defbuffer1\""))
+    @property
+    def min_voltage(self): return float(self.ask(":TRACe:STATistics:MINimum? \"defbuffer1\""))
+    @property
+    def min_current(self): return float(self.ask(":TRACe:STATistics:MINimum? \"defbuffer1\""))
+
+    def enable_statistics(self):
+        """ The 2450 computes statistics automatically. Kept for backwards compatibility. """
+        pass
+
+    def start_buffer(self):
+        """ Start buffer measurements natively on 2450. """
+        self.write(":TRACe:TRIGger \"defbuffer1\"")
+
+    def reset_buffer(self):
+        """ Reset buffer and status. """
+        self.write("*CLS")
+        self.write(":TRACe:CLEar \"defbuffer1\"")
+
+    def stop_buffer(self):
+        """ Abort buffering. """
+        self.write(":ABORt")
+
+    def disable_buffer(self):
+        """ Restore instrument to single-shot measurement mode. """
+        self.write(":SENSe:COUNt 1")
+
+
+class Keithley2450(_Keithley2450Buffer, SCPIMixin, Instrument):
     """ Represents the Keithley 2450 SourceMeter with native 2450 SCPI support
     (no 2400 emulation required). Includes enhanced buffer statistics via defbuffer1.
 
@@ -550,3 +697,170 @@ class Keithley2450(Keithley2450Buffer, SCPIMixin, Instrument):
         self.stop_buffer()
         self.disable_source()
         super().shutdown()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Easy-to-use wrapper  ── the driver-contract layer (docs/architecture.md §4) ──
+# ─────────────────────────────────────────────────────────────────────────────
+# One dataclass describes the whole SMU state; connect_smu() applies it and
+# returns a live Keithley2450. A custom script never touches the class unless
+# it needs something this surface doesn't cover.
+
+_SMU_FUNCS = ("voltage", "current")
+_SENSE_FUNCS = ("voltage", "current", "resistance")
+_OFF_STATES = {"himp": "HIMP", "normal": "NORM", "zero": "ZERO", "guard": "GUAR"}
+
+
+@dataclass
+class SMUConfig:
+    """Keithley 2450 as a general-purpose SMU. Every field has a safe default;
+    override only what your measurement needs.
+
+    ``source_range`` / ``sense_range`` are in the unit of their function
+    (V when ``*_function == "voltage"``, A for ``"current"``, Ω for a
+    ``"resistance"`` sense); ``None`` means autorange.
+    """
+    visa_resource: str        = "GPIB0::18::INSTR"
+    source_function: str      = "voltage"     # "voltage" | "current" — what the SMU drives
+    sense_function: Optional[str] = None      # "voltage"|"current"|"resistance"; None → the other of source_function
+    compliance_current_A: float = 1e-3        # limit while sourcing voltage [A]
+    compliance_voltage_V: float = 10.0        # limit while sourcing current [V]
+    source_range: Optional[float] = None      # None → autorange the source
+    sense_range: Optional[float]  = None      # None → autorange the measurement
+    nplc: float               = 1.0           # integration time [power-line cycles], 0.01–10
+    four_wire: bool           = False         # True → remote (4-wire) sense on both V and I
+    terminals: str            = "front"       # "front" | "rear"
+    source_delay_s: Optional[float] = None    # None → the 2450's own auto source delay
+    output_off_state: str     = "himp"        # state when the output is disabled; "himp" = relay open (safe)
+    source_limit_V: float     = 21.0          # set_source_level() refuses |V| beyond this — raise per device
+    source_limit_A: float     = 1e-3          # set_source_level() refuses |I| beyond this — raise per device
+
+
+def _resolved_sense(cfg: SMUConfig) -> str:
+    if cfg.sense_function is not None:
+        return cfg.sense_function
+    return "current" if cfg.source_function == "voltage" else "voltage"
+
+
+def connect_smu(cfg: SMUConfig) -> Keithley2450:
+    """Open the VISA session, reset, apply every field of ``cfg``, enable the
+    source, and return the live handle. Raises on any failure (load-bearing)."""
+    if cfg.source_function not in _SMU_FUNCS:
+        raise ValueError(f"source_function must be one of {_SMU_FUNCS}, got {cfg.source_function!r}")
+    sense = _resolved_sense(cfg)
+    if sense not in _SENSE_FUNCS:
+        raise ValueError(f"sense_function must be one of {_SENSE_FUNCS}, got {sense!r}")
+    if cfg.output_off_state.lower() not in _OFF_STATES:
+        raise ValueError(f"output_off_state must be one of {tuple(_OFF_STATES)}, got {cfg.output_off_state!r}")
+
+    smu = Keithley2450(cfg.visa_resource)
+    smu.reset()
+
+    if cfg.source_function == "voltage":
+        smu.apply_voltage(voltage_range=cfg.source_range,
+                          compliance_current=cfg.compliance_current_A)
+    else:
+        smu.apply_current(current_range=cfg.source_range,
+                          compliance_voltage=cfg.compliance_voltage_V)
+
+    measure = getattr(smu, f"measure_{sense}")
+    if cfg.sense_range is None:
+        measure(nplc=cfg.nplc, auto_range=True)
+    else:
+        measure(nplc=cfg.nplc, auto_range=False, **{sense: cfg.sense_range})
+
+    # 4-wire: sense_wire_mode writes BOTH :SENS:CURR:RSENSE and :SENS:VOLT:RSENSE,
+    # unlike `wires` (resistance function only) — so it is correct for a
+    # source-I / measure-V four-probe setup.
+    smu.sense_wire_mode = "4" if cfg.four_wire else "2"
+
+    smu.use_rear_terminals() if cfg.terminals == "rear" else smu.use_front_terminals()
+
+    if cfg.source_delay_s is not None:
+        setattr(smu, f"source_{cfg.source_function}_delay", cfg.source_delay_s)
+
+    setattr(smu, f"{cfg.source_function}_output_off_state", _OFF_STATES[cfg.output_off_state.lower()])
+
+    smu.enable_source()
+    log.info(
+        "Keithley 2450 SMU connected: %s  source=%s  sense=%s  %s  NPLC=%.3g",
+        cfg.visa_resource, cfg.source_function, sense,
+        "4-wire" if cfg.four_wire else "2-wire", cfg.nplc,
+    )
+    return smu
+
+
+def set_source_level(smu: Keithley2450, cfg: SMUConfig, level: float) -> None:
+    """Set the source setpoint (V or A per ``cfg.source_function``), refusing
+    to exceed the configured software limit — mirrors ``set_gate_voltage``."""
+    if cfg.source_function == "voltage":
+        if abs(level) > cfg.source_limit_V:
+            raise ValueError(
+                f"Requested source voltage {level:.4g} V exceeds source_limit_V "
+                f"±{cfg.source_limit_V:.4g} V — refusing to set it."
+            )
+        smu.source_voltage = level
+    else:
+        if abs(level) > cfg.source_limit_A:
+            raise ValueError(
+                f"Requested source current {level:.4g} A exceeds source_limit_A "
+                f"±{cfg.source_limit_A:.4g} A — refusing to set it."
+            )
+        smu.source_current = level
+
+
+def read_measurement(smu: Keithley2450, cfg: SMUConfig) -> float:
+    """One fresh reading of the sense quantity, in canonical units (V/A/Ω)."""
+    return float(getattr(smu, _resolved_sense(cfg)))
+
+
+def acquire_measurement(
+    smu: Keithley2450,
+    cfg: SMUConfig,
+    n: int,
+    stop_event: Optional[threading.Event] = None,
+) -> dict:
+    """Average ``n`` fresh readings of the sense quantity (slow Python loop,
+    one ``:READ?`` per sample). Returns ``{"mean", "sem"}`` where ``sem`` is
+    the sample stdev / sqrt(n) (``nan`` for n == 1) — same shape as
+    ``keithley2182.acquire_averaged_voltage``. ``stop_event`` is checked
+    between samples so a UI abort can cut a long average short."""
+    sense = _resolved_sense(cfg)
+    samples = np.empty(n)
+    n_used = 0
+    for i in range(n):
+        samples[i] = float(getattr(smu, sense))
+        n_used = i + 1
+        if stop_event is not None and stop_event.is_set():
+            break
+    used = samples[:n_used]
+    sem = float(np.std(used, ddof=1) / np.sqrt(n_used)) if n_used >= 2 else float("nan")
+    return {"mean": float(np.mean(used)), "sem": sem}
+
+
+def measure_buffered(smu: Keithley2450, n: int, timeout_s: float = 30.0) -> dict:
+    """Take ``n`` samples into the native ``defbuffer1`` and return its
+    on-instrument statistics ``{"mean", "std", "n"}`` for the active sense
+    function — far faster than :func:`acquire_measurement` for large ``n``.
+    ``n`` reflects the points actually stored (may be < requested if the
+    buffer fill times out).
+
+    Restores single-shot mode (``:SENSe:COUNt 1``) on the way out — without
+    that, every later bare ``:READ?`` (read_measurement / acquire_measurement)
+    would keep triggering an ``n``-sample sweep."""
+    try:
+        smu.config_buffer(n)
+        smu.start_buffer()
+        smu.wait_for_buffer(timeout=timeout_s)
+        actual = int(smu.ask(":TRACe:ACTual?"))
+        mean = float(smu.ask(':TRACe:STATistics:AVERage? "defbuffer1"'))
+        std = float(smu.ask(':TRACe:STATistics:STDDev? "defbuffer1"'))
+        return {"mean": mean, "std": std, "n": actual}
+    finally:
+        smu.disable_buffer()          # :SENSe:COUNt 1
+
+
+def shutdown_smu(smu: Keithley2450) -> None:
+    """Ramp the source to zero, abort any buffer, disable the output, close."""
+    smu.shutdown()
+    log.info("Keithley 2450 SMU output disabled")

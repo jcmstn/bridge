@@ -29,18 +29,24 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class VoltmeterConfig:
-    """Keithley 2182 — voltage readout across the DUT (channel 1, differential)."""
+    """Keithley 2182 — differential voltage readout. Channel 1 is the DUT
+    input every DC program uses; set ``channel=2`` for the second input
+    (e.g. a reference or a thermocouple) in a custom script."""
     visa_resource: str = "GPIB0::7::INSTR"
     nplc: float        = 5      # Integration time [power line cycles]
     auto_range: bool   = True
+    channel: int       = 1      # 2182 input channel (1 or 2)
 
 
 def connect_voltmeter(cfg: VoltmeterConfig) -> Keithley2182:
     """Open and configure the Keithley 2182 for a differential voltage readout."""
+    if cfg.channel not in (1, 2):
+        raise ValueError(f"Keithley 2182 channel must be 1 or 2, got {cfg.channel}")
     voltmeter = Keithley2182(cfg.visa_resource)
     voltmeter.reset()
-    voltmeter.ch_1.setup_voltage(auto_range=cfg.auto_range, nplc=cfg.nplc)
-    log.info("Keithley 2182 connected: %s  NPLC=%.1f", cfg.visa_resource, cfg.nplc)
+    getattr(voltmeter, f"ch_{cfg.channel}").setup_voltage(auto_range=cfg.auto_range, nplc=cfg.nplc)
+    log.info("Keithley 2182 connected: %s  ch=%d  NPLC=%.1f",
+             cfg.visa_resource, cfg.channel, cfg.nplc)
     return voltmeter
 
 
