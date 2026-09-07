@@ -10,10 +10,21 @@ another lab that has the same instruments).
 
 What it does
 ------------
-Sources a fixed DC sense current with a Keithley 6221, and at each of a list
-of MercuryiTC temperature setpoints, reverses the current +I/-I and records
-the odd (resistive) voltage from a Keithley 2182 → one CSV row per
-temperature, one raw file for the whole sweep, one index.csv row.
+Uses ONE Keithley 2450 SourceMeter (SMU) as the whole electrical chain:
+sources a fixed DC current, measures the resulting voltage in 4-wire
+(remote-sense) mode so the lead resistance drops out. At each of a list of
+MercuryiTC temperature setpoints it averages N_AVERAGES readings → one CSV
+row per temperature, one raw file for the whole sweep, one index.csv row.
+
+This is the "general SMU" wrapper in instruments/keithley2450.py
+(``SMUConfig`` + ``connect_smu`` / ``set_source_level`` /
+``acquire_measurement`` / ``shutdown_smu``); instruments/keithley2400.py
+exposes the same names for a 2400, so swapping the SMU is an import change.
+
+4-wire kills the lead resistance but not a thermoelectric offset in series
+with the DUT. If that matters, reverse the current +I/-I and take the odd
+part — see instruments/keithley6221.acquire_reversal_averaged_voltage and
+docs/current-reversal.md rather than hand-rolling it here.
 
 There is no R-vs-T suite in dc/ — this is the "roll your own loop" case. If
 your measurement instead matches an existing suite, don't rewrite the loop:
@@ -49,14 +60,13 @@ from instruments.data_naming import (
     make_incremental_writer,
     write_record,
 )
-from instruments.keithley6221 import (
-    SourceConfig,
-    connect_source,
-    ramp_current_to_zero,
-    shutdown_source,
-    acquire_reversal_averaged_voltage,
+from instruments.keithley2450 import (
+    SMUConfig,
+    connect_smu,
+    set_source_level,
+    acquire_measurement,
+    shutdown_smu,
 )
-from instruments.keithley2182 import VoltmeterConfig, connect_voltmeter
 from instruments.mercury_itc import (
     TemperatureControllerConfig,
     connect_temperature_controller,
@@ -83,16 +93,21 @@ COMMENT = ""
 MEASUREMENT_TYPE = "RT"
 
 SENSE_CURRENT_A = 100e-6
-N_REVERSALS = 5
+N_AVERAGES = 10                            # SMU readings averaged per temperature point
 TEMPERATURES_K = [300.0, 250.0, 200.0, 150.0, 100.0, 50.0, 10.0]
 
 SETTLE_TOLERANCE_K = 0.05    # "at" the setpoint once within this ...
 SETTLE_HOLD_S = 30.0        # ... held continuously for this long
 DWELL_S = 5.0              # extra dead-time after settle, before acquiring
 
-SRC_CFG = SourceConfig(visa_resource="GPIB0::20::INSTR", sense_current_A=SENSE_CURRENT_A,
-                       compliance_V=2.0, source_delay_s=0.05)
-VOLT_CFG = VoltmeterConfig(visa_resource="GPIB0::7::INSTR", nplc=5, auto_range=True)
+SMU_CFG = SMUConfig(
+    visa_resource="GPIB0::18::INSTR",
+    source_function="current",     # source I, measure the complementary V
+    compliance_voltage_V=2.0,      # stop before this if the DUT opens up
+    four_wire=True,                # remote sense — lead resistance drops out
+    nplc=5,                        # slow integration, quiet reading
+    source_limit_A=1e-3,           # set_source_level() refuses beyond this
+)
 TEMP_CFG = TemperatureControllerConfig(
     visa_resource="TCPIP0::192.168.1.5::7020::SOCKET", sensor_uids=("MB1.T1",))
 # ─────────────────────────────────────────────────────────────────────────────
@@ -121,7 +136,8 @@ def build_header_fields(ctx, records: list[dict], status: str) -> dict:
         "comment": COMMENT,
         "series": "",
         "sense_current_A": SENSE_CURRENT_A,
-        "n_reversals": N_REVERSALS,
+        "n_averages": N_AVERAGES,
+        "four_wire": SMU_CFG.four_wire,
     }
 
 
@@ -143,13 +159,14 @@ def main() -> None:
         ctx.raw_path, lambda recs: build_header_fields(ctx, recs, "in_progress"))
     print(f"→ {ctx.raw_path}")
 
-    source = voltmeter = temp_ctrl = None
+    smu = temp_ctrl = None
     records: list[dict] = []
     final_status = "completed"
     try:
-        source = connect_source(SRC_CFG)
-        voltmeter = connect_voltmeter(VOLT_CFG)
+        smu = connect_smu(SMU_CFG)
         temp_ctrl = connect_temperature_controller(TEMP_CFG)  # load-bearing here
+
+        set_source_level(smu, SMU_CFG, SENSE_CURRENT_A)   # park the source once
 
         for setpoint_K in TEMPERATURES_K:
             set_temperature(temp_ctrl, TEMP_CFG, setpoint_K)
@@ -158,9 +175,7 @@ def main() -> None:
                                         hold_time_s=SETTLE_HOLD_S)
             time.sleep(DWELL_S)
 
-            hv = acquire_reversal_averaged_voltage(
-                source, voltmeter, SENSE_CURRENT_A, N_REVERSALS,
-                source_delay_s=SRC_CFG.source_delay_s)
+            v = acquire_measurement(smu, SMU_CFG, N_AVERAGES)   # {"mean", "sem"}
             t1_K, t2_K = read_temperature(temp_ctrl, TEMP_CFG)
 
             records.append({
@@ -170,11 +185,10 @@ def main() -> None:
                 "temperature_1_K": t1_K,
                 "temperature_2_K": t2_K,
                 "sense_current_A": SENSE_CURRENT_A,
-                "voltage_odd_V": hv["mean"],
-                "voltage_odd_sem_V": hv["sem"],
-                "voltage_even_V": hv["even_mean"],
-                "resistance_ohm": hv["mean"] / SENSE_CURRENT_A,
-                "n_reversals": hv["n_reversals"],
+                "voltage_V": v["mean"],
+                "voltage_sem_V": v["sem"],
+                "resistance_ohm": v["mean"] / SENSE_CURRENT_A,
+                "n_averages": N_AVERAGES,
             })
             write_csv(records)   # full rewrite every point → crash-safe
             print(f"{setpoint_K:8.3f} K  →  R = {records[-1]['resistance_ohm']:.6g} Ω")
@@ -187,15 +201,11 @@ def main() -> None:
         raise
     finally:
         save_partial(ctx, records, final_status)
-        # One guard PER shutdown call — if the ramp raises (e.g. a VISA
-        # timeout mid-ramp), shutdown_source() must still run, or the 6221
-        # is left sourcing current into the DUT. shutdown_source()'s default
-        # zero_first=True is the floor when the gentle ramp didn't finish.
-        if source is not None:
-            safe_shutdown("ramp 6221 to zero", lambda: ramp_current_to_zero(source))
-            safe_shutdown("source (6221)", lambda: shutdown_source(source))
+        # One guard PER shutdown call — if shutdown_smu() raises (e.g. a VISA
+        # timeout mid ramp-to-zero), the temperature controller must still be
+        # closed. shutdown_smu() ramps the source to 0 and opens the output.
+        safe_shutdown("SMU (2450)", lambda: shutdown_smu(smu))
         safe_shutdown("temperature controller", lambda: shutdown_temperature_controller(temp_ctrl))
-        # the 2182 needs no shutdown
     print(f"Done ({final_status}): {len(records)} points → {ctx.raw_path}")
 
 

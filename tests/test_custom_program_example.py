@@ -33,11 +33,10 @@ def _stub_records(n=3):
             "temperature_1_K": 299.5 - 50 * i,
             "temperature_2_K": None,
             "sense_current_A": example.SENSE_CURRENT_A,
-            "voltage_odd_V": 1e-3 * (i + 1),
-            "voltage_odd_sem_V": 1e-6,
-            "voltage_even_V": 2e-5,
+            "voltage_V": 1e-3 * (i + 1),
+            "voltage_sem_V": 1e-6,
             "resistance_ohm": 1e-3 * (i + 1) / example.SENSE_CURRENT_A,
-            "n_reversals": example.N_REVERSALS,
+            "n_averages": example.N_AVERAGES,
         }
         for i in range(n)
     ]
@@ -58,8 +57,8 @@ def test_save_path_round_trips(tmp_path):
     # 1. two-row (name / units) header round-trips back to name_unit columns
     df = read_raw(ctx.raw_path)
     assert len(df) == 3
-    assert {"resistance_ohm", "voltage_odd_sem_V", "T_setpoint_step_K"} <= set(df.columns)
-    assert df["n_reversals"].iloc[0] == example.N_REVERSALS
+    assert {"resistance_ohm", "voltage_sem_V", "T_setpoint_step_K"} <= set(df.columns)
+    assert df["n_averages"].iloc[0] == example.N_AVERAGES
 
     # 2. the finally: finalize fired — index row is "completed", not "in_progress"
     idx = pd.read_csv(ctx.sample_dir / "index.csv")
