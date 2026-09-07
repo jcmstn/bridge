@@ -251,10 +251,14 @@ def format_duration(seconds: float) -> str:
     return f"{s}s"
 
 
-def _acquire_duration_s(n_averages: int, sample_rate_Hz: float) -> float:
+def _acquire_duration_s(n_averages: int, sample_rate_Hz: float,
+                        time_constant_s: float = 0.0) -> float:
+    """Poll window acquire_averaged() will use per point — mirrors the
+    max(0.1, 3xTC, n*1.5/rate) floor in instruments/mfli_daq.py so the
+    run-time estimate and the correlated-samples warning stay honest."""
     if sample_rate_Hz <= 0:
         return 0.0
-    return max(0.1, (n_averages * 1.5) / sample_rate_Hz)
+    return max(0.1, 3.0 * time_constant_s, (n_averages * 1.5) / sample_rate_Hz)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -438,11 +442,29 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
                 f"Sample rate {state['sample_rate_Hz']:g} Sa/s may be low for this TC "
                 f"(want ≳ {min_rate:.1f} Sa/s)."
             )
+
+        # Independent-average check: acquire_averaged() polls for
+        # max(0.1, 3xTC, n*1.5/rate) s, but consecutive demod outputs are
+        # correlated over ~TC, so the window only holds ~window/(pi*TC)
+        # independent samples. If that's well below n_averages, the mean
+        # barely beats one reading and the reported 1f/2f R_std is optimistic.
+        acq_window_s = _acquire_duration_s(
+            state["n_averages"], state["sample_rate_Hz"], tc
+        )
+        n_indep = acq_window_s / (math.pi * tc)
+        if n_indep < 0.5 * state["n_averages"]:
+            warnings.append(
+                f"Averaging window ≈ {acq_window_s:g} s holds only ~{max(1, round(n_indep))} "
+                f"independent filter outputs at TC={tc:g} s — far fewer than the "
+                f"{state['n_averages']} samples requested, so per-point noise averages "
+                f"down much less than √n and the reported R_std understates it. Use a "
+                f"shorter time constant, or raise the sample count into the thousands."
+            )
     else:
         errors.append("Time constant must be > 0 s.")
 
     per_point_s = state["settling_time_s"] + _acquire_duration_s(
-        state["n_averages"], state["sample_rate_Hz"]
+        state["n_averages"], state["sample_rate_Hz"], state["time_constant_s"]
     )
 
     # ── Sweep ────────────────────────────────────────────────────────────────

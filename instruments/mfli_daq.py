@@ -201,12 +201,15 @@ def acquire_averaged(daq: zi.ziDAQServer, cfg, n_averages: int) -> dict:
     """
     Collect at least `n_averages` samples from `cfg`'s demodulator and
     return their mean +/- std. Poll duration is chosen to guarantee enough
-    samples at the configured rate.
+    samples at the configured rate AND to span at least 3x the demod time
+    constant (below that the samples are correlated, so the mean barely
+    improves on one reading and the reported std is optimistic).
 
     `cfg` only needs `.device`, `.demod_index` and `.sample_rate_Hz`
     attributes — every program's own DemodConfig shape already has these,
     so this works unchanged for any of them without a shared DemodConfig
-    type. If `cfg` also has an `.input_ch` attribute (i.e. it's reading a
+    type. A `.filter.time_constant_s` attribute, if present, is used for the
+    3x-TC poll-window floor above; without it that floor is simply skipped. If `cfg` also has an `.input_ch` attribute (i.e. it's reading a
     Signal Input, not a Current Input — checked via `.use_current_input`
     where that attribute exists, e.g. mfli_diff_resistance_vs_bias.py's
     current-sense channel), the returned dict includes an "overload" flag
@@ -215,8 +218,17 @@ def acquire_averaged(daq: zi.ziDAQServer, cfg, n_averages: int) -> dict:
     `None` rather than reading the wrong (unused) Signal Input's flag.
     """
     path = f"/{cfg.device}/demods/{cfg.demod_index}/sample".lower()
-    # Add a 50 % margin so we comfortably exceed n_averages
-    duration_s  = max(0.1, (n_averages * 1.5) / cfg.sample_rate_Hz)
+    # Poll long enough that the samples are actually independent. The demod
+    # low-pass has a correlation time on the order of its own time constant,
+    # so a window shorter than a few TC returns ~1 independent sample no
+    # matter how many rows come back -- the mean barely improves on a single
+    # reading and x_std/y_std/r_std understate the true uncertainty by
+    # ~sqrt(window / TC). Floor the window at 3x TC. `cfg.filter` is optional
+    # in this module's duck-typed contract (see the module docstring), so
+    # fall back to the plain sample-count window when it isn't present.
+    tc = getattr(getattr(cfg, "filter", None), "time_constant_s", 0.0)
+    # 50 % margin on the sample-count term so we comfortably exceed n_averages.
+    duration_s  = max(0.1, 3.0 * tc, (n_averages * 1.5) / cfg.sample_rate_Hz)
     timeout_ms  = int(duration_s * 1000) + 2000
 
     raw = _poll_demod(daq, path, duration_s, timeout_ms)
