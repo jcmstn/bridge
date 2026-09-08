@@ -32,4 +32,4 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["dc*", "mfli*", "instruments*", "web*"]
+include = ["dc*", "mfli*", "sot*", "instruments*", "web*"]
