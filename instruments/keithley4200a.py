@@ -9,15 +9,18 @@ pymeasure ships no 4200A driver. This module is a hand-written wrapper over
 runs so an outside PC can drive it over GPIB or LAN, the same role KXCI plays
 for every remote 4200A script.
 
-Scope of THIS module: the two 4200A **SMU** cards, as a general force/measure
-SMU (docs/architecture.md §4). Enough for the SOT DC-characterisation and the
-quasi-static (DC staircase) SOT switching programs in ``sot/``.
+Scope of THIS module:
+  * the two 4200A **SMU** cards, as a general force/measure SMU
+    (docs/architecture.md §4) — ``SMUChannelConfig`` + ``set_source_level`` /
+    ``read_measurement`` / ``acquire_measurement`` / ``acquire_reversal_averaged``.
+  * the **PMU** (4225-PMU) + its two RPMs, as a fire-one-pulse primitive —
+    ``PMUPulseConfig`` + ``configure_pmu_pulse`` / ``pulse_once``. See the
+    "PMU" section lower in this file for the KXCI mechanism and why the KULT
+    module name/signature is *your* config, not a hard-coded default.
 
-NOT here yet — planned follow-up:
-  * PMU (pulse-measure unit) + the two RPMs — pulsed switching (Stage 4 of the
-    SOT plan). KXCI's PMU support is firmware-dependent and pulsed segment-ARB
-    work usually wants the LPT-remote server instead. When it lands it is new
-    functions in this file behind the same ``connect_4200a()`` — not a rewrite.
+The PMU here does not measure the switched state — that is a separate
+6221 + 2182 delayed R_xy read in ``sot/sot_pulsed_switching.py``. The PMU's
+only job is to deliver the write pulse.
 
 Transport
 ---------
@@ -361,3 +364,164 @@ def acquire_reversal_averaged(
         "even_sem": sem_even,
         "n_reversals": n_used,
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PMU  ── fire one current-forcing... no: one VOLTAGE pulse, via a KULT module
+# ─────────────────────────────────────────────────────────────────────────────
+# Why a KULT module and not native KXCI commands
+# ---------------------------------------------------------------------------
+# KXCI has no DV/DI-equivalent for the 4225-PMU. The portable route is to run
+# a KULT **user module** over KXCI:  ``EX <library> <module>(<args>)`` executes
+# it and returns the module's return value; ``GN`` then fetches each output
+# parameter in order. WHICH module exists, and its argument order, is specific
+# to your 4200A install — so ``PMUPulseConfig.library`` / ``.module`` /
+# ``.arg_order`` are YOUR config, and there is deliberately no working default
+# module name (a wrong guess would "run" and do nothing, or the wrong thing).
+#
+# Discover what you have:  ``list_user_libraries(dev)`` sends ``UL``. Point
+# ``library``/``module`` at a pulse module (Keithley ships pulse-IV examples
+# such as the ``pmu-dut-examples`` library), set ``arg_order`` to match its
+# signature, and set ``return_names`` to the output parameters you want back
+# (leave empty if the module returns none — then the measured pulse V/I simply
+# stay blank in the data, which is fine).
+#
+# The PMU forces VOLTAGE at the pin; the RPM gives current ranges + fast
+# measure, not current forcing. So the swept axis is volts. Record the
+# module's spot-mean V/I if it returns them; never back-compute current from
+# an assumed channel resistance.
+
+_MAX_PMU_CHANNELS = (1, 2)
+
+
+@dataclass
+class PMUPulseConfig:
+    """One KULT pulse-module invocation. Every timing field is in SI seconds /
+    volts / amps; they are substituted into the ``EX`` argument list in
+    ``arg_order`` (with ``amplitude_V`` overridden per pulse by
+    ``pulse_once``). Reorder / trim ``arg_order`` + ``return_names`` to match
+    your installed module — see the section comment above."""
+    library: str = "pmu-dut-examples"      # KULT user-library name — CONFIRM with `UL`
+    module: str = ""                        # KULT module name — REQUIRED, no safe default
+    pmu_channel: int = 1                    # PMU/RPM channel wired to the device channel
+    amplitude_V: float = 0.5               # forced pulse amplitude at the pin [V]
+    base_V: float = 0.0                     # quiescent level between pulses [V]
+    width_s: float = 100e-9               # pulse top width [s]
+    rise_s: float = 20e-9                 # leading-edge transition time [s]
+    fall_s: float = 20e-9                 # trailing-edge transition time [s]
+    period_s: float = 1e-3               # full pulse period [s] (≥ width+rise+fall)
+    n_pulses: int = 1                      # pulses delivered per pulse_once() call
+    i_range_A: float = 0.2               # PMU/RPM current measure range [A]
+    v_limit_V: float = 5.0              # PMU voltage limit / pulse_once() amplitude guard [V]
+    i_limit_A: float = 0.2             # PMU current limit [A]
+    exec_timeout_s: float = 30.0        # VISA read timeout while the module runs
+    arg_order: tuple = (
+        "pmu_channel", "amplitude_V", "base_V", "width_s", "rise_s", "fall_s",
+        "period_s", "n_pulses", "i_range_A", "v_limit_V", "i_limit_A")
+    return_names: tuple = ()             # output params GN fetches, in module order,
+                                        # e.g. ("pulse_voltage_measured_V", "pulse_current_measured_A")
+
+
+def _fmt_arg(value) -> str:
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, int):
+        return f"{value:d}"
+    if isinstance(value, str):
+        return value
+    return f"{float(value):.6E}"
+
+
+def _parse_gn(reply: str) -> float:
+    """One ``GN`` output value → float. Takes the FIRST float-parseable token
+    (a trailing status flag stays ignored); handles ``,``- or space-separated
+    replies without reusing ``_parse_reading`` (GA-style lists put status
+    last, not first)."""
+    for token in reply.strip().replace(",", " ").split():
+        try:
+            return float(token)
+        except ValueError:
+            continue
+    raise ValueError(f"no numeric value in GN reply {reply!r}")
+
+
+def list_user_libraries(dev: _Keithley4200A_KXCI) -> str:
+    """Raw reply to KXCI ``UL`` — the installed user-library list. Discovery
+    helper: run this once to find the pulse module to point
+    ``PMUPulseConfig.library``/``.module`` at. Some firmware returns several
+    lines; read more from ``dev.adapter`` if this looks truncated."""
+    return dev.query("UL")
+
+
+def configure_pmu_pulse(dev: _Keithley4200A_KXCI, cfg: PMUPulseConfig) -> None:
+    """Validate ``cfg`` and log the ``EX`` template. No device I/O — the KULT
+    module invoked by :func:`pulse_once` is self-contained (KXCI User Mode)."""
+    if not cfg.module:
+        raise ValueError("PMUPulseConfig.module is empty — set it to a pulse "
+                         "module from `list_user_libraries(dev)` (KXCI `UL`).")
+    if cfg.pmu_channel not in _MAX_PMU_CHANNELS:
+        raise ValueError(f"pmu_channel must be one of {_MAX_PMU_CHANNELS}, got {cfg.pmu_channel!r}")
+    if cfg.width_s <= 0 or cfg.rise_s < 0 or cfg.fall_s < 0:
+        raise ValueError("pulse width must be > 0 and rise/fall ≥ 0")
+    if cfg.period_s < cfg.width_s + cfg.rise_s + cfg.fall_s:
+        raise ValueError("period_s must be ≥ width_s + rise_s + fall_s")
+    if cfg.n_pulses < 1:
+        raise ValueError("n_pulses must be ≥ 1")
+    if abs(cfg.amplitude_V) > cfg.v_limit_V:
+        raise ValueError(f"amplitude_V {cfg.amplitude_V:g} exceeds v_limit_V ±{cfg.v_limit_V:g}")
+    missing = [n for n in cfg.arg_order if not hasattr(cfg, n)]
+    if missing:
+        raise ValueError(f"arg_order names not on PMUPulseConfig: {missing}")
+    template = ", ".join(f"<{n}>" for n in cfg.arg_order)
+    log.info("4200A PMU pulse via KULT: EX %s %s(%s)  [ch %d, %.4g V, %.3g s wide]",
+             cfg.library, cfg.module or "<unset>", template,
+             cfg.pmu_channel, cfg.amplitude_V, cfg.width_s)
+
+
+def pulse_once(
+    dev: _Keithley4200A_KXCI,
+    cfg: PMUPulseConfig,
+    amplitude_V: Optional[float] = None,
+    stop_event: Optional[threading.Event] = None,
+) -> dict:
+    """Deliver one pulse burst (``cfg.n_pulses`` pulses) at ``amplitude_V``
+    (default ``cfg.amplitude_V``) by running the configured KULT module.
+
+    Returns ``{"module_return": <EX reply>, **{name: float for name in
+    cfg.return_names}}`` — a return name whose ``GN`` value can't be parsed is
+    set to ``None`` rather than raising, so a partially-cooperating module
+    still yields a pulse. Raises on the amplitude guard (load-bearing).
+    """
+    amp = cfg.amplitude_V if amplitude_V is None else amplitude_V
+    if abs(amp) > cfg.v_limit_V:
+        raise ValueError(f"Requested pulse amplitude {amp:g} V exceeds v_limit_V "
+                         f"±{cfg.v_limit_V:g} V — refusing to pulse.")
+    if stop_event is not None and stop_event.is_set():
+        return {"module_return": None}
+
+    args = ", ".join(_fmt_arg(amp if name == "amplitude_V" else getattr(cfg, name))
+                     for name in cfg.arg_order)
+    cmd = f"EX {cfg.library} {cfg.module}({args})"
+
+    prev_timeout = None
+    try:
+        prev_timeout = dev.adapter.connection.timeout
+        dev.adapter.connection.timeout = cfg.exec_timeout_s * 1000
+    except Exception:
+        pass
+    try:
+        ex_reply = dev.query(cmd)
+    finally:
+        if prev_timeout is not None:
+            try:
+                dev.adapter.connection.timeout = prev_timeout
+            except Exception:
+                pass
+
+    out: dict = {"module_return": ex_reply}
+    for name in cfg.return_names:
+        try:
+            out[name] = _parse_gn(dev.query("GN"))
+        except Exception:
+            out[name] = None
+    return out

@@ -112,3 +112,78 @@ def test_acquire_reversal_averaged_rejects_voltage_source():
     sense = SMUChannelConfig(channel=2, source_function="current")
     with pytest.raises(ValueError):
         k4200.acquire_reversal_averaged(dev, src, sense, level=0.1, n_reversals=2)
+
+
+# ── PMU: _parse_gn / configure_pmu_pulse / pulse_once ─────────────────────
+
+from instruments.keithley4200a import PMUPulseConfig, _parse_gn
+
+
+@pytest.mark.parametrize("raw, want", [
+    ("1.5", 1.5),
+    ("N 1.23E-3, 0", 1.23e-3),       # GA-style: value first, status last
+    ("  -2.0e-6 ", -2.0e-6),
+])
+def test_parse_gn(raw, want):
+    assert _parse_gn(raw) == pytest.approx(want)
+
+
+def test_parse_gn_no_number_raises():
+    with pytest.raises(ValueError):
+        _parse_gn("ERROR")
+
+
+def test_configure_pmu_pulse_rejects_empty_module():
+    with pytest.raises(ValueError):
+        k4200.configure_pmu_pulse(_FakeKXCI([]), PMUPulseConfig(module=""))
+
+
+def test_configure_pmu_pulse_rejects_bad_timing():
+    with pytest.raises(ValueError):   # period < width + rise + fall
+        k4200.configure_pmu_pulse(_FakeKXCI([]),
+                                  PMUPulseConfig(module="m", width_s=1e-6, rise_s=1e-6,
+                                                 fall_s=1e-6, period_s=1e-6))
+
+
+def test_configure_pmu_pulse_rejects_amplitude_over_limit():
+    with pytest.raises(ValueError):
+        k4200.configure_pmu_pulse(_FakeKXCI([]),
+                                  PMUPulseConfig(module="m", amplitude_V=10.0, v_limit_V=5.0))
+
+
+def test_pulse_once_builds_ex_command_and_substitutes_amplitude():
+    dev = _FakeKXCI(["OK"])
+    cfg = PMUPulseConfig(library="pmu-dut-examples", module="pulse_iv",
+                         width_s=1e-7, rise_s=2e-8, fall_s=2e-8, period_s=1e-3,
+                         i_range_A=0.2, v_limit_V=5.0, i_limit_A=0.2)
+    out = k4200.pulse_once(dev, cfg, amplitude_V=1.2)
+    assert dev.writes == [
+        "EX pmu-dut-examples pulse_iv(1, 1.200000E+00, 0.000000E+00, 1.000000E-07, "
+        "2.000000E-08, 2.000000E-08, 1.000000E-03, 1, 2.000000E-01, 5.000000E+00, 2.000000E-01)"
+    ]
+    assert out == {"module_return": "OK"}
+
+
+def test_pulse_once_fetches_named_return_values_via_gn():
+    dev = _FakeKXCI(["done", "0.48", "N 2.0E-3"])
+    cfg = PMUPulseConfig(module="m",
+                         return_names=("pulse_voltage_measured_V", "pulse_current_measured_A"))
+    out = k4200.pulse_once(dev, cfg, amplitude_V=0.5)
+    assert dev.writes.count("GN") == 2
+    assert out["pulse_voltage_measured_V"] == pytest.approx(0.48)
+    assert out["pulse_current_measured_A"] == pytest.approx(2.0e-3)
+
+
+def test_pulse_once_unparseable_gn_becomes_none():
+    dev = _FakeKXCI(["done", "junk"])
+    cfg = PMUPulseConfig(module="m", return_names=("pulse_voltage_measured_V",))
+    out = k4200.pulse_once(dev, cfg, amplitude_V=0.5)
+    assert out["pulse_voltage_measured_V"] is None
+
+
+def test_pulse_once_refuses_amplitude_over_limit():
+    dev = _FakeKXCI([])
+    cfg = PMUPulseConfig(module="m", v_limit_V=3.0)
+    with pytest.raises(ValueError):
+        k4200.pulse_once(dev, cfg, amplitude_V=5.0)
+    assert dev.writes == []

@@ -24,7 +24,7 @@ reference. This file is the map, not a second copy of them.
 |---------|-------|
 | `uv run python dc/dc_tui.py`   | DC suite picker (Hall, I–V, gate sweep, spin-valve) — Textual |
 | `uv run python mfli/mfli_tui.py` | MFLI suite picker (dual-harmonic, diff-resistance, phase calibration) — Textual |
-| `uv run python sot/sot_tui.py` | SOT suite picker (4200A: 4-probe R_xx, DC current-staircase switching) — Textual |
+| `uv run python sot/sot_tui.py` | SOT suite picker (4200A: 4-probe R_xx, DC current-staircase switching, PMU pulsed switching) — Textual |
 | `uv run python web/app.py`     | Browser front end, same 7 measurements — NiceGUI, `http://localhost:8080` |
 | `uv run python tools/curate_sample.py <sample>` | Post-hoc curation TUI: mark runs `paper_include` / `figure_ref` |
 
