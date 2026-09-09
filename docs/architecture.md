@@ -136,6 +136,7 @@ raw driver classes.
 | `kepco_magnet.py` | Kepco BOP-GL bipolar supply → electromagnet | `KepkoBOPGL` class; `MagnetConfig`, `connect_magnet`, `set_magnet_current`, `shutdown_magnet` | **hand-written** on pymeasure `Instrument`/`SCPIMixin` |
 | `lakeshore475.py` | Lake Shore 475 DSP Gaussmeter | `LakeShore475` class; `GaussmeterConfig`, `connect_gaussmeter`, `read_field_mT`, `shutdown_gaussmeter` | **hand-written** (pymeasure has 421/425, not 475) |
 | `mercury_itc.py` | Oxford MercuryiTC temperature controller | `MercuryITC` class; `TemperatureControllerConfig`, `connect_temperature_controller`, `read_temperature`, `shutdown_temperature_controller` | **hand-written** (pymeasure has ITC 503 only) |
+| `keithley4200a.py` | Keithley 4200A-SCS — 2 SMU cards + 4225-PMU behind a 4225-RPM, over KXCI | **SMU:** `SMUChannelConfig`, `connect_4200a`, `configure_smu`, `set_source_level`, `read_measurement`, `acquire_measurement`, `acquire_reversal_averaged`, `shutdown_4200a`. **PMU:** `PMUPulseConfig`, `configure_pmu_pulse`, `pulse_once`, `list_user_libraries` | **hand-written** KXCI line protocol (not SCPI); the PMU half runs the KULT module in `instruments/kult/` |
 | `mfli_daq.py` | Zurich Instruments MFLI (dual, via MDS) | `connect`, `connect_device`, `setup_mds`, `sync_follower_oscillator`, `acquire_averaged` | wraps `zhinst-core` |
 
 **Failure policy — deliberate, not accidental:**

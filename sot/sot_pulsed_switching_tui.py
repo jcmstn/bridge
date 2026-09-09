@@ -5,10 +5,10 @@ Textual TUI for sot/sot_pulsed_switching.py
 Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
 Created: 2026-09-08
 
-Probability-of-switching vs. pulse amplitude: 4200A PMU delivers the write
-pulse, then after a fixed delay the 6221 + 2182 read R_xy, at a single static
-tilted field. One output file for the whole amplitude sweep (rows =
-amplitude × repeat).
+Probability-of-switching vs. pulse amplitude: the 4200A PMU delivers the write
+pulse, then after a fixed delay SMU1 forces ±I_read and SMU2 reads V_xy — all
+on the 4200A — at a single static tilted field. One output file for the whole
+amplitude sweep (rows = amplitude × repeat).
 
 Run:  python sot_pulsed_switching_tui.py
 """
@@ -46,27 +46,23 @@ from sot.sot_pulsed_switching import (
     PMUPulseConfig,
     PulseSequenceConfig,
     ReadConfig,
-    SourceConfig,
+    SMUChannelConfig,
     TemperatureControllerConfig,
-    VoltmeterConfig,
     configure_pmu_pulse,
+    configure_smu,
     connect_4200a,
     connect_gaussmeter,
     connect_magnet,
-    connect_source,
     connect_temperature_controller,
-    connect_voltmeter,
     list_user_libraries,
-    ramp_current_to_zero,
     run_measurement,
     set_magnet_current,
+    set_source_level,
     shutdown_4200a,
     shutdown_gaussmeter,
     shutdown_magnet,
-    shutdown_source,
     shutdown_temperature_controller,
 )
-from sot.sot_pulsed_switching import _six221_output_off
 from dc.dc_sweep_utils import parse_value_list, safe_shutdown
 from instruments.data_dir import DataDirPickerScreen, validate_directory
 from instruments.data_naming import (
@@ -95,40 +91,55 @@ SETTINGS_PATH = _DEFAULT_DATA_DIR / "sot_pulsed_switching_tui_settings.json"
 MEASUREMENT_TYPE = "SOTPS"
 
 SOT_PULSED_DESCRIPTION = (
-    "Pulsed SOT switching (Stage 4): the 4200A PMU fires a write pulse into "
-    "the channel, then after a fixed delay (e.g. 5 s) the 6221 + 2182 read "
-    "R_xy — repeated n_repeats× per amplitude across an amplitude sweep, at "
-    "one static field held slightly out of plane so the two in-plane remanent "
-    "states read as different R_xy. The PMU pulse runs a KULT module over "
-    "KXCI: set the library/module names from `UL` (Instrument config card). "
-    "Turn the reset pulse ON for proper probability statistics. Re-run at the "
-    "opposite field sign for the ±H_z control."
+    "Pulsed SOT switching (Stage 4), entirely on the 4200A: the PMU fires a "
+    "write pulse into the main channel through RPM1, then after a fixed delay "
+    "(e.g. 5 s) SMU1 forces ±I_read through the same path while SMU2 reads "
+    "V_xy across the Hall arms — reversal-averaged, ON by default, which is "
+    "what cancels the thermal EMF and SMU2's offset. Repeated n_repeats× per "
+    "amplitude across an amplitude sweep, at one static field held slightly "
+    "out of plane so the two in-plane remanent states read as different R_xy. "
+    "The pulse runs the KULT module instruments/kult/bridge_sot_pulse.c, which "
+    "also routes RPM1 back to the SMU on exit. Turn the reset pulse ON for "
+    "proper probability statistics. Re-run at the opposite field sign for the "
+    "±H_z control."
 )
+
+# Current MEASURE ceiling with a 4225-RPM on the PMU 10 V range. Above this the
+# pulse current reads back overflowed rather than erroring (the KULT module sets
+# KI_LIM_MODE=KI_VALUE), so build_summary() warns rather than blocks.
+_RPM_10V_IMEAS_MAX_A = 0.01
 
 DEFAULTS: dict = {
     # 4200A / PMU
     "k4200_visa_resource": "GPIB0::17::INSTR",
-    "pmu_library": "pmu-dut-examples",
-    "pmu_module": "",
+    "integration": "normal",
+    "pmu_library": "bridge_sot",
+    "pmu_module": "bridge_sot_pulse",
     "pmu_channel": "1",
+    "pmu_id": "PMU1",
     "amplitudes_V": "0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.4, 1.6, 1.8, 2.0",
     "pulse_width_s": "1e-7",
     "pulse_rise_s": "2e-8",
     "pulse_fall_s": "2e-8",
     "pulse_period_s": "1e-3",
+    "pulse_delay_s": "0",
     "n_pulses": "1",
-    "pmu_i_range_A": "0.2",
+    "pmu_sample_rate": "2e8",
+    "pmu_meas_start_perc": "0.75",
+    "pmu_meas_stop_perc": "0.90",
+    "pmu_dut_res_ohm": "1000",
+    "pmu_v_range_V": "10",
+    "pmu_i_range_A": "0.01",
     "pmu_v_limit_V": "5.0",
-    "pmu_i_limit_A": "0.2",
-    "pmu_return_names": "",
-    # read (6221 + 2182)
-    "sense_current_A": "1e-4",
-    "compliance_V": "2.0",
-    "source_delay_s": "0.05",
-    "nplc": "5",
-    "auto_range": True,
+    "pmu_return_names": ("pulse_voltage_measured_V, pulse_current_measured_A, "
+                         "pulse_base_voltage_V, pulse_base_current_A"),
+    # delayed R_xy read (4200A SMU1 forces, SMU2 measures)
+    "read_current_A": "1e-4",
     "n_reversals": "5",
-    "settle_after_enable_s": "0.3",
+    "reversal_enabled": True,
+    "source_delay_s": "0.05",
+    "settle_before_read_s": "0.3",
+    "channel_resistance_ohm": "1000",   # display only — never written to the data
     # pulse sequence
     "delay_after_pulse_s": "5.0",
     "n_repeats": "50",
@@ -143,12 +154,15 @@ DEFAULTS: dict = {
     "device": "",
     "cooldown": "",
     "temperature_setpoint_K": "300",
-    # instrument addresses
-    "source_visa_resource": "GPIB0::20::INSTR",
-    "voltmeter_visa_resource": "GPIB0::7::INSTR",
+    # SMU read path + instrument addresses
+    "src_channel": "1",
+    "hall_channel": "2",
+    "compliance_voltage_V": "2.0",
+    "source_limit_A": "0.01",
+    "four_wire": False,
     "magnet_visa_resource": "GPIB0::6::INSTR",
     "current_limit_A": "35",
-    "voltage_compliance_V": "15.0",
+    "magnet_voltage_compliance_V": "15.0",
     "ramp_step_A": "0.1",
     "ramp_delay_s": "0.05",
     "gaussmeter_visa_resource": "GPIB0::12::INSTR",
@@ -165,16 +179,20 @@ NUMERIC_FIELDS: dict = {
     "pulse_rise_s": float,
     "pulse_fall_s": float,
     "pulse_period_s": float,
+    "pulse_delay_s": float,
     "n_pulses": int,
+    "pmu_sample_rate": float,
+    "pmu_meas_start_perc": float,
+    "pmu_meas_stop_perc": float,
+    "pmu_dut_res_ohm": float,
+    "pmu_v_range_V": float,
     "pmu_i_range_A": float,
     "pmu_v_limit_V": float,
-    "pmu_i_limit_A": float,
-    "sense_current_A": float,
-    "compliance_V": float,
-    "source_delay_s": float,
-    "nplc": float,
+    "read_current_A": float,
     "n_reversals": int,
-    "settle_after_enable_s": float,
+    "source_delay_s": float,
+    "settle_before_read_s": float,
+    "channel_resistance_ohm": float,
     "delay_after_pulse_s": float,
     "n_repeats": int,
     "reset_amplitude_V": float,
@@ -182,21 +200,30 @@ NUMERIC_FIELDS: dict = {
     "magnet_current_A": float,
     "field_angle_from_oop_deg": float,
     "field_settle_tolerance_mT": float,
+    "src_channel": int,
+    "hall_channel": int,
+    "compliance_voltage_V": float,
+    "source_limit_A": float,
     "current_limit_A": float,
-    "voltage_compliance_V": float,
+    "magnet_voltage_compliance_V": float,
     "ramp_step_A": float,
     "ramp_delay_s": float,
     "gaussmeter_n_averages": int,
     "gaussmeter_read_delay_s": float,
 }
-TEXT_FIELDS = ["k4200_visa_resource", "pmu_library", "pmu_module", "amplitudes_V",
-               "pmu_return_names", "device", "cooldown",
-               "source_visa_resource", "voltmeter_visa_resource", "magnet_visa_resource",
+TEXT_FIELDS = ["k4200_visa_resource", "integration", "pmu_library", "pmu_module",
+               "pmu_id", "amplitudes_V", "pmu_return_names", "device", "cooldown",
+               "magnet_visa_resource",
                "gaussmeter_visa_resource", "temperature_visa_resource",
                "temperature_sensor_uids", "data_dir"]
 OPTIONAL_NUMERIC_FIELDS = ["temperature_setpoint_K"]
 TEMPERATURE_FIELD_IDS = ["temperature_visa_resource", "temperature_sensor_uids"]
 RESET_FIELD_IDS = ["reset_amplitude_V", "reset_delay_after_s"]
+
+# Every Switch id on the form. Hardcoded in collect_raw / _load_settings /
+# parse_state -- they must move together, and parse_state runs on every
+# keystroke, so a stale entry here is an immediate crash.
+SWITCH_FIELD_IDS = ("reset_enabled", "enable_temperature", "reversal_enabled", "four_wire")
 
 
 def parse_sensor_uids(raw: str) -> tuple:
@@ -237,8 +264,8 @@ def format_duration(seconds: float) -> str:
 class MeasurementPlan:
     k4200_cfg: Keithley4200AConfig
     pmu_cfg: PMUPulseConfig
-    src_cfg: SourceConfig
-    volt_cfg: VoltmeterConfig
+    src_cfg: SMUChannelConfig      # SMU1 — forces ±I_read through RPM1
+    hall_cfg: SMUChannelConfig     # SMU2 — parked at 0 A across the Hall arms
     read_cfg: ReadConfig
     seq_cfg: PulseSequenceConfig
     magnet_cfg: MagnetConfig
@@ -331,10 +358,21 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
                       "the pulse library/module (Instrument config card).")
     if state["pmu_channel"] not in (1, 2):
         errors.append("PMU channel is 1 or 2.")
+    if state["pmu_v_range_V"] not in (10.0, 40.0):
+        errors.append("PMU voltage range must be 10 or 40 V.")
     if state["pulse_width_s"] <= 0:
         errors.append("Pulse width must be > 0 s.")
-    if state["pulse_period_s"] < state["pulse_width_s"] + state["pulse_rise_s"] + state["pulse_fall_s"]:
-        errors.append("Pulse period must be ≥ width + rise + fall.")
+    if (state["pulse_period_s"] < state["pulse_delay_s"] + state["pulse_width_s"]
+            + state["pulse_rise_s"] + state["pulse_fall_s"]):
+        errors.append("Pulse period must be ≥ delay + width + rise + fall.")
+    edge_min = 100e-9 if state["pmu_v_range_V"] == 40.0 else 20e-9
+    if state["pulse_width_s"] < 60e-9:
+        errors.append("Pulse width must be ≥ 60 ns (4225-PMU minimum).")
+    if min(state["pulse_rise_s"], state["pulse_fall_s"]) < edge_min:
+        errors.append(f"Rise/fall must be ≥ {format_si(edge_min, 's')} on the "
+                      f"{state['pmu_v_range_V']:g} V range.")
+    if not 0.0 <= state["pmu_meas_start_perc"] < state["pmu_meas_stop_perc"] <= 1.0:
+        errors.append("Need 0 ≤ measure-window start < stop ≤ 1.")
     if state["n_pulses"] < 1:
         errors.append("Pulses per cycle must be ≥ 1.")
 
@@ -346,16 +384,30 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         if over:
             errors.append(f"Pulse amplitude(s) {over} V exceed the PMU voltage limit "
                           f"±{state['pmu_v_limit_V']:g} V.")
+        over_range = [a for a in amps if abs(a) > state["pmu_v_range_V"]]
+        if over_range:
+            errors.append(f"Pulse amplitude(s) {over_range} V exceed the "
+                          f"{state['pmu_v_range_V']:g} V PMU range.")
         info.append(f"Amplitude sweep: {len(amps)} values "
                     f"{format_si(min(amps), 'V')}…{format_si(max(amps), 'V')}" if amps else "")
 
-    # read
+    # read (4200A SMU1 forces, SMU2 measures)
+    if state["src_channel"] == state["hall_channel"]:
+        errors.append("Channel-current SMU and Hall-voltmeter SMU must be different (1 vs 2).")
+    if state["src_channel"] not in (1, 2) or state["hall_channel"] not in (1, 2):
+        errors.append("SMU channels are 1 or 2 on this system.")
     if state["n_reversals"] < 1:
         errors.append("Reversal pairs per read must be ≥ 1.")
-    if state["sense_current_A"] <= 0:
-        errors.append("6221 sense current must be > 0 A.")
-    if state["compliance_V"] <= 0:
-        errors.append("6221 compliance must be > 0 V.")
+    if state["read_current_A"] <= 0:
+        errors.append("Read current must be > 0 A.")
+    elif state["read_current_A"] > state["source_limit_A"]:
+        errors.append(f"Read current {format_si(state['read_current_A'], 'A')} exceeds the SMU "
+                      f"software limit ±{format_si(state['source_limit_A'], 'A')}.")
+    if state["compliance_voltage_V"] <= 0:
+        errors.append("SMU compliance voltage must be > 0 V.")
+    if not state["reversal_enabled"]:
+        warnings.append("Read-current reversal is OFF — the thermal EMF and SMU2's offset are "
+                        "not cancelled, and they are this measurement's noise floor.")
 
     # sequence
     if state["n_repeats"] < 1:
@@ -374,14 +426,36 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
                       f"magnet limit ±{state['current_limit_A']:g} A.")
 
     total = max(1, len(amps)) * max(1, state["n_repeats"])
-    per_cycle_s = (state["delay_after_pulse_s"] + state["settle_after_enable_s"]
-                   + state["n_reversals"] * 2 * max(state["source_delay_s"], state["nplc"] / 50.0)
+    reads_per_cycle = state["n_reversals"] * (2 if state["reversal_enabled"] else 1)
+    per_cycle_s = (state["delay_after_pulse_s"] + state["settle_before_read_s"]
+                   + reads_per_cycle * (state["source_delay_s"] + 0.02)
                    + (state["reset_delay_after_s"] if state["reset_enabled"] else 0.0)
                    + 0.2)
     info.append(f"{max(1, len(amps))} amplitudes × {state['n_repeats']} repeats = {total} cycles")
     info.append(f"Estimated run time ≈ {format_duration(total * per_cycle_s)} "
                 f"({format_si(state['delay_after_pulse_s'], 's')} post-pulse wait dominates)")
-    info.append(f"PMU module: {state['pmu_library']}/{state['pmu_module'] or '<unset>'}")
+    info.append(f"PMU module: {state['pmu_library']}/{state['pmu_module'] or '<unset>'} "
+                f"({state['pmu_id']} ch {state['pmu_channel']})")
+
+    # Display-only current estimate. R_ch is a hint for picking amplitudes; it is
+    # deliberately never written to the raw file or the header — the honest pulse
+    # axis is the module's measured pulse_current_measured_A.
+    r_ch = state.get("channel_resistance_ohm", 0.0)
+    if r_ch > 0 and amps:
+        i_lo, i_hi = min(amps) / r_ch, max(amps) / r_ch
+        info.append(f"At R_ch ≈ {r_ch:g} Ω (estimate only, not saved): pulses ≈ "
+                    f"{format_si(i_lo, 'A')}…{format_si(i_hi, 'A')}; read current "
+                    f"{format_si(state['read_current_A'], 'A')} → "
+                    f"≈ {format_si(state['read_current_A'] * r_ch, 'V')} across the channel")
+        if (state["pmu_v_range_V"] == 10.0
+                and max(abs(i_lo), abs(i_hi)) > _RPM_10V_IMEAS_MAX_A
+                and state["pmu_i_range_A"] <= _RPM_10V_IMEAS_MAX_A):
+            warnings.append(
+                f"Estimated pulse current exceeds the RPM's "
+                f"{format_si(_RPM_10V_IMEAS_MAX_A, 'A')} measure ceiling on the 10 V range — "
+                "pulse_current_measured_A will read overflowed, not error. The pulse itself "
+                "still fires.")
+
     info.append(f"Static field via magnet current {state['magnet_current_A']:g} A "
                 f"(measured live by the 475). Re-run at the opposite sign for ±H_z.")
     info.append(f"Field mount tilt recorded as field_angle_from_oop_deg = "
@@ -522,7 +596,7 @@ class RunScreen(Screen):
 
     def on_mount(self) -> None:
         self.query_one("#results_table", DataTable).add_columns(
-            "amp", "rep", "V_pulse (V)", "V_xy (V)", "R_xy (Ω)", "T1 (K)")
+            "amp", "rep", "V_pulse (V)", "I_pulse (A)", "V_xy (V)", "R_xy (Ω)", "V_ch (V)")
         self._log_handler = _LogRelay(self)
         logging.getLogger().addHandler(self._log_handler)
         self._start_live_plot()
@@ -562,14 +636,15 @@ class RunScreen(Screen):
             except Exception:
                 pass
         table = self.query_one("#results_table", DataTable)
-        t1 = record.get("temperature_1_K")
+        i_pulse = record.get("pulse_current_measured_A")
         table.add_row(
             str(record["amplitude_index"] + 1),
             str(record["repeat_index"]),
             f"{record['pulse_amplitude_V']:.4g}",
+            f"{i_pulse:.4e}" if i_pulse is not None else "—",
             f"{record['hall_voltage_V']:.4e}",
             f"{record['hall_resistance_ohm']:.5g}",
-            f"{t1:.3f}" if t1 is not None else "—",
+            f"{record['channel_voltage_V']:.4g}",
         )
         table.move_cursor(row=table.row_count - 1, scroll=True)
         self.query_one("#progress", ProgressBar).advance(1)
@@ -612,7 +687,8 @@ class RunScreen(Screen):
     def action_abort(self) -> None:
         if self._measurement_running and not self._stop_event.is_set():
             self._stop_event.set()
-            self._set_status("Abort requested — finishing the cycle, then ramping the 6221 + magnet down …")
+            self._set_status("Abort requested — finishing the cycle, then zeroing the SMUs "
+                             "and ramping the magnet down …")
 
     def action_back_or_abort(self) -> None:
         if self._measurement_running:
@@ -629,7 +705,7 @@ class RunScreen(Screen):
     @work(thread=True, exclusive=True)
     def do_run(self) -> None:
         plan = self.plan
-        k4200 = source = voltmeter = magnet = gaussmeter = temp_ctrl = None
+        k4200 = magnet = gaussmeter = temp_ctrl = None
         try:
             self._set_status_threadsafe("Connecting to Keithley 4200A (KXCI) …")
             k4200 = connect_4200a(plan.k4200_cfg)
@@ -638,11 +714,10 @@ class RunScreen(Screen):
             except Exception:
                 log.warning("Could not read `UL` — set the PMU module name from the 4200A manually.")
             configure_pmu_pulse(k4200, plan.pmu_cfg)
-
-            self._set_status_threadsafe("Connecting to Keithley 6221 + 2182 …")
-            source = connect_source(plan.src_cfg)
-            _six221_output_off(source)          # channel quiet before any pulse
-            voltmeter = connect_voltmeter(plan.volt_cfg)
+            configure_smu(k4200, plan.src_cfg)
+            configure_smu(k4200, plan.hall_cfg)
+            set_source_level(k4200, plan.hall_cfg, 0.0)   # park SMU2 as the voltmeter
+            set_source_level(k4200, plan.src_cfg, 0.0)    # channel quiet before any pulse
 
             self._set_status_threadsafe("Connecting to Kepco magnet + Lake Shore 475 …")
             magnet = connect_magnet(plan.magnet_cfg)
@@ -673,7 +748,8 @@ class RunScreen(Screen):
             iter_error: Optional[BaseException] = None
             try:
                 run_measurement(
-                    k4200, plan.pmu_cfg, source, voltmeter, plan.read_cfg, plan.seq_cfg, points,
+                    k4200, plan.pmu_cfg, plan.src_cfg, plan.hall_cfg,
+                    plan.read_cfg, plan.seq_cfg, points,
                     stop_event=self._stop_event, on_point=self._make_on_point(),
                     gaussmeter=gaussmeter, gauss_cfg=plan.gauss_cfg,
                     temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg,
@@ -696,10 +772,8 @@ class RunScreen(Screen):
             log.exception("Measurement failed")
             final = f"ERROR: {exc}"
         finally:
-            # 6221 down first (it shares the channel pin), then the magnet.
-            if source is not None:
-                safe_shutdown("6221 (ramp)", lambda: ramp_current_to_zero(source))
-                safe_shutdown("6221", lambda: shutdown_source(source))
+            # SMUs down first, then the magnet — never ramp an inductive field
+            # while the DUT still carries current.
             if k4200 is not None:
                 safe_shutdown("4200A", lambda: shutdown_4200a(k4200))
             if magnet is not None:
@@ -715,7 +789,7 @@ class RunScreen(Screen):
 
 class SOTPulsedSwitchingApp(App):
     TITLE = "SOT pulsed switching"
-    SUB_TITLE = "4200A PMU pulse · delayed 6221/2182 R_xy · static tilted field"
+    SUB_TITLE = "4200A PMU pulse · delayed dual-SMU R_xy · static tilted field"
 
     data_root: Path = _DEFAULT_DATA_DIR
 
@@ -790,22 +864,33 @@ class SOTPulsedSwitchingApp(App):
                         field("pulse_rise_s", "Rise time (s)", DEFAULTS["pulse_rise_s"]),
                         field("pulse_fall_s", "Fall time (s)", DEFAULTS["pulse_fall_s"]),
                         field("pulse_period_s", "Pulse period (s)", DEFAULTS["pulse_period_s"],
-                              hint="≥ width + rise + fall."),
-                        field("n_pulses", "Pulses per cycle", DEFAULTS["n_pulses"], kind="integer"),
+                              hint="≥ delay + width + rise + fall."),
+                        field("pulse_delay_s", "Pulse delay before rise (s)",
+                              DEFAULTS["pulse_delay_s"],
+                              validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
+                        field("n_pulses", "Pulses per cycle", DEFAULTS["n_pulses"], kind="integer",
+                              hint="A burst of N, meaned into one spot mean."),
                     )
                     yield card(
-                        "Delayed R_xy read (6221 + 2182)",
+                        "Delayed R_xy read (4200A SMU1 → SMU2)",
                         field("delay_after_pulse_s", "Delay after pulse (s)",
                               DEFAULTS["delay_after_pulse_s"],
                               validators=[Number(minimum=0.0, failure_description="must be ≥ 0")],
                               hint="Wait between pulse end and the read (e.g. 5 s)."),
-                        field("sense_current_A", "6221 sense current (A)", DEFAULTS["sense_current_A"]),
-                        field("n_reversals", "Reversal pairs per read", DEFAULTS["n_reversals"],
-                              kind="integer",
+                        field("read_current_A", "Read current (A, SMU1)", DEFAULTS["read_current_A"],
+                              hint="Keep well below the switching current."),
+                        switch_field("reversal_enabled", "Reverse ±I_read (recommended)",
+                                     DEFAULTS["reversal_enabled"]),
+                        field("n_reversals", "Reversal pairs (or samples) per read",
+                              DEFAULTS["n_reversals"], kind="integer",
                               validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
-                        field("settle_after_enable_s", "6221 settle after enable (s)",
-                              DEFAULTS["settle_after_enable_s"],
+                        field("settle_before_read_s", "Extra settle before read (s)",
+                              DEFAULTS["settle_before_read_s"],
                               validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
+                        field("channel_resistance_ohm", "Channel resistance (Ω)",
+                              DEFAULTS["channel_resistance_ohm"],
+                              hint="Display only — annotates the sidebar with estimated "
+                                   "currents. Never saved to the file."),
                     )
                     yield card(
                         "Cycle / statistics",
@@ -844,31 +929,55 @@ class SOTPulsedSwitchingApp(App):
                             field("k4200_visa_resource", "KXCI VISA resource",
                                   DEFAULTS["k4200_visa_resource"], kind="text",
                                   hint="GPIB0::17::INSTR  or  TCPIP0::<ip>::1225::SOCKET"),
-                            field("pmu_library", "KULT pulse library (from `UL`)",
-                                  DEFAULTS["pmu_library"], kind="text"),
+                            field("integration", "SMU integration (fast/normal/quiet)",
+                                  DEFAULTS["integration"], kind="text"),
+                            field("pmu_library", "KULT pulse library",
+                                  DEFAULTS["pmu_library"], kind="text",
+                                  hint="Confirm against the `UL` output in the run log."),
                             field("pmu_module", "KULT pulse module name", DEFAULTS["pmu_module"],
-                                  kind="text", hint="REQUIRED — no default. See `UL` output in the log."),
+                                  kind="text",
+                                  hint="Default = instruments/kult/bridge_sot_pulse.c — compile "
+                                       "it in KULT first (see that folder's README)."),
                             field("pmu_channel", "PMU channel", DEFAULTS["pmu_channel"], kind="integer"),
+                            field("pmu_id", "PMU card name", DEFAULTS["pmu_id"], kind="text",
+                                  hint="e.g. PMU1 (lowest-numbered slot)."),
                             field("pmu_return_names", "Module return params (comma-sep)",
                                   DEFAULTS["pmu_return_names"], kind="text",
-                                  hint="e.g. pulse_voltage_measured_V, pulse_current_measured_A "
-                                       "(order must match the module). Blank = none."),
+                                  hint="Order must match the module's outputs. Blank = none, "
+                                       "and the measured pulse columns stay empty."),
+                            field("pmu_v_range_V", "PMU voltage range (V)",
+                                  DEFAULTS["pmu_v_range_V"], hint="10 or 40."),
                             field("pmu_i_range_A", "PMU current measure range (A)",
-                                  DEFAULTS["pmu_i_range_A"]),
-                            field("pmu_v_limit_V", "PMU voltage limit (V)", DEFAULTS["pmu_v_limit_V"]),
-                            field("pmu_i_limit_A", "PMU current limit (A)", DEFAULTS["pmu_i_limit_A"]),
+                                  DEFAULTS["pmu_i_range_A"],
+                                  hint="With an RPM on the 10 V range the ceiling is 0.01 A."),
+                            field("pmu_v_limit_V", "Pulse amplitude software limit (V)",
+                                  DEFAULTS["pmu_v_limit_V"]),
+                            field("pmu_sample_rate", "PMU sample rate (S/s)",
+                                  DEFAULTS["pmu_sample_rate"]),
+                            field("pmu_meas_start_perc", "Spot-mean window start (0-1)",
+                                  DEFAULTS["pmu_meas_start_perc"]),
+                            field("pmu_meas_stop_perc", "Spot-mean window stop (0-1)",
+                                  DEFAULTS["pmu_meas_stop_perc"]),
+                            field("pmu_dut_res_ohm", "DUT resistance for load-line (Ω)",
+                                  DEFAULTS["pmu_dut_res_ohm"],
+                                  hint="Set near the real channel R (sot_dc_characterization)."),
                             muted=True,
                         )
                         yield card(
-                            "6221 / 2182",
-                            field("source_visa_resource", "6221 (current source)",
-                                  DEFAULTS["source_visa_resource"], kind="text"),
-                            field("voltmeter_visa_resource", "2182 (Hall voltage)",
-                                  DEFAULTS["voltmeter_visa_resource"], kind="text"),
-                            field("compliance_V", "6221 compliance (V)", DEFAULTS["compliance_V"]),
-                            field("source_delay_s", "6221 source delay (s)", DEFAULTS["source_delay_s"]),
-                            field("nplc", "2182 NPLC", DEFAULTS["nplc"]),
-                            switch_field("auto_range", "2182 auto-range", DEFAULTS["auto_range"]),
+                            "4200A SMU read path",
+                            field("src_channel", "Channel-current SMU", DEFAULTS["src_channel"],
+                                  kind="integer", hint="SMU1 — through RPM1 into the main channel."),
+                            field("hall_channel", "Hall-voltmeter SMU", DEFAULTS["hall_channel"],
+                                  kind="integer", hint="SMU2 — across the transverse arms, forces 0 A."),
+                            field("compliance_voltage_V", "SMU compliance voltage (V)",
+                                  DEFAULTS["compliance_voltage_V"],
+                                  hint="Keep above the pulse transient SMU2 sees."),
+                            field("source_limit_A", "Read current software limit (A)",
+                                  DEFAULTS["source_limit_A"]),
+                            field("source_delay_s", "Settle after each ±I flip (s)",
+                                  DEFAULTS["source_delay_s"]),
+                            switch_field("four_wire", "4-wire (provenance only over KXCI)",
+                                         DEFAULTS["four_wire"]),
                             muted=True,
                         )
                         yield card(
@@ -877,8 +986,8 @@ class SOTPulsedSwitchingApp(App):
                                   DEFAULTS["magnet_visa_resource"], kind="text"),
                             field("current_limit_A", "Magnet current limit (A)",
                                   DEFAULTS["current_limit_A"]),
-                            field("voltage_compliance_V", "Magnet voltage compliance (V)",
-                                  DEFAULTS["voltage_compliance_V"]),
+                            field("magnet_voltage_compliance_V", "Magnet voltage compliance (V)",
+                                  DEFAULTS["magnet_voltage_compliance_V"]),
                             field("ramp_step_A", "Magnet ramp step (A)", DEFAULTS["ramp_step_A"]),
                             field("ramp_delay_s", "Magnet ramp delay (s)", DEFAULTS["ramp_delay_s"]),
                             field("gaussmeter_visa_resource", "Lake Shore 475 VISA resource",
@@ -961,7 +1070,7 @@ class SOTPulsedSwitchingApp(App):
 
     def collect_raw(self) -> dict:
         raw: dict = {fid: self.query_one(f"#{fid}", Input).value for fid in self._all_field_ids()}
-        for sid in ("auto_range", "reset_enabled", "enable_temperature"):
+        for sid in SWITCH_FIELD_IDS:
             raw[sid] = self.query_one(f"#{sid}", Switch).value
         sample_value = self.query_one("#sample_select", Select).value
         if sample_value not in (None, Select.BLANK, NEW_SAMPLE_SENTINEL):
@@ -979,7 +1088,7 @@ class SOTPulsedSwitchingApp(App):
                     self.query_one(f"#{fid}", Input).value = str(saved[fid])
                 except Exception:
                     pass
-        for sid in ("auto_range", "reset_enabled", "enable_temperature"):
+        for sid in SWITCH_FIELD_IDS:
             if sid in saved:
                 self.query_one(f"#{sid}", Switch).value = bool(saved[sid])
         self._sync_data_root()
@@ -1016,7 +1125,7 @@ class SOTPulsedSwitchingApp(App):
                     state[fid] = None
             else:
                 state[fid] = None
-        for sid in ("auto_range", "reset_enabled", "enable_temperature"):
+        for sid in SWITCH_FIELD_IDS:
             state[sid] = self.query_one(f"#{sid}", Switch).value
         sample_value = self.query_one("#sample_select", Select).value
         state["sample"] = sample_value if sample_value not in (None, Select.BLANK) else ""
@@ -1094,40 +1203,52 @@ class SOTPulsedSwitchingApp(App):
             self._browse_data_dir()
 
     def _build_plan(self, state: dict) -> MeasurementPlan:
-        k4200_cfg = Keithley4200AConfig(visa_resource=state["k4200_visa_resource"])
+        k4200_cfg = Keithley4200AConfig(
+            visa_resource=state["k4200_visa_resource"],
+            integration=state["integration"] or "normal",
+        )
         pmu_cfg = PMUPulseConfig(
-            library=state["pmu_library"] or "pmu-dut-examples",
+            library=state["pmu_library"] or "bridge_sot",
             module=state["pmu_module"],
-            pmu_channel=state["pmu_channel"],
+            pmu_channel=state["pmu_channel"], pmu_id=state["pmu_id"] or "PMU1",
             width_s=state["pulse_width_s"], rise_s=state["pulse_rise_s"],
             fall_s=state["pulse_fall_s"], period_s=state["pulse_period_s"],
-            n_pulses=state["n_pulses"],
+            delay_s=state["pulse_delay_s"], n_pulses=state["n_pulses"],
+            sample_rate=state["pmu_sample_rate"],
+            meas_start_perc=state["pmu_meas_start_perc"],
+            meas_stop_perc=state["pmu_meas_stop_perc"],
+            dut_res_ohm=state["pmu_dut_res_ohm"],
+            v_range_V=state["pmu_v_range_V"],
             i_range_A=state["pmu_i_range_A"], v_limit_V=state["pmu_v_limit_V"],
-            i_limit_A=state["pmu_i_limit_A"],
             return_names=parse_return_names(state["pmu_return_names"]),
         )
         read_cfg = ReadConfig(
-            sense_current_A=state["sense_current_A"], compliance_V=state["compliance_V"],
-            source_delay_s=state["source_delay_s"], nplc=state["nplc"],
-            auto_range=state["auto_range"], n_reversals=state["n_reversals"],
-            settle_after_enable_s=state["settle_after_enable_s"],
+            read_current_A=state["read_current_A"],
+            source_delay_s=state["source_delay_s"],
+            n_reversals=state["n_reversals"],
+            settle_before_read_s=state["settle_before_read_s"],
+            reversal_enabled=state["reversal_enabled"],
         )
         seq_cfg = PulseSequenceConfig(
             delay_after_pulse_s=state["delay_after_pulse_s"], n_repeats=state["n_repeats"],
             reset_enabled=state["reset_enabled"], reset_amplitude_V=state["reset_amplitude_V"],
             reset_delay_after_s=state["reset_delay_after_s"], output_file="",
         )
-        src_cfg = SourceConfig(
-            visa_resource=state["source_visa_resource"], sense_current_A=state["sense_current_A"],
-            compliance_V=state["compliance_V"], source_delay_s=state["source_delay_s"],
+        # SMU1 forces the read current through RPM1; SMU2 sits at 0 A across the
+        # Hall arms. four_wire is recorded provenance only (KXCI cannot set it).
+        src_cfg = SMUChannelConfig(
+            channel=state["src_channel"], source_function="current",
+            compliance_voltage_V=state["compliance_voltage_V"],
+            four_wire=state["four_wire"], source_limit_A=state["source_limit_A"],
         )
-        volt_cfg = VoltmeterConfig(
-            visa_resource=state["voltmeter_visa_resource"], nplc=state["nplc"],
-            auto_range=state["auto_range"],
+        hall_cfg = SMUChannelConfig(
+            channel=state["hall_channel"], source_function="current",  # forces 0 A
+            compliance_voltage_V=state["compliance_voltage_V"],
+            four_wire=state["four_wire"], source_limit_A=1e-9,
         )
         magnet_cfg = MagnetConfig(
             visa_resource=state["magnet_visa_resource"], current_limit_A=state["current_limit_A"],
-            voltage_compliance_V=state["voltage_compliance_V"],
+            voltage_compliance_V=state["magnet_voltage_compliance_V"],
             ramp_step_A=state["ramp_step_A"], ramp_delay_s=state["ramp_delay_s"],
         )
         gauss_cfg = GaussmeterConfig(
@@ -1142,23 +1263,30 @@ class SOTPulsedSwitchingApp(App):
                 temp_cfg = TemperatureControllerConfig(
                     visa_resource=state["temperature_visa_resource"], sensor_uids=uids)
 
+        # NOTE: channel_resistance_ohm is deliberately absent — it is a sidebar
+        # display aid for picking amplitudes, not a measured quantity, and must
+        # never reach the raw file or the index.
         header_extra = {
             "pmu_library": pmu_cfg.library,
             "pmu_module": pmu_cfg.module,
             "pulse_width_s": state["pulse_width_s"],
             "pulse_period_s": state["pulse_period_s"],
+            "pmu_v_range_V": state["pmu_v_range_V"],
+            "pmu_i_range_A": state["pmu_i_range_A"],
             "n_pulses": state["n_pulses"],
             "delay_after_pulse_s": state["delay_after_pulse_s"],
             "n_repeats": state["n_repeats"],
             "reset_enabled": state["reset_enabled"],
             "reset_amplitude_V": state["reset_amplitude_V"] if state["reset_enabled"] else "",
-            "sense_current_A": state["sense_current_A"],
+            "read_current_A": state["read_current_A"],
+            "reversal_enabled": state["reversal_enabled"],
             "n_reversals": state["n_reversals"],
+            "four_wire": state["four_wire"],
             "field_angle_from_oop_deg": state["field_angle_from_oop_deg"],
             "amplitudes_V": state["amplitude_list"],
         }
         return MeasurementPlan(
-            k4200_cfg=k4200_cfg, pmu_cfg=pmu_cfg, src_cfg=src_cfg, volt_cfg=volt_cfg,
+            k4200_cfg=k4200_cfg, pmu_cfg=pmu_cfg, src_cfg=src_cfg, hall_cfg=hall_cfg,
             read_cfg=read_cfg, seq_cfg=seq_cfg, magnet_cfg=magnet_cfg, gauss_cfg=gauss_cfg,
             amplitudes_V=state["amplitude_list"], magnet_current_A=state["magnet_current_A"],
             field_angle_from_oop_deg=state["field_angle_from_oop_deg"],

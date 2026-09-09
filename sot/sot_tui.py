@@ -50,19 +50,22 @@ SWITCHING_SCHEMATIC = """\
 """
 
 PULSED_SCHEMATIC = """\
-  KEITHLEY 4200A-SCS PMU  (KXCI — GPIB 17)
-    PMU ch → RPM ──▶ channel current leads   (write pulse only, via a KULT
-                                              module — set its name from `UL`)
+  KEITHLEY 4200A-SCS  (KXCI — GPIB 17)
+    PMU1-1 ─┐
+            ├─▶ RPM1 ──▶ main channel of the Hall cross   (2-wire, shared)
+    SMU1   ─┘            RPM1 switches which one reaches the DUT; the KULT
+                         module instruments/kult/bridge_sot_pulse.c owns
+                         that switch and always routes back to the SMU
 
-  KEITHLEY 6221  ──▶ SAME channel leads   (delayed R_xy read current;
-                                           output OFF whenever the PMU pulses)
-  KEITHLEY 2182  ──▶ transverse (Hall) leads
+    SMU2  ──▶ transverse (Hall) arms   (forces 0 A, reads V_xy)
+              Direct-wired, no RPM needed — an RPM is a *current* preamp
 
   KEPCO BOP-GL      ──GPIB──▶ electromagnet   (ONE static tilted field)
   LAKE SHORE 475    ──GPIB──▶ Gaussmeter probe at the sample
 
-  Cycle: 6221 off → [reset pulse] → write pulse → wait (e.g. 5 s) →
-  6221 on, read R_xy → 6221 off.  Re-run at ∓field for the ±H_z control.
+  Cycle: park SMU1 → [reset pulse] → write pulse → wait (e.g. 5 s) →
+  SMU1 forces ±I_read / SMU2 reads V_xy → park SMU1.
+  Re-run at ∓field for the ±H_z control.
 """
 
 

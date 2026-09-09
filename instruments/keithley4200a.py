@@ -13,14 +13,16 @@ Scope of THIS module:
   * the two 4200A **SMU** cards, as a general force/measure SMU
     (docs/architecture.md §4) — ``SMUChannelConfig`` + ``set_source_level`` /
     ``read_measurement`` / ``acquire_measurement`` / ``acquire_reversal_averaged``.
-  * the **PMU** (4225-PMU) + its two RPMs, as a fire-one-pulse primitive —
-    ``PMUPulseConfig`` + ``configure_pmu_pulse`` / ``pulse_once``. See the
-    "PMU" section lower in this file for the KXCI mechanism and why the KULT
-    module name/signature is *your* config, not a hard-coded default.
+  * the **PMU** (4225-PMU) behind a 4225-RPM, as a fire-one-pulse-burst
+    primitive — ``PMUPulseConfig`` + ``configure_pmu_pulse`` / ``pulse_once``,
+    which run the KULT module in ``instruments/kult/bridge_sot_pulse.c``. See
+    the "PMU" section lower in this file for the KXCI mechanism and for the
+    RPM-pathway trap.
 
-The PMU here does not measure the switched state — that is a separate
-6221 + 2182 delayed R_xy read in ``sot/sot_pulsed_switching.py``. The PMU's
-only job is to deliver the write pulse.
+The PMU here does not measure the switched state — that is a separate delayed
+dual-SMU read (SMU1 forces ±I_read through the same RPM, SMU2 reads V_xy across
+the Hall arms) in ``sot/sot_pulsed_switching.py``. The PMU's only job is to
+deliver the write pulse.
 
 Transport
 ---------
@@ -367,59 +369,84 @@ def acquire_reversal_averaged(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PMU  ── fire one current-forcing... no: one VOLTAGE pulse, via a KULT module
+# PMU  ── fire one VOLTAGE pulse burst, via a KULT module
 # ─────────────────────────────────────────────────────────────────────────────
 # Why a KULT module and not native KXCI commands
 # ---------------------------------------------------------------------------
-# KXCI has no DV/DI-equivalent for the 4225-PMU. The portable route is to run
-# a KULT **user module** over KXCI:  ``EX <library> <module>(<args>)`` executes
-# it and returns the module's return value; ``GN`` then fetches each output
-# parameter in order. WHICH module exists, and its argument order, is specific
-# to your 4200A install — so ``PMUPulseConfig.library`` / ``.module`` /
-# ``.arg_order`` are YOUR config, and there is deliberately no working default
-# module name (a wrong guess would "run" and do nothing, or the wrong thing).
+# KXCI has no DV/DI-equivalent for the 4225-PMU. The route is to run a KULT
+# **user module** over KXCI: ``EX <library> <module>(<args>)`` executes it and
+# returns the module's return value; ``GN`` then fetches each output parameter
+# in order.
 #
-# Discover what you have:  ``list_user_libraries(dev)`` sends ``UL``. Point
-# ``library``/``module`` at a pulse module (Keithley ships pulse-IV examples
-# such as the ``pmu-dut-examples`` library), set ``arg_order`` to match its
-# signature, and set ``return_names`` to the output parameters you want back
-# (leave empty if the module returns none — then the measured pulse V/I simply
-# stay blank in the data, which is fine).
+# The defaults below target ``instruments/kult/bridge_sot_pulse.c`` — written
+# for this measurement and tracked in this repo. Compile it on the 4200A in
+# KULT (see ``instruments/kult/README.md``) and the defaults are correct as
+# they stand. To drive a different module instead, repoint ``library`` /
+# ``module`` and match ``arg_order`` / ``return_names`` to its signature: KXCI
+# passes arguments POSITIONALLY, so a mismatched ``arg_order`` pulses with the
+# wrong numbers rather than erroring.
+#
+# ``list_user_libraries(dev)`` (KXCI ``UL``) lists what is actually installed.
 #
 # The PMU forces VOLTAGE at the pin; the RPM gives current ranges + fast
-# measure, not current forcing. So the swept axis is volts. Record the
-# module's spot-mean V/I if it returns them; never back-compute current from
-# an assumed channel resistance.
+# measure, not current forcing. So the swept axis is volts. On a 2-wire path
+# the forced voltage also includes the cable/contact drop, which is why the
+# module's measured CURRENT is the physically meaningful pulse axis — never
+# back-compute current from an assumed channel resistance.
+#
+# The RPM pathway
+# ---------------
+# ``rpm_config()`` is an LPT call, reachable only from inside a KULT module —
+# there is no Python-side equivalent, and no KXCI command for it. So the
+# pathway is the module's job, and ``bridge_sot_pulse`` routes the RPM to the
+# PMU on entry and back to the SMU on EVERY exit path including errors.
+# Keithley's own ``PMU_1Chan_Sweep_Example`` does NOT route back: after it
+# runs, an SMU wired through that RPM cannot reach the DUT at all and reads an
+# open circuit with no error. If a DC read straight after a pulse comes back
+# flat or zero, that is the first thing to suspect.
 
 _MAX_PMU_CHANNELS = (1, 2)
+_PMU_V_RANGES = (10.0, 40.0)
+# Documented 4225-PMU timing floors, per voltage range: (width, rise/fall).
+_PMU_TIMING_FLOOR_S = {10.0: (60e-9, 20e-9), 40.0: (60e-9, 100e-9)}
 
 
 @dataclass
 class PMUPulseConfig:
-    """One KULT pulse-module invocation. Every timing field is in SI seconds /
-    volts / amps; they are substituted into the ``EX`` argument list in
-    ``arg_order`` (with ``amplitude_V`` overridden per pulse by
-    ``pulse_once``). Reorder / trim ``arg_order`` + ``return_names`` to match
-    your installed module — see the section comment above."""
-    library: str = "pmu-dut-examples"      # KULT user-library name — CONFIRM with `UL`
-    module: str = ""                        # KULT module name — REQUIRED, no safe default
+    """One KULT pulse-module invocation. Timing in seconds, levels in volts,
+    ranges in volts/amps; fields are substituted into the ``EX`` argument list
+    in ``arg_order`` (with ``amplitude_V`` overridden per pulse by
+    ``pulse_once``).
+
+    The defaults match ``instruments/kult/bridge_sot_pulse.c``. Point at a
+    different module and ``arg_order``/``return_names`` must move with it."""
+    library: str = "bridge_sot"             # KULT user-library name — confirm with `UL`
+    module: str = "bridge_sot_pulse"        # instruments/kult/bridge_sot_pulse.c
     pmu_channel: int = 1                    # PMU/RPM channel wired to the device channel
-    amplitude_V: float = 0.5               # forced pulse amplitude at the pin [V]
+    pmu_id: str = "PMU1"                    # PMU card name (lowest-numbered slot = PMU1)
+    amplitude_V: float = 0.5                # forced pulse amplitude at the pin [V]
     base_V: float = 0.0                     # quiescent level between pulses [V]
-    width_s: float = 100e-9               # pulse top width [s]
-    rise_s: float = 20e-9                 # leading-edge transition time [s]
-    fall_s: float = 20e-9                 # trailing-edge transition time [s]
-    period_s: float = 1e-3               # full pulse period [s] (≥ width+rise+fall)
-    n_pulses: int = 1                      # pulses delivered per pulse_once() call
-    i_range_A: float = 0.2               # PMU/RPM current measure range [A]
-    v_limit_V: float = 5.0              # PMU voltage limit / pulse_once() amplitude guard [V]
-    i_limit_A: float = 0.2             # PMU current limit [A]
-    exec_timeout_s: float = 30.0        # VISA read timeout while the module runs
+    width_s: float = 100e-9                 # pulse top width (FWHM) [s]
+    rise_s: float = 20e-9                   # leading-edge transition time [s]
+    fall_s: float = 20e-9                   # trailing-edge transition time [s]
+    delay_s: float = 0.0                    # dead time before the rise [s]
+    period_s: float = 1e-3                  # full pulse period [s] (≥ delay+rise+width+fall)
+    n_pulses: int = 1                       # pulses per burst, meaned into one spot mean
+    sample_rate: float = 200e6              # PMU digitiser rate [S/s], 200e6/n
+    meas_start_perc: float = 0.75           # spot-mean window start, fraction of the pulse top
+    meas_stop_perc: float = 0.90            # spot-mean window stop, fraction of the pulse top
+    dut_res_ohm: float = 1e3                # DUT resistance for the 50 Ω load-line correction
+    v_range_V: float = 10.0                 # PMU voltage range — 10 or 40
+    i_range_A: float = 0.01                 # current MEASURE range [A]; RPM 10 V range caps at 0.01
+    v_limit_V: float = 5.0                  # software amplitude guard in pulse_once() [V]
+    exec_timeout_s: float = 30.0            # VISA read timeout while the module runs
     arg_order: tuple = (
-        "pmu_channel", "amplitude_V", "base_V", "width_s", "rise_s", "fall_s",
-        "period_s", "n_pulses", "i_range_A", "v_limit_V", "i_limit_A")
-    return_names: tuple = ()             # output params GN fetches, in module order,
-                                        # e.g. ("pulse_voltage_measured_V", "pulse_current_measured_A")
+        "width_s", "rise_s", "fall_s", "period_s", "delay_s", "sample_rate",
+        "meas_start_perc", "meas_stop_perc", "n_pulses", "dut_res_ohm",
+        "v_range_V", "i_range_A", "amplitude_V", "base_V", "pmu_channel", "pmu_id")
+    return_names: tuple = (                 # output params GN fetches, in module order
+        "pulse_voltage_measured_V", "pulse_current_measured_A",
+        "pulse_base_voltage_V", "pulse_base_current_A")
 
 
 def _fmt_arg(value) -> str:
@@ -458,13 +485,30 @@ def configure_pmu_pulse(dev: _Keithley4200A_KXCI, cfg: PMUPulseConfig) -> None:
     module invoked by :func:`pulse_once` is self-contained (KXCI User Mode)."""
     if not cfg.module:
         raise ValueError("PMUPulseConfig.module is empty — set it to a pulse "
-                         "module from `list_user_libraries(dev)` (KXCI `UL`).")
+                         "module from `list_user_libraries(dev)` (KXCI `UL`); "
+                         "the default is 'bridge_sot_pulse' (instruments/kult/).")
     if cfg.pmu_channel not in _MAX_PMU_CHANNELS:
         raise ValueError(f"pmu_channel must be one of {_MAX_PMU_CHANNELS}, got {cfg.pmu_channel!r}")
+    if cfg.v_range_V not in _PMU_V_RANGES:
+        raise ValueError(f"v_range_V must be one of {_PMU_V_RANGES} V, got {cfg.v_range_V!r}")
     if cfg.width_s <= 0 or cfg.rise_s < 0 or cfg.fall_s < 0:
         raise ValueError("pulse width must be > 0 and rise/fall ≥ 0")
-    if cfg.period_s < cfg.width_s + cfg.rise_s + cfg.fall_s:
-        raise ValueError("period_s must be ≥ width_s + rise_s + fall_s")
+
+    # Documented 4225-PMU floors. Below these the module returns -824
+    # (invalid pulse timing) on the bench — cheaper to catch it here.
+    width_min, edge_min = _PMU_TIMING_FLOOR_S[cfg.v_range_V]
+    if cfg.width_s < width_min:
+        raise ValueError(f"width_s {cfg.width_s:g} s is below the {cfg.v_range_V:g} V range "
+                         f"minimum of {width_min:g} s")
+    if min(cfg.rise_s, cfg.fall_s) < edge_min:
+        raise ValueError(f"rise_s/fall_s must be ≥ {edge_min:g} s on the {cfg.v_range_V:g} V "
+                         f"range, got {cfg.rise_s:g}/{cfg.fall_s:g} s")
+
+    if cfg.period_s < cfg.delay_s + cfg.width_s + cfg.rise_s + cfg.fall_s:
+        raise ValueError("period_s must be ≥ delay_s + width_s + rise_s + fall_s")
+    if not 0.0 <= cfg.meas_start_perc < cfg.meas_stop_perc <= 1.0:
+        raise ValueError("need 0 ≤ meas_start_perc < meas_stop_perc ≤ 1, got "
+                         f"{cfg.meas_start_perc!r} / {cfg.meas_stop_perc!r}")
     if cfg.n_pulses < 1:
         raise ValueError("n_pulses must be ≥ 1")
     if abs(cfg.amplitude_V) > cfg.v_limit_V:
@@ -473,9 +517,10 @@ def configure_pmu_pulse(dev: _Keithley4200A_KXCI, cfg: PMUPulseConfig) -> None:
     if missing:
         raise ValueError(f"arg_order names not on PMUPulseConfig: {missing}")
     template = ", ".join(f"<{n}>" for n in cfg.arg_order)
-    log.info("4200A PMU pulse via KULT: EX %s %s(%s)  [ch %d, %.4g V, %.3g s wide]",
-             cfg.library, cfg.module or "<unset>", template,
-             cfg.pmu_channel, cfg.amplitude_V, cfg.width_s)
+    log.info("4200A PMU pulse via KULT: EX %s %s(%s)  [%s ch %d, %.4g V, %.3g s wide, "
+             "%.4g V range, %.4g A measure range]",
+             cfg.library, cfg.module or "<unset>", template, cfg.pmu_id,
+             cfg.pmu_channel, cfg.amplitude_V, cfg.width_s, cfg.v_range_V, cfg.i_range_A)
 
 
 def pulse_once(

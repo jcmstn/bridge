@@ -1,8 +1,8 @@
 """
 The SOT run loops (sot_switching / sot_dc_characterization / sot_pulsed_switching
 run_measurement) — row shape, repeat tagging, the read-mode branch, the
-R = V/I guard at zero current, and (pulsed) the 6221-off-during-pulse
-ordering. Hardware-free: fake transports serve incrementing reading streams.
+R = V/I guard at zero current, and (pulsed) the SMU1-parked-before-the-pulse
+ordering. Hardware-free: one fake KXCI transport answers every command.
 """
 
 from __future__ import annotations
@@ -17,9 +17,12 @@ from instruments.keithley4200a import PMUPulseConfig, SMUChannelConfig
 
 
 class _FakeKXCI:
-    """Every TV/TI query returns the next value of an incrementing ramp (so
-    reversal pairs differ and odd parts are non-zero); force commands are
-    recorded."""
+    """One handle for the whole 4200A: ``EX`` (the KULT pulse module) answers
+    "OK", every other query (TV/TI) returns the next value of an incrementing
+    ramp so reversal pairs differ and odd parts are non-zero.
+
+    ``.writes`` is the ordered log of every command AND query, which is what
+    the pulsed ordering test asserts against."""
 
     def __init__(self):
         self.writes: list[str] = []
@@ -29,6 +32,9 @@ class _FakeKXCI:
         self.writes.append(cmd)
 
     def query(self, cmd: str) -> str:
+        self.writes.append(cmd)
+        if cmd.startswith("EX"):
+            return "OK"
         return f"{next(self._n) * 1e-4:.6E}"
 
 
@@ -144,109 +150,121 @@ def test_switching_rejects_bad_read_mode():
 
 
 # ── sot_pulsed_switching.run_measurement ─────────────────────────────────
-# The check that matters (advisor): per cycle the 6221 output is disabled
-# BEFORE the PMU pulse and the read happens AFTER — asserted via a shared
-# call log across three fake instruments.
-
-class _FakePMU:
-    def __init__(self, log): self.log = log
-    def query(self, cmd):
-        self.log.append(("pmu", cmd))
-        return "OK" if cmd.startswith("EX") else "0"
-    def command(self, cmd):
-        self.log.append(("pmu", cmd))
-
-
-class _Fake6221:
-    def __init__(self, log):
-        self.log = log
-        self._i = 0.0
-    @property
-    def source_current(self): return self._i
-    @source_current.setter
-    def source_current(self, v):
-        self._i = v
-        self.log.append(("6221", f"current={v:g}"))
-    def enable_source(self): self.log.append(("6221", "enable"))
-    def disable_source(self): self.log.append(("6221", "disable"))
-
-
-class _Fake2182:
-    def __init__(self, log):
-        self.log = log
-        self._n = 0
-    @property
-    def voltage(self):
-        self._n += 1
-        self.log.append(("2182", "read"))
-        return 1e-4 * self._n
-
+# The check that matters: per cycle SMU1 is parked at 0 A BEFORE the PMU
+# pulse and the Hall read happens AFTER. Everything now goes through one
+# KXCI handle, so the ordering is asserted on the command strings.
 
 def _pulsed_cfgs(**seq_overrides):
-    read = ps.ReadConfig(sense_current_A=1e-4, n_reversals=2, source_delay_s=0.0,
-                         settle_after_enable_s=0.0)
+    read = ps.ReadConfig(read_current_A=1e-4, n_reversals=2, source_delay_s=0.0,
+                         settle_before_read_s=0.0, reversal_enabled=True)
     seq = ps.PulseSequenceConfig(delay_after_pulse_s=0.0, n_repeats=1, output_file="",
                                  **seq_overrides)
-    pmu = PMUPulseConfig(library="lib", module="m")
+    pmu = PMUPulseConfig(library="lib", module="m", return_names=())
     return pmu, read, seq
 
 
-def test_pulsed_ordering_6221_off_before_pulse_read_after():
-    log: list = []
+def _run_pulsed(dev, pmu_cfg, read_cfg, seq_cfg, points, **kw):
+    return ps.run_measurement(dev, pmu_cfg, _src(), _sense(), read_cfg, seq_cfg,
+                              points, write_csv=_NULL_WRITER, **kw)
+
+
+def test_pulsed_ordering_smu_parked_then_pulse_then_read():
+    dev = _FakeKXCI()
     pmu_cfg, read_cfg, seq_cfg = _pulsed_cfgs(reset_enabled=True, reset_amplitude_V=-2.0)
-    points = [ps.AmplitudePoint(amplitude_V=0.5)]
 
-    ps.run_measurement(_FakePMU(log), pmu_cfg, _Fake6221(log), _Fake2182(log),
-                       read_cfg, seq_cfg, points, write_csv=lambda r: None)
+    _run_pulsed(dev, pmu_cfg, read_cfg, seq_cfg, [ps.AmplitudePoint(amplitude_V=0.5)])
 
-    kinds = [f"{d}:{a}" for d, a in log]
-    i_disable = next(i for i, x in enumerate(kinds) if x == "6221:disable")
-    i_ex = next(i for i, (d, a) in enumerate(log) if d == "pmu" and a.startswith("EX"))
-    i_enable = next(i for i, x in enumerate(kinds) if x == "6221:enable")
-    i_read = next(i for i, x in enumerate(kinds) if x == "2182:read")
-    assert i_disable < i_ex < i_enable < i_read
-    # channel left quiet: a disable after the last read
-    last_read = max(i for i, x in enumerate(kinds) if x == "2182:read")
-    assert any(x == "6221:disable" for x in kinds[last_read:])
-    # reset + write = two EX commands, reset first (opposite polarity)
-    ex_cmds = [a for d, a in log if d == "pmu" and a.startswith("EX")]
+    w = dev.writes
+    is_park = lambda c: c.startswith("DI1,") and "0.000000E+00" in c
+    i_park = next(i for i, c in enumerate(w) if is_park(c))
+    i_ex = next(i for i, c in enumerate(w) if c.startswith("EX "))
+    i_read = next(i for i, c in enumerate(w) if c.startswith("TV2"))
+    assert i_park < i_ex < i_read
+
+    # channel left quiet: SMU1 back to 0 A after the last Hall read
+    last_read = max(i for i, c in enumerate(w) if c.startswith("TV2"))
+    assert any(is_park(c) for c in w[last_read:])
+
+    # reset + write = two EX commands, reset first and of opposite polarity
+    ex_cmds = [c for c in w if c.startswith("EX ")]
     assert len(ex_cmds) == 2
     assert "-2.000000E+00" in ex_cmds[0] and "5.000000E-01" in ex_cmds[1]
 
 
 def test_pulsed_rows_repeats_and_blank_pulse_columns():
-    log: list = []
+    dev = _FakeKXCI()
     pmu_cfg, read_cfg, seq_cfg = _pulsed_cfgs()
     seq_cfg.n_repeats = 3
     points = [ps.AmplitudePoint(amplitude_V=a) for a in (0.4, 0.8)]
     seen: list[dict] = []
 
-    df = ps.run_measurement(_FakePMU(log), pmu_cfg, _Fake6221(log), _Fake2182(log),
-                            read_cfg, seq_cfg, points, on_point=seen.append,
-                            magnet_current_A=1.5, field_angle_from_oop_deg=85.0,
-                            write_csv=lambda r: None)
+    df = _run_pulsed(dev, pmu_cfg, read_cfg, seq_cfg, points, on_point=seen.append,
+                     magnet_current_A=1.5, field_angle_from_oop_deg=85.0)
 
     assert len(df) == 6
     assert [r["amplitude_index"] for r in seen] == [0, 0, 0, 1, 1, 1]
     assert [r["repeat_index"] for r in seen] == [0, 1, 2, 0, 1, 2]
-    # return_names empty → measured pulse columns stay blank
+    # return_names empty → every measured-pulse column stays blank, including
+    # the derived 2-wire resistance
     assert all(r["pulse_voltage_measured_V"] is None for r in seen)
     assert all(r["pulse_current_measured_A"] is None for r in seen)
+    assert all(r["pulse_2wire_resistance_ohm"] is None for r in seen)
+    assert all(r["read_current_A"] == 1e-4 for r in seen)
+    assert all(not math.isnan(r["channel_voltage_V"]) for r in seen)
     assert all(r["magnet_current_A"] == 1.5 for r in seen)
+    assert all(r["field_angle_from_oop_deg"] == 85.0 for r in seen)
     assert all(not math.isnan(r["hall_resistance_ohm"]) for r in seen)
 
 
+def test_pulsed_derives_2wire_resistance_when_module_returns_values():
+    """A module that reports spot means fills pulse_2wire_resistance_ohm."""
+    class _MeasuringKXCI(_FakeKXCI):
+        def query(self, cmd):
+            self.writes.append(cmd)
+            if cmd.startswith("EX"):
+                return "OK"
+            if cmd == "GN":
+                # V then I, matching return_names order below
+                return "2.0" if self.writes.count("GN") == 1 else "5.0E-3"
+            return f"{next(self._n) * 1e-4:.6E}"
+
+    dev = _MeasuringKXCI()
+    pmu_cfg, read_cfg, seq_cfg = _pulsed_cfgs()
+    pmu_cfg.return_names = ("pulse_voltage_measured_V", "pulse_current_measured_A")
+    seen: list[dict] = []
+
+    _run_pulsed(dev, pmu_cfg, read_cfg, seq_cfg,
+                [ps.AmplitudePoint(amplitude_V=0.5)], on_point=seen.append)
+
+    assert seen[0]["pulse_voltage_measured_V"] == 2.0
+    assert seen[0]["pulse_current_measured_A"] == 5.0e-3
+    assert seen[0]["pulse_2wire_resistance_ohm"] == 400.0
+
+
+def test_pulsed_non_reversal_read_leaves_even_columns_blank():
+    dev = _FakeKXCI()
+    pmu_cfg, read_cfg, seq_cfg = _pulsed_cfgs()
+    read_cfg.reversal_enabled = False
+    seen: list[dict] = []
+
+    _run_pulsed(dev, pmu_cfg, read_cfg, seq_cfg,
+                [ps.AmplitudePoint(amplitude_V=0.5)], on_point=seen.append)
+
+    assert seen[0]["hall_voltage_even_V"] is None
+    assert seen[0]["hall_voltage_even_sem_V"] is None
+    assert seen[0]["n_reversals"] == 0
+    assert not math.isnan(seen[0]["hall_resistance_ohm"])
+
+
 def test_pulsed_stop_event_breaks_early():
-    log: list = []
+    dev = _FakeKXCI()
     pmu_cfg, read_cfg, seq_cfg = _pulsed_cfgs()
     seq_cfg.n_repeats = 5
     points = [ps.AmplitudePoint(amplitude_V=0.5)]
 
     class _Stop:
         def __init__(self): self.n = 0
-        def is_set(self): self.n += 1; return self.n > 8
+        def is_set(self): self.n += 1; return self.n > 6
 
-    df = ps.run_measurement(_FakePMU(log), pmu_cfg, _Fake6221(log), _Fake2182(log),
-                            read_cfg, seq_cfg, points, stop_event=_Stop(),
-                            write_csv=lambda r: None)
+    df = _run_pulsed(dev, pmu_cfg, read_cfg, seq_cfg, points, stop_event=_Stop())
     assert 0 < len(df) < 5
