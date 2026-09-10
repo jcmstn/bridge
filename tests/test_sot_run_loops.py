@@ -262,9 +262,10 @@ def test_pulsed_derives_2wire_resistance_when_module_returns_values():
             self.writes.append(cmd)
             if cmd.startswith("EX"):
                 return "OK"
-            if cmd == "GN":
-                # V then I, matching return_names order below
-                return "2.0" if self.writes.count("GN") == 1 else "5.0E-3"
+            if cmd == "GP 17":     # first output param = measured pulse V
+                return "2.0"
+            if cmd == "GP 18":     # second = measured pulse I
+                return "5.0E-3"
             return f"{next(self._n) * 1e-4:.6E}"
 
     dev = _MeasuringKXCI()

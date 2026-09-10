@@ -61,11 +61,15 @@ passes arguments positionally, so a mismatch silently pulses with the wrong numb
 rather than erroring. If you edit the module's parameter list, edit `arg_order` in the
 same commit.
 
-Likewise `PMUPulseConfig.return_names` lists the output parameters in module order, since
-they are fetched one at a time with `GN`. KXCI's `EX` also wants a value for every output
-parameter in the call itself (as a placeholder `0`), so `PMUPulseConfig.n_output_params`
-must equal the module's output count — a short `EX` call comes back
-`EX ERROR: invalid number of UTM parameters`.
+KXCI's `EX` wants a value for every output parameter in the call itself (as a placeholder
+`0`), so `PMUPulseConfig.n_output_params` must equal the module's output count — a short
+`EX` call comes back `EX ERROR: invalid number of UTM parameters`.
+
+The output values are then read back one at a time. **`GN` needs a parameter name**
+(`GN V_Ampl`) — a bare `GN` is `GN error: Invalid command syntax`. `pulse_once` uses
+`GP <n>` instead (query by 1-based position): the four outputs are params 17-20, right
+after the 16 inputs, so it reads `GP 17` … `GP 20`. `PMUPulseConfig.return_names` names
+those four columns in that order.
 
 If `PMU_ID` comes back rejected, it is the string quoting: `_fmt_arg` passes `str` values
 through verbatim, so set `pmu_id` to `"PMU1"` or `'"PMU1"'` depending on what your KXCI

@@ -376,14 +376,16 @@ def acquire_reversal_averaged(
 # ---------------------------------------------------------------------------
 # KXCI has no DV/DI-equivalent for the 4225-PMU. The route is to run a KULT
 # **user module** over KXCI: ``EX <library> <module>(<args>)`` executes it and
-# returns the module's return value; ``GN`` then fetches each output parameter
-# in order.
+# returns the module's return value; ``GP <n>`` then reads each output
+# parameter back by its 1-based position (``GN <name>`` does the same by name
+# but needs the KULT grid name verbatim).
 #
 # KXCI's ``EX`` wants a value for EVERY module parameter positionally, output
 # parameters included — they are passed as a placeholder ``0`` and their real
-# values come back through ``GN``. So the call sends
+# values come back through ``GP``. So the call sends
 # ``len(arg_order) + n_output_params`` args (16 + 4 for bridge_sot_pulse); a
-# short count is the ``EX ERROR: invalid number of UTM parameters`` reply.
+# short count is the ``EX ERROR: invalid number of UTM parameters`` reply. The
+# outputs are positions 17-20, so ``pulse_once`` reads ``GP 17`` … ``GP 20``.
 #
 # The defaults below target ``instruments/kult/bridge_sot_pulse.c`` — written
 # for this measurement and tracked in this repo. Compile it on the 4200A in
@@ -470,16 +472,16 @@ def _fmt_arg(value) -> str:
 
 
 def _parse_gn(reply: str) -> float:
-    """One ``GN`` output value → float. Takes the FIRST float-parseable token
-    (a trailing status flag stays ignored); handles ``,``- or space-separated
-    replies without reusing ``_parse_reading`` (GA-style lists put status
-    last, not first)."""
-    for token in reply.strip().replace(",", " ").split():
+    """One ``GP``/``GN`` output value → float. Takes the FIRST float-parseable
+    token (a trailing status flag stays ignored); handles ``,``- or
+    space-separated replies without reusing ``_parse_reading`` (GA-style lists
+    put status last, not first)."""
+    for token in reply.strip().replace(",", " ").replace(";", " ").split():
         try:
             return float(token)
         except ValueError:
             continue
-    raise ValueError(f"no numeric value in GN reply {reply!r}")
+    raise ValueError(f"no numeric value in GP reply {reply!r}")
 
 
 def list_user_libraries(dev: _Keithley4200A_KXCI) -> str:
@@ -556,7 +558,7 @@ def pulse_once(
     (default ``cfg.amplitude_V``) by running the configured KULT module.
 
     Returns ``{"module_return": <EX reply>, **{name: float for name in
-    cfg.return_names}}`` — a return name whose ``GN`` value can't be parsed is
+    cfg.return_names}}`` — a return name whose ``GP`` value can't be parsed is
     set to ``None`` rather than raising, so a partially-cooperating module
     still yields a pulse. Raises on the amplitude guard (load-bearing).
     """
@@ -570,7 +572,7 @@ def pulse_once(
     in_args = [_fmt_arg(amp if name == "amplitude_V" else getattr(cfg, name))
                for name in cfg.arg_order]
     # KXCI EX wants a value for every module parameter — output params too.
-    # They ride as placeholder 0 here and come back via GN below.
+    # They ride as placeholder 0 here and are read back by position below.
     args = ", ".join(in_args + ["0"] * cfg.n_output_params)
     cmd = f"EX {cfg.library} {cfg.module}({args})"
 
@@ -590,9 +592,14 @@ def pulse_once(
                 pass
 
     out: dict = {"module_return": ex_reply}
-    for name in cfg.return_names:
+    # KXCI reads output params back one at a time. `GN <ParameterName>` needs the
+    # exact KULT grid name; `GP <n>` takes the 1-based position. The outputs are
+    # the last params, right after the 16 in arg_order, so GP by position is
+    # name-independent. A reply that will not parse → None (diagnostic only).
+    for i, name in enumerate(cfg.return_names):
+        pos = len(cfg.arg_order) + 1 + i
         try:
-            out[name] = _parse_gn(dev.query("GN"))
+            out[name] = _parse_gn(dev.query(f"GP {pos}"))
         except Exception:
             out[name] = None
     return out

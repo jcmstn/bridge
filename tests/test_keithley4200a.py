@@ -207,18 +207,19 @@ def test_configure_pmu_pulse_rejects_no_flat_top():
                                                  fall_s=200e-9, period_s=1e-3))
 
 
-def test_pulse_once_fetches_named_return_values_via_gn():
+def test_pulse_once_reads_outputs_back_by_position_with_gp():
     dev = _FakeKXCI(["done", "0.48", "N 2.0E-3"])
     cfg = PMUPulseConfig(module="m",
                          return_names=("pulse_voltage_measured_V", "pulse_current_measured_A"))
     out = k4200.pulse_once(dev, cfg, amplitude_V=0.5)
-    assert dev.writes.count("GN") == 2
+    # outputs are params 17-18 (after the 16 inputs) → GP 17, GP 18
+    assert [w for w in dev.writes if w.startswith("GP ")] == ["GP 17", "GP 18"]
     assert out["pulse_voltage_measured_V"] == pytest.approx(0.48)
     assert out["pulse_current_measured_A"] == pytest.approx(2.0e-3)
 
 
-def test_pulse_once_unparseable_gn_becomes_none():
-    dev = _FakeKXCI(["done", "junk"])
+def test_pulse_once_unparseable_gp_becomes_none():
+    dev = _FakeKXCI(["done", "GP error: junk"])
     cfg = PMUPulseConfig(module="m", return_names=("pulse_voltage_measured_V",))
     out = k4200.pulse_once(dev, cfg, amplitude_V=0.5)
     assert out["pulse_voltage_measured_V"] is None
