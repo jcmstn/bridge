@@ -45,18 +45,12 @@ taken from the documented `rpm_config` pathway set rather than copied from worki
 If the build fails on that symbol, grep `keithley.h` for `KI_RPM_` and substitute the
 SMU-pathway name.
 
-**2. No `pulse_sweep_linear`.** This module sets a single amplitude with `pulse_vhigh` /
-`pulse_vlow` instead of configuring a one-point sweep. If `pulse_exec` returns no data
-(`pulse_fetch` errors, or the spot means come back as zeros with status 0), fall back to
-a degenerate sweep — replace the `pulse_vhigh` call with:
-
-```c
-    status = pulse_sweep_linear(InstId, Chan, PULSE_AMPLITUDE_SP, AmplitudeV, AmplitudeV, 0);
-    if ( status )
-        goto cleanup;
-```
-
-and keep everything else. (`pulse_vlow` still sets the base in that arrangement.)
+**2. `pulse_sweep_linear` sets the amplitude, not `pulse_vhigh`.** `pulse_exec` needs a
+sweep point defined; a bare `pulse_vhigh` returns **-826** (seen on the bench). The
+module uses the documented single-pulse form — `pulse_sweep_linear(InstId, Chan,
+PULSE_AMPLITUDE_SP, AmplitudeV, AmplitudeV, 0)` — with `pulse_vlow` still setting the
+base. If your firmware rejects `Step = 0`, try a tiny non-zero step (e.g. `1e-6`); the
+single point is `Start`.
 
 
 ## Argument order is a contract

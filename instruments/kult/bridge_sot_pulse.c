@@ -47,9 +47,11 @@ KXCI in UL mode.
 
 Derived from Keithley's `PMU_1Chan_Sweep_Example`, with four deliberate differences:
 
-1. **No sweep.** One `AmplitudeV` per call (`pulse_vhigh`/`pulse_vlow`), not
-   Start/Stop/Step. The Python side owns the amplitude loop, so a sweep here would be a
-   second loop fighting the first.
+1. **One amplitude per call**, via a degenerate 1-point `pulse_sweep_linear`
+   (`Start = Stop = AmplitudeV`, `Step = 0`) — the documented single-pulse form. The
+   Python side owns the amplitude loop, so a real sweep here would be a second loop
+   fighting the first. (A bare `pulse_vhigh` without a sweep point makes `pulse_exec`
+   return -826.)
 2. **Scalar outputs**, not `D_ARRAY_T`. Four doubles come back cleanly through KXCI
    `GN`; arrays would drag in the six array-size arguments for nothing.
 3. **The RPM pathway is routed back to the SMU on every exit path**, including every
@@ -229,13 +231,12 @@ int bridge_sot_pulse( double PulseWidth, double RiseTime, double FallTime, doubl
     if ( status )
         goto cleanup;
 
-    /* No sweep: the amplitude is set directly. pulse_vhigh is the amplitude
-       setter whenever the amplitude is not the swept parameter. */
+    /* pulse_vlow sets the base level. The amplitude is NOT set with a bare
+       pulse_vhigh -- both vendor examples note that only matters for a
+       PULSE_BASE_SP sweep, and pulse_exec returns -826 without a sweep point.
+       Instead define a degenerate 1-point amplitude sweep (Start = Stop =
+       AmplitudeV, Step = 0), the documented single-pulse form. */
     status = pulse_vlow(InstId, Chan, BaseV);
-    if ( status )
-        goto cleanup;
-
-    status = pulse_vhigh(InstId, Chan, AmplitudeV);
     if ( status )
         goto cleanup;
 
@@ -256,6 +257,10 @@ int bridge_sot_pulse( double PulseWidth, double RiseTime, double FallTime, doubl
        acqTimeStamp, LLEComp). LLE comp is off: PULSE_MODE_SIMPLE below does not
        support it. */
     status = pulse_meas_sm(InstId, Chan, PULSE_ACQ_PBURST, TRUE, TRUE, TRUE, TRUE, TRUE, 0);
+    if ( status )
+        goto cleanup;
+
+    status = pulse_sweep_linear(InstId, Chan, PULSE_AMPLITUDE_SP, AmplitudeV, AmplitudeV, 0);
     if ( status )
         goto cleanup;
 
