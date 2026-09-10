@@ -199,6 +199,14 @@ def test_configure_pmu_pulse_rejects_bad_measure_window():
                                   PMUPulseConfig(meas_start_perc=0.9, meas_stop_perc=0.75))
 
 
+def test_configure_pmu_pulse_rejects_no_flat_top():
+    # width 100 ns, rise/fall 200 ns: settled top = 100 - 100 - 100 < 0 → bench -826
+    with pytest.raises(ValueError, match="flat pulse top"):
+        k4200.configure_pmu_pulse(_FakeKXCI([]),
+                                  PMUPulseConfig(width_s=100e-9, rise_s=200e-9,
+                                                 fall_s=200e-9, period_s=1e-3))
+
+
 def test_pulse_once_fetches_named_return_values_via_gn():
     dev = _FakeKXCI(["done", "0.48", "N 2.0E-3"])
     cfg = PMUPulseConfig(module="m",

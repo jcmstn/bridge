@@ -516,6 +516,15 @@ def configure_pmu_pulse(dev: _Keithley4200A_KXCI, cfg: PMUPulseConfig) -> None:
 
     if cfg.period_s < cfg.delay_s + cfg.width_s + cfg.rise_s + cfg.fall_s:
         raise ValueError("period_s must be ≥ delay_s + width_s + rise_s + fall_s")
+    # PMU width is FWHM (50 % points), so the settled top is
+    # width - 0.5*rise - 0.5*fall. If that is not positive the pulse never
+    # reaches amplitude and there is nothing for the spot mean — the bench
+    # returns -826.
+    if cfg.width_s <= 0.5 * (cfg.rise_s + cfg.fall_s):
+        raise ValueError(
+            f"no flat pulse top: width_s ({cfg.width_s:g} s) must exceed "
+            f"0.5*(rise_s+fall_s) = {0.5 * (cfg.rise_s + cfg.fall_s):g} s — "
+            "shorten the edges or widen the pulse.")
     if not 0.0 <= cfg.meas_start_perc < cfg.meas_stop_perc <= 1.0:
         raise ValueError("need 0 ≤ meas_start_perc < meas_stop_perc ≤ 1, got "
                          f"{cfg.meas_start_perc!r} / {cfg.meas_stop_perc!r}")

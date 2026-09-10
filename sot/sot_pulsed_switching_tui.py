@@ -376,6 +376,12 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     if min(state["pulse_rise_s"], state["pulse_fall_s"]) < edge_min:
         errors.append(f"Rise/fall must be ≥ {format_si(edge_min, 's')} on the "
                       f"{state['pmu_v_range_V']:g} V range.")
+    top_s = state["pulse_width_s"] - 0.5 * (state["pulse_rise_s"] + state["pulse_fall_s"])
+    if top_s <= 0:
+        errors.append(f"No flat pulse top: width must exceed ½·(rise+fall) = "
+                      f"{format_si(0.5 * (state['pulse_rise_s'] + state['pulse_fall_s']), 's')} "
+                      "(PMU width is FWHM). Shorten the edges or widen the pulse — the bench "
+                      "returns -826 otherwise.")
     if not 0.0 <= state["pmu_meas_start_perc"] < state["pmu_meas_stop_perc"] <= 1.0:
         errors.append("Need 0 ≤ measure-window start < stop ≤ 1.")
     if state["n_pulses"] < 1:

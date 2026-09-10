@@ -55,6 +55,13 @@ def test_summary_blocks_bad_pulse_timing():
     assert any("period must be ≥ delay + width" in e for e in errors)
 
 
+def test_summary_blocks_no_pulse_top():
+    # width 100 ns, rise/fall 200 ns → settled top < 0 (bench -826)
+    _, _, errors = tui.build_summary(_state(pulse_width_s=1e-7, pulse_rise_s=2e-7,
+                                            pulse_fall_s=2e-7))
+    assert any("No flat pulse top" in e for e in errors)
+
+
 def test_summary_warns_reset_off():
     _, warnings, _ = tui.build_summary(_state(reset_enabled=False))
     assert any("Reset pulse is OFF" in w for w in warnings)
@@ -103,8 +110,8 @@ def test_summary_warns_high_compliance_below_ceiling():
 
 
 def test_summary_warns_40v_pmu_range():
-    _, warnings, _ = tui.build_summary(_state(pmu_v_range_V=40.0, pulse_rise_s=1e-7,
-                                              pulse_fall_s=1e-7))
+    _, warnings, _ = tui.build_summary(_state(pmu_v_range_V=40.0, pulse_width_s=5e-7,
+                                              pulse_rise_s=1e-7, pulse_fall_s=1e-7))
     assert any("40 V PMU range" in w for w in warnings)
 
 
