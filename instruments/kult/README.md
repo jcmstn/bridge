@@ -34,31 +34,10 @@ The vendor example this was derived from, `PMU_1Chan_Sweep_Example.c`, is kept i
    ```
 
 
-## Build fails: redefinition of every parameter
-
-KULT generates the function signature from the **Parameters** grid. If you also paste the
-`int bridge_sot_pulse(...)` signature (or the whole `.c` file) into the **Code** editor,
-every parameter is declared twice. Split the file across KULT's three areas:
-
-* **Parameters** grid — the 20 rows from the `USRLIB MODULE INFORMATION` block. Outputs
-  (`V_Ampl`, `I_Ampl`, `V_Base`, `I_Base`) must be typed `double *` with direction Output.
-* **Includes** box — `#include "keithley.h"`, the `BOOL LPTIsInCurrentConfiguration(...)`
-  forward declaration, and the two `#define BRIDGE_ERR_*` lines. Nothing else.
-* **Code** editor — only the body, from `/* USRLIB MODULE CODE */` to
-  `/* USRLIB MODULE END */`. Not the comment blocks, not the `#include` lines, not the
-  signature, not the outermost `{` `}`.
-
-
 ## Two things to verify against your local `keithley.h`
 
 Both are flagged because the vendor example does not exercise them, so they are the
 places where this module could be wrong on your firmware.
-
-**0. If the build still fails, read the message-console output and match it below.**
-`Sleep()` / `printf()` were removed on purpose (they need `<windows.h>` / `<stdio.h>`,
-which the vendor examples get from `PMU_examples_ulib_internal.h` — this module is
-`keithley.h`-only). The poll loop uses LPT `delay(1)` instead. If your `keithley.h` spells
-`delay` differently, that is the one to fix.
 
 **1. `KI_RPM_SMU`** — the value that routes the RPM back to the SMU pathway.
 `PMU_1Chan_Sweep_Example.c` only ever uses `KI_RPM_PULSE`, so the route-back constant is
