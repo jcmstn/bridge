@@ -81,8 +81,6 @@ Example: `A_0001_HB3_NOISE_T293K_20260811T143022.csv`
 | `PHCAL` | Phase calibration (`mfli_phase_calibration`)  |
 | `NOISE` | Noise spectrum (`mfli_noise_spectrum`)        |
 | `RT`    | Resistance vs. temperature (`examples/custom_program.py`) |
-| `RXX`   | 4-probe channel resistance, Keithley 4200A only (`sot/sot_dc_characterization`) |
-| `SOTSW` | SOT switching loop (DC current staircase), Keithley 4200A (`sot/sot_switching`) |
 | `SOTPS` | SOT pulsed switching — 4200A PMU write pulse + delayed 6221/2182 R_xy read (`sot/sot_pulsed_switching`) |
 
 A genuinely new measurement kind gets a new short all-caps code added

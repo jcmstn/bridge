@@ -1,14 +1,14 @@
-"""SOT (spin-orbit torque) measurement programs — Keithley 4200A-SCS.
+"""SOT (spin-orbit torque) pulsed-switching measurement — Keithley 4200A-SCS.
 
-Three programs:
-  * sot_dc_characterization — 4-probe channel resistance R_xx, 4200A (type RXX)
-  * sot_switching           — quasi-static (DC staircase) SOT switching, 4200A (type SOTSW)
-  * sot_pulsed_switching    — 4200A PMU write pulse + delayed 6221/2182 R_xy read (type SOTPS)
+One program:
+  * sot_pulsed_switching — 4200A PMU write pulse + delayed 6221/2182 R_xy read
+    (type SOTPS). The 4200A only pulses; a 6221 sources the DC read current and
+    a 2182 reads V_xy across the Hall arms. Field (static tilted assist/read
+    field) comes from the Kepco magnet + Lake Shore 475, as in dc/.
 
-Field (assist / read field) still comes from the Kepco magnet + Lake Shore 475,
-exactly as in dc/.
+The pulse runs a KULT user module on the 4200A — source in instruments/kult/,
+which also documents the RPM-pathway trap (a Clarius pulse test that does not
+route the RPM back leaves an SMU on that RPM reading an open circuit).
 
-The pulsed program runs a KULT user module on the 4200A — source in
-instruments/kult/, which also documents the RPM-pathway trap that silently
-breaks the other two programs after a vendor pulse test.
+Entry point: ``uv run python sot/sot_pulsed_switching_tui.py``.
 """

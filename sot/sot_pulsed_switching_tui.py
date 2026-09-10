@@ -979,8 +979,8 @@ class SOTPulsedSwitchingApp(App):
                                   DEFAULTS["pmu_meas_stop_perc"]),
                             field("pmu_dut_res_ohm", "DUT resistance for load-line (Ω)",
                                   DEFAULTS["pmu_dut_res_ohm"],
-                                  hint="Set near the real channel R (sot_dc_characterization). "
-                                       "Also drives the sidebar current estimate — not saved as data."),
+                                  hint="Set near the real channel R (4-probe it first). "
+                                       "Also drives the sidebar current estimate."),
                             muted=True,
                         )
                         yield card(

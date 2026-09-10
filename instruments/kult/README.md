@@ -109,8 +109,7 @@ exponent guard) and the TUI warns well below those.
 error paths. The vendor example does not: it leaves the RPM on the pulse pathway with the
 PMU output still enabled.
 
-That matters beyond the pulsed program. `sot/sot_switching.py` and
-`sot/sot_dc_characterization.py` also force current from SMU1 through RPM1 — so after
-running any Clarius pulse test (or the vendor example) those two programs will read an
-**open circuit with no error** until something puts the pathway back. Running
-`bridge_sot_pulse` once is the quickest way to recover it.
+That matters for any SMU work on that RPM channel outside `bridge`: after a Clarius pulse
+test (or the vendor example) built on a module that does not route back, an SMU forcing
+through RPM1 reads an **open circuit with no error** until something restores the pathway.
+Running `bridge_sot_pulse` once is the quickest way to recover it.

@@ -64,8 +64,8 @@ def test_set_source_level_voltage_command():
 
 
 def test_set_source_level_at_zero_never_trips_a_tiny_limit():
-    """sot_switching pins its voltmeter SMU with source_limit_A=1e-9; forcing it
-    to 0 A must not trip that limit (abs(0) is not > 1e-9)."""
+    """A pinned 0-A voltmeter SMU may carry source_limit_A=1e-9; forcing it to
+    0 A must not trip that limit (abs(0) is not > 1e-9)."""
     dev = _FakeKXCI([])
     cfg = SMUChannelConfig(channel=2, source_function="current",
                            compliance_voltage_V=2.0, source_limit_A=1e-9)

@@ -79,10 +79,9 @@ pulse axis for an I50% fit, not ``pulse_amplitude_V``. Two caveats:
 Current reversal
 ----------------
 The read current is small, fixed, and independent of the pulse, so ±I_read
-reversal IS available here (unlike sot_switching.py, where the current is the
-swept axis). The 6221 flips polarity, the 2182 reads each side; it cancels the
-thermal EMF and the 2182's static offset for 2x the read time. See
-docs/current-reversal.md.
+reversal works: the 6221 flips polarity, the 2182 reads each side, and the
+odd/even split cancels the thermal EMF and the 2182's static offset for 2x
+the read time. See docs/current-reversal.md.
 
 Instrument protection (the 6221 shares the main-channel pins with the PMU)
 ------------------------------------------------------------------------
@@ -132,11 +131,10 @@ opposite field sign — the field is not an axis here.
 The RPM pathway trap
 --------------------
 Keithley's own ``PMU_1Chan_Sweep_Example`` routes RPM1 to the PMU and never
-routes back. After running it (or any Clarius pulse test built on it), SMU1
-cannot reach the DUT — and ``sot_switching.py`` / ``sot_dc_characterization.py``
-will read an open circuit with NO error, because they force from SMU1 through
-that same RPM. ``instruments/kult/bridge_sot_pulse.c`` always routes back;
-running one pulse through it is the quickest way to recover a stuck pathway.
+routes back. After running it (or any Clarius pulse test built on it), an SMU
+wired through RPM1 cannot reach the DUT and reads an open circuit with NO
+error. ``instruments/kult/bridge_sot_pulse.c`` always routes back; running one
+pulse through it is the quickest way to recover a stuck pathway.
 
 Requirements: pymeasure, pyvisa, numpy, pandas. KXCI enabled on the 4200A, and
 ``instruments/kult/bridge_sot_pulse.c`` compiled into a KULT library — see
@@ -481,7 +479,7 @@ def main() -> None:
         pmu_channel=1, pmu_id="PMU1",
         width_s=100e-9, rise_s=20e-9, fall_s=20e-9, period_s=1e-3,
         v_range_V=10.0, i_range_A=0.01,   # RPM 10 V range caps the measure range at 10 mA
-        dut_res_ohm=1e3,                  # ← set near your real channel R (sot_dc_characterization)
+        dut_res_ohm=1e3,                  # ← set near your real channel R (4-probe it first)
         v_limit_V=5.0,
     )
     read_cfg = ReadConfig(sense_current_A=1e-4, n_reversals=5, nplc=5)
