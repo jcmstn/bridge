@@ -22,8 +22,7 @@ def _state(**overrides) -> dict:
         pmu_dut_res_ohm=1000.0, pmu_v_range_V=10.0, pmu_i_range_A=0.01, pmu_v_limit_V=5.0,
         sense_current_A=1e-4, compliance_V=2.0, source_delay_s=0.05, nplc=5.0,
         auto_range=True, n_reversals=5, settle_after_enable_s=0.3,
-        delay_after_pulse_s=5.0, n_repeats=50,
-        reset_enabled=True, reset_amplitude_V=-2.0, reset_delay_after_s=0.01,
+        delay_after_pulse_s=1.0,
         magnet_current_A=1.5, field_angle_from_oop_deg=85.0, field_settle_tolerance_mT=0.05,
         device="HB3", cooldown="3", temperature_setpoint_K=300.0,
         source_visa_resource="GPIB0::20::INSTR", voltmeter_visa_resource="GPIB0::7::INSTR",
@@ -62,14 +61,14 @@ def test_summary_blocks_no_pulse_top():
     assert any("No flat pulse top" in e for e in errors)
 
 
-def test_summary_warns_reset_off():
-    _, warnings, _ = tui.build_summary(_state(reset_enabled=False))
-    assert any("Reset pulse is OFF" in w for w in warnings)
+def test_summary_warns_one_way_ramp():
+    _, warnings, _ = tui.build_summary(_state(amplitudes_V="0.2, 0.6, 1.0, 1.4, 1.8"))
+    assert any("one-way ramp" in w for w in warnings)
 
 
-def test_summary_warns_reset_same_sign_as_writes():
-    _, warnings, _ = tui.build_summary(_state(amplitudes_V="0.5, 1.0", reset_amplitude_V=2.0))
-    assert any("opposite polarity" in w for w in warnings)
+def test_summary_no_ramp_warning_for_a_loop():
+    _, warnings, _ = tui.build_summary(_state(amplitudes_V="0.2, 0.6, 1.0, 0.6, 0.2"))
+    assert not any("one-way ramp" in w for w in warnings)
 
 
 def test_summary_blocks_magnet_current_over_limit():
@@ -134,17 +133,17 @@ def test_summary_blocks_edge_below_range_minimum():
 def test_build_plan_shapes(tmp_path: Path):
     app = tui.SOTPulsedSwitchingApp()
     app.data_root = tmp_path
-    plan = app._build_plan(_state(amplitudes_V="0.2, 0.6, 1.0", n_repeats=10))
+    plan = app._build_plan(_state(amplitudes_V="0.2, 0.6, 1.0"))
 
     assert plan.amplitudes_V == [0.2, 0.6, 1.0]
-    assert plan.total_points == 3 * 10
+    assert plan.total_points == 3                         # one pulse per amplitude
     assert plan.series == ""                              # single file
     assert plan.pmu_cfg.module == "bridge_sot_pulse"
     assert plan.pmu_cfg.return_names == ()
     assert plan.pmu_cfg.v_range_V == 10.0
     assert plan.read_cfg.n_reversals == 5
     assert plan.read_cfg.sense_current_A == 1e-4
-    assert plan.seq_cfg.reset_enabled is True
+    assert plan.read_cfg.delay_after_pulse_s == 1.0
     assert plan.magnet_current_A == 1.5
     assert plan.field_angle_from_oop_deg == 85.0
     # 6221 forces the read current, 2182 reads V_xy

@@ -74,27 +74,25 @@ class _Fake2182:
         return next(self._n) * 1e-4
 
 
-def _pulsed_cfgs(**seq_overrides):
+def _pulsed_cfgs():
     read = ps.ReadConfig(sense_current_A=1e-4, n_reversals=2, source_delay_s=0.0,
-                         settle_after_enable_s=0.0)
-    seq = ps.PulseSequenceConfig(delay_after_pulse_s=0.0, n_repeats=1, output_file="",
-                                 **seq_overrides)
+                         settle_after_enable_s=0.0, delay_after_pulse_s=0.0)
     pmu = PMUPulseConfig(library="lib", module="m", return_names=())
-    return pmu, read, seq
+    return pmu, read
 
 
-def _run_pulsed(dev, pmu_cfg, read_cfg, seq_cfg, points, *, events=None, **kw):
+def _run_pulsed(dev, pmu_cfg, read_cfg, points, *, events=None, **kw):
     source = _Fake6221(events)
     voltmeter = _Fake2182(events)
-    return ps.run_measurement(dev, pmu_cfg, source, voltmeter, read_cfg, seq_cfg,
+    return ps.run_measurement(dev, pmu_cfg, source, voltmeter, read_cfg,
                               points, write_csv=_NULL_WRITER, **kw)
 
 
 def test_pulsed_ordering_6221_off_then_pulse_then_read():
     dev = _FakeKXCI(events=(events := []))
-    pmu_cfg, read_cfg, seq_cfg = _pulsed_cfgs(reset_enabled=True, reset_amplitude_V=-2.0)
+    pmu_cfg, read_cfg = _pulsed_cfgs()
 
-    _run_pulsed(dev, pmu_cfg, read_cfg, seq_cfg,
+    _run_pulsed(dev, pmu_cfg, read_cfg,
                 [ps.AmplitudePoint(amplitude_V=0.5)], events=events)
 
     i_first_disable = next(i for i, e in enumerate(events) if e == "6221.disable")
@@ -109,27 +107,25 @@ def test_pulsed_ordering_6221_off_then_pulse_then_read():
     last_read = max(i for i, e in enumerate(events) if e == "2182.read")
     assert any(e == "6221.disable" for e in events[last_read:])
 
-    # reset + write = two EX queries, reset first and of opposite polarity
+    # one pulse per amplitude — a single EX, no reset
     ex_cmds = [c for c in dev.writes if c.startswith("EX ")]
-    assert len(ex_cmds) == 2
-    assert "-2.000000E+00" in ex_cmds[0] and "5.000000E-01" in ex_cmds[1]
+    assert len(ex_cmds) == 1
+    assert "5.000000E-01" in ex_cmds[0]
 
 
-def test_pulsed_rows_repeats_and_blank_pulse_columns():
+def test_pulsed_one_row_per_amplitude_blank_pulse_columns():
     dev = _FakeKXCI()
-    pmu_cfg, read_cfg, seq_cfg = _pulsed_cfgs()
-    seq_cfg.n_repeats = 3
-    points = [ps.AmplitudePoint(amplitude_V=a) for a in (0.4, 0.8)]
+    pmu_cfg, read_cfg = _pulsed_cfgs()
+    points = [ps.AmplitudePoint(amplitude_V=a) for a in (0.2, 0.4, 0.6, 0.4, 0.2)]
     seen: list[dict] = []
 
-    df = _run_pulsed(dev, pmu_cfg, read_cfg, seq_cfg, points, on_point=seen.append,
+    df = _run_pulsed(dev, pmu_cfg, read_cfg, points, on_point=seen.append,
                      magnet_current_A=1.5, field_angle_from_oop_deg=85.0)
 
-    assert len(df) == 6
-    assert [r["amplitude_index"] for r in seen] == [0, 0, 0, 1, 1, 1]
-    assert [r["repeat_index"] for r in seen] == [0, 1, 2, 0, 1, 2]
-    # return_names empty → every measured-pulse column stays blank, including
-    # the derived 2-wire resistance and the base-level pair
+    assert len(df) == 5
+    assert [r["amplitude_index"] for r in seen] == [0, 1, 2, 3, 4]
+    assert "repeat_index" not in seen[0]
+    # return_names empty → every measured-pulse column stays blank
     assert all(r["pulse_voltage_measured_V"] is None for r in seen)
     assert all(r["pulse_current_measured_A"] is None for r in seen)
     assert all(r["pulse_2wire_resistance_ohm"] is None for r in seen)
@@ -157,11 +153,11 @@ def test_pulsed_derives_2wire_resistance_when_module_returns_values():
             return f"{next(self._n) * 1e-4:.6E}"
 
     dev = _MeasuringKXCI()
-    pmu_cfg, read_cfg, seq_cfg = _pulsed_cfgs()
+    pmu_cfg, read_cfg = _pulsed_cfgs()
     pmu_cfg.return_names = ("pulse_voltage_measured_V", "pulse_current_measured_A")
     seen: list[dict] = []
 
-    _run_pulsed(dev, pmu_cfg, read_cfg, seq_cfg,
+    _run_pulsed(dev, pmu_cfg, read_cfg,
                 [ps.AmplitudePoint(amplitude_V=0.5)], on_point=seen.append)
 
     assert seen[0]["pulse_voltage_measured_V"] == 2.0
@@ -171,21 +167,20 @@ def test_pulsed_derives_2wire_resistance_when_module_returns_values():
 
 def test_pulsed_stop_event_breaks_early():
     dev = _FakeKXCI()
-    pmu_cfg, read_cfg, seq_cfg = _pulsed_cfgs()
-    seq_cfg.n_repeats = 5
-    points = [ps.AmplitudePoint(amplitude_V=0.5)]
+    pmu_cfg, read_cfg = _pulsed_cfgs()
+    points = [ps.AmplitudePoint(amplitude_V=a) for a in (0.2, 0.4, 0.6, 0.8, 1.0)]
 
     class _Stop:
         def __init__(self): self.n = 0
         def is_set(self): self.n += 1; return self.n > 3
 
-    df = _run_pulsed(dev, pmu_cfg, read_cfg, seq_cfg, points, stop_event=_Stop())
+    df = _run_pulsed(dev, pmu_cfg, read_cfg, points, stop_event=_Stop())
     assert 0 < len(df) < 5
 
 
 def test_pulsed_aborts_after_repeated_pulse_failures():
-    """A non-zero module return (here -826) three cycles running raises instead
-    of filling the whole sweep with read-only noise."""
+    """A non-zero module return (here -826) three amplitudes running raises
+    instead of filling the whole sweep with read-only noise."""
     import pytest
 
     class _FailingKXCI(_FakeKXCI):
@@ -196,13 +191,12 @@ def test_pulsed_aborts_after_repeated_pulse_failures():
             return f"{next(self._n) * 1e-4:.6E}"
 
     dev = _FailingKXCI()
-    pmu_cfg, read_cfg, seq_cfg = _pulsed_cfgs()
-    seq_cfg.n_repeats = 10
+    pmu_cfg, read_cfg = _pulsed_cfgs()
+    points = [ps.AmplitudePoint(amplitude_V=a) for a in (0.2, 0.4, 0.6, 0.8, 1.0)]
     seen: list[dict] = []
     with pytest.raises(RuntimeError, match="consecutive pulse failures"):
-        _run_pulsed(dev, pmu_cfg, read_cfg, seq_cfg,
-                    [ps.AmplitudePoint(amplitude_V=0.5)], on_point=seen.append)
-    assert len(seen) == ps._MAX_CONSECUTIVE_PULSE_FAILURES - 1   # 2 rows, 3rd cycle raises
+        _run_pulsed(dev, pmu_cfg, read_cfg, points, on_point=seen.append)
+    assert len(seen) == ps._MAX_CONSECUTIVE_PULSE_FAILURES - 1   # 2 rows, 3rd amplitude raises
 
 
 def test_pulsed_refuses_absurd_read_current_or_compliance():
@@ -210,14 +204,14 @@ def test_pulsed_refuses_absurd_read_current_or_compliance():
     hardware, so the standalone main() path is covered, not just the TUI."""
     import pytest
     dev = _FakeKXCI()
-    pmu_cfg, read_cfg, seq_cfg = _pulsed_cfgs()
+    pmu_cfg, read_cfg = _pulsed_cfgs()
     pt = [ps.AmplitudePoint(amplitude_V=0.5)]
 
     read_cfg.sense_current_A = 0.1          # 100 mA — 1e-4 with a slipped exponent
     with pytest.raises(ValueError):
-        _run_pulsed(dev, pmu_cfg, read_cfg, seq_cfg, pt)
+        _run_pulsed(dev, pmu_cfg, read_cfg, pt)
 
-    _, read_cfg, _ = _pulsed_cfgs()
+    _, read_cfg = _pulsed_cfgs()
     read_cfg.compliance_V = 100.0
     with pytest.raises(ValueError):
-        _run_pulsed(dev, pmu_cfg, read_cfg, seq_cfg, pt)
+        _run_pulsed(dev, pmu_cfg, read_cfg, pt)

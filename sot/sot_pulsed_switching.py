@@ -5,25 +5,27 @@ SOT pulsed switching — 4200A PMU write pulse + delayed 6221/2182 R_xy readout
 Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
 Created: 2026-09-08
 
-Stage 4 of the SOT plan: probability-of-switching vs. pulse amplitude for an
-in-plane ferromagnet, read out anomalous-Hall. The 4200A ONLY pulses; a
-6221 + 2182 pair does the delayed R_xy read.
+The switching curve: anomalous-Hall R_xy vs. pulse amplitude, one pulse per
+amplitude, amplitude swept up and down at a fixed tilted field. The 4200A ONLY
+pulses; a 6221 + 2182 pair does the delayed R_xy read.
 
-Per cycle:
+Per amplitude:
   1. 6221 output OFF  (never pulse into a live current source on the shared pin)
-  2. optional reset pulse   (PMU, opposite polarity, fixed amplitude)
-  3. write pulse            (PMU, the swept amplitude) — the KULT module routes
-     RPM1 to the PMU on entry and back to the SMU on exit, so nothing else has
-     to sequence the pathway
-  4. wait ``delay_after_pulse_s``   (e.g. 5 s — let the state settle and any
-     transient thermal gradient die away before reading)
-  5. 6221 output ON, settle, reversal-averaged R_xy read (6221 forces ±I,
+  2. write pulse      (PMU, the swept amplitude) — the KULT module routes RPM1
+     to the PMU on entry and back to the SMU on exit, so nothing else has to
+     sequence the pathway
+  3. wait ``delay_after_pulse_s``   (let the state settle and any transient
+     thermal gradient die away before reading)
+  4. 6221 output ON, settle, reversal-averaged R_xy read (6221 forces ±I_read,
      2182 reads V_xy across the transverse arms)
-  6. 6221 output OFF again — channel quiet until the next pulse
+  5. 6221 output OFF again — channel quiet until the next pulse
 
-Repeated ``n_repeats`` times per amplitude for the probability statistics
-(Stage 4 wants ~50-100; that also wants the reset pulse ON so each write starts
-from a known state).
+One row per amplitude. Make the amplitude list a full loop (0 → +max → 0 →
+−max → 0) — the sweep itself sets each pulse's starting state, which is what
+gives the hysteresis. There is no reset pulse and no per-amplitude repetition:
+for switching-*probability* statistics (P(V), I50, thermal stability Δ), re-run
+the whole sweep N times and take the switched fraction per amplitude across the
+N runs.
 
 Wiring  (2-wire local sense, FORCE triax only)
 ---------------------------------------------
@@ -86,12 +88,11 @@ the read time. See docs/current-reversal.md.
 Instrument protection (the 6221 shares the main-channel pins with the PMU)
 ------------------------------------------------------------------------
 What makes the shared-bus wiring safe is that the 6221 output relay is OPEN
-during every pulse — ``_six221_output_off()`` runs at the top of each cycle
-(and on abort) BEFORE any ``pulse_once``. With the output disabled the 6221
-only sees the pulse voltage across open terminals (<= ``v_limit_V``, 5 V by
-default; hardware <= 10 V on the default range), far inside its +/-105 V
-output isolation. The OFF/ON ordering is load-bearing and is covered by
-``tests/test_sot_run_loops.py``.
+during every pulse — ``_six221_output_off()`` runs before every ``pulse_once``
+(and on abort). With the output disabled the 6221 only sees the pulse voltage
+across open terminals (<= ``v_limit_V``, 5 V by default; hardware <= 10 V on
+the default range), far inside its +/-105 V output isolation. The OFF/ON
+ordering is load-bearing and is covered by ``tests/test_sot_run_loops.py``.
 
 Guards against a fat-fingered read setting (they would put a large DC current
 or voltage on the shared bus, hence on the 2182 and the disabled PMU/6221):
@@ -114,8 +115,8 @@ Two 6221 front-panel settings this code cannot read back — check them once:
     ground loop through that bus.
 
 During ``delay_after_pulse_s`` the 6221 is OFF, so the main channel is
-open-circuit for those ~5 s and charge on the Hall arms has no bleed path.
-If the first reads after the wait look erratic, that is the suspect — not a
+open-circuit for that wait and charge on the Hall arms has no bleed path. If
+the first read after the wait looks erratic, that is the suspect — not a
 damaged 2182.
 
 Field
@@ -205,8 +206,8 @@ log = logging.getLogger(__name__)
 # Keithley4200AConfig / PMUPulseConfig come from instruments.keithley4200a;
 # SourceConfig / VoltmeterConfig / MagnetConfig / GaussmeterConfig /
 # TemperatureControllerConfig from their instruments/ modules (imported above
-# and re-exported for the TUI). Only the read timing and the pulse-sequence
-# shape are local.
+# and re-exported for the TUI). Only the read timing and the post-pulse wait
+# are local.
 
 # Absolute ceilings for the delayed read — not tuning knobs. Anything this
 # measurement legitimately needs is far below them; the point is to stop a
@@ -219,7 +220,7 @@ _READ_COMPLIANCE_CEILING_V  = 21.0
 
 @dataclass
 class ReadConfig:
-    """The 6221 + 2182 delayed R_xy read."""
+    """The 6221 + 2182 delayed R_xy read, plus the wait before it."""
     sense_current_A: float        = 1e-4    # 6221 probe current for the Hall read [A]
     compliance_V: float           = 2.0
     source_delay_s: float         = 0.05    # 6221 settle after each +I/-I flip [s]
@@ -227,6 +228,7 @@ class ReadConfig:
     auto_range: bool              = True
     n_reversals: int              = 5       # +I/-I reversal pairs averaged per read
     settle_after_enable_s: float  = 0.3     # dwell after re-enabling the 6221, before reading [s]
+    delay_after_pulse_s: float    = 1.0     # wait between write-pulse end and the read [s]
 
 
 def _check_read_safety(read_cfg: ReadConfig) -> None:
@@ -248,16 +250,6 @@ def _check_read_safety(read_cfg: ReadConfig) -> None:
 
 
 @dataclass
-class PulseSequenceConfig:
-    delay_after_pulse_s: float  = 5.0      # wait between write-pulse end and the R_xy read [s]
-    n_repeats: int              = 50       # write/read cycles per amplitude (probability stats)
-    reset_enabled: bool         = False    # opposite-polarity reset pulse before each write
-    reset_amplitude_V: float    = 0.0      # reset-pulse amplitude (signed), used iff reset_enabled
-    reset_delay_after_s: float  = 0.01     # settle after the reset pulse, before the write pulse [s]
-    output_file: str            = "sot_pulsed_switching.csv"
-
-
-@dataclass
 class AmplitudePoint:
     amplitude_V: float
 
@@ -267,8 +259,8 @@ class AmplitudePoint:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _interruptible_sleep(seconds: float, stop_event: Optional[threading.Event]) -> None:
-    """time.sleep, but return early if ``stop_event`` fires — so a 5 s
-    post-pulse wait doesn't make Abort feel dead."""
+    """time.sleep, but return early if ``stop_event`` fires — so the post-pulse
+    wait doesn't make Abort feel dead."""
     if seconds <= 0:
         return
     end = time.monotonic() + seconds
@@ -329,7 +321,6 @@ def run_measurement(
     source: Keithley6221,
     voltmeter: Keithley2182,
     read_cfg: ReadConfig,
-    seq_cfg: PulseSequenceConfig,
     points: List[AmplitudePoint],
     stop_event: Optional[threading.Event] = None,
     on_point: Optional[Callable[[dict], None]] = None,
@@ -340,17 +331,18 @@ def run_measurement(
     magnet_current_A: Optional[float] = None,
     field_angle_from_oop_deg: Optional[float] = None,
     write_csv: Optional[Callable[[List[dict]], None]] = None,
+    output_file: str = "sot_pulsed_switching.csv",
 ) -> pd.DataFrame:
-    """For each amplitude in ``points`` × ``seq_cfg.n_repeats`` cycles:
-    (6221 off) → [reset pulse] → write pulse → wait → (6221 on, read R_xy) →
-    (6221 off). One row per cycle; CSV rewritten in full every row.
+    """One pulse + delayed R_xy read per amplitude in ``points``:
+    (6221 off) → write pulse → wait → (6221 on, read R_xy) → (6221 off).
+    One row per amplitude; CSV rewritten in full every row.
 
     The static field is set by the caller before this is called;
     ``magnet_current_A`` is recorded nominal, and if a gaussmeter is passed
     the field is measured once here → ``assist_field_measured_mT``.
 
-    ``stop_event`` is checked before each cycle, inside the post-pulse wait,
-    and mid-reversal. ``temp_ctrl=None`` never stops the run.
+    ``stop_event`` is checked before each amplitude, inside the post-pulse
+    wait, and mid-reversal. ``temp_ctrl=None`` never stops the run.
 
     Raises ``RuntimeError`` after ``_MAX_CONSECUTIVE_PULSE_FAILURES`` write
     pulses in a row come back with a non-zero module return or an ``EX ERROR``
@@ -366,102 +358,89 @@ def run_measurement(
                  field_measured_mT, magnet_current_A)
 
     records: List[dict] = []
-    total = len(points) * seq_cfg.n_repeats
     consecutive_pulse_failures = 0
 
     for a_idx, pt in enumerate(points):
-        for rep in range(seq_cfg.n_repeats):
-            if stop_event is not None and stop_event.is_set():
-                log.info("Aborted after %d / %d cycles.", len(records), total)
-                _six221_output_off(source)
-                return pd.DataFrame(records)
-
-            # ── 1. 6221 OFF — never pulse into a live current source ────────
+        if stop_event is not None and stop_event.is_set():
+            log.info("Aborted after %d / %d amplitudes.", len(records), len(points))
             _six221_output_off(source)
+            return pd.DataFrame(records)
 
-            # ── 2. optional reset pulse ───────────────────────────────────
-            if seq_cfg.reset_enabled:
-                pulse_once(k4200, pmu_cfg, amplitude_V=seq_cfg.reset_amplitude_V,
+        # ── 1. 6221 OFF — never pulse into a live current source ────────
+        _six221_output_off(source)
+
+        # ── 2. write pulse (the module owns the RPM pathway) ──────────
+        pinfo = pulse_once(k4200, pmu_cfg, amplitude_V=pt.amplitude_V,
                            stop_event=stop_event)
-                _interruptible_sleep(seq_cfg.reset_delay_after_s, stop_event)
+        aborting = stop_event is not None and stop_event.is_set()
+        fail = None if aborting else _pulse_failure_reason(pinfo.get("module_return"))
+        if fail is not None:
+            consecutive_pulse_failures += 1
+            log.warning("Write pulse did not fire (amp %.4g V, %d in a row): %s",
+                        pt.amplitude_V, consecutive_pulse_failures, fail)
+            if consecutive_pulse_failures >= _MAX_CONSECUTIVE_PULSE_FAILURES:
+                _six221_output_off(source)
+                raise RuntimeError(
+                    f"{consecutive_pulse_failures} consecutive pulse failures "
+                    f"— last: {fail}. Aborting; check the KXCI log and the pulse "
+                    "timing / PMU config.")
+        else:
+            consecutive_pulse_failures = 0
 
-            # ── 3. write pulse (the module owns the RPM pathway) ──────────
-            pinfo = pulse_once(k4200, pmu_cfg, amplitude_V=pt.amplitude_V,
-                               stop_event=stop_event)
-            aborting = stop_event is not None and stop_event.is_set()
-            fail = None if aborting else _pulse_failure_reason(pinfo.get("module_return"))
-            if fail is not None:
-                consecutive_pulse_failures += 1
-                log.warning("Write pulse did not fire (amp %.4g V, %d in a row): %s",
-                            pt.amplitude_V, consecutive_pulse_failures, fail)
-                if consecutive_pulse_failures >= _MAX_CONSECUTIVE_PULSE_FAILURES:
-                    _six221_output_off(source)
-                    raise RuntimeError(
-                        f"{consecutive_pulse_failures} consecutive pulse failures "
-                        f"— last: {fail}. Aborting; check the KXCI log and the pulse "
-                        "timing / PMU config.")
-            else:
-                consecutive_pulse_failures = 0
+        # ── 3. wait ─────────────────────────────────────────────────
+        _interruptible_sleep(read_cfg.delay_after_pulse_s, stop_event)
 
-            # ── 4. wait ─────────────────────────────────────────────────
-            _interruptible_sleep(seq_cfg.delay_after_pulse_s, stop_event)
+        # ── 4. 6221 ON, settle, reversal-averaged R_xy read ──────────
+        source.enable_source()
+        _interruptible_sleep(read_cfg.settle_after_enable_s, stop_event)
+        rv = acquire_reversal_averaged_voltage(
+            source, voltmeter, read_cfg.sense_current_A, read_cfg.n_reversals,
+            stop_event, source_delay_s=read_cfg.source_delay_s)
+        r_xy = rv["mean"] / read_cfg.sense_current_A
 
-            # ── 5. 6221 ON, settle, reversal-averaged R_xy read ──────────
-            source.enable_source()
-            _interruptible_sleep(read_cfg.settle_after_enable_s, stop_event)
-            rv = acquire_reversal_averaged_voltage(
-                source, voltmeter, read_cfg.sense_current_A, read_cfg.n_reversals,
-                stop_event, source_delay_s=read_cfg.source_delay_s)
-            r_xy = rv["mean"] / read_cfg.sense_current_A
+        # ── 5. 6221 OFF again ───────────────────────────────────────
+        _six221_output_off(source)
 
-            # ── 6. 6221 OFF again ───────────────────────────────────────
-            _six221_output_off(source)
+        t1_K, t2_K = read_temperature(temp_ctrl, temp_cfg) if temp_cfg is not None else (None, None)
 
-            t1_K, t2_K = read_temperature(temp_ctrl, temp_cfg) if temp_cfg is not None else (None, None)
+        record = {
+            "amplitude_index":  a_idx,
+            "timestamp":        time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "pulse_amplitude_V": pt.amplitude_V,
+            "pulse_width_s":     pmu_cfg.width_s,
+            "n_pulses":          pmu_cfg.n_pulses,
+            "pulse_voltage_measured_V": pinfo.get("pulse_voltage_measured_V"),
+            "pulse_current_measured_A": pinfo.get("pulse_current_measured_A"),
+            "pulse_2wire_resistance_ohm": _pulse_resistance(pinfo),
+            "pulse_base_voltage_V": pinfo.get("pulse_base_voltage_V"),
+            "pulse_base_current_A": pinfo.get("pulse_base_current_A"),
+            "sense_current_A":   read_cfg.sense_current_A,
+            "hall_voltage_V":    rv["mean"],
+            "hall_voltage_sem_V": rv["sem"],
+            "hall_voltage_even_V":     rv["even_mean"],
+            "hall_voltage_even_sem_V": rv["even_sem"],
+            "hall_resistance_ohm": r_xy,
+            "n_reversals":       rv["n_reversals"],
+            "magnet_current_A":  magnet_current_A,
+            "assist_field_measured_mT": field_measured_mT,
+            "field_angle_from_oop_deg": field_angle_from_oop_deg,
+            "temperature_1_K":   t1_K,
+            "temperature_2_K":   t2_K,
+        }
+        records.append(record)
+        if on_point is not None:
+            on_point(record)
 
-            record = {
-                "amplitude_index":  a_idx,
-                "repeat_index":     rep,
-                "timestamp":        time.strftime("%Y-%m-%dT%H:%M:%S"),
-                "pulse_amplitude_V": pt.amplitude_V,
-                "pulse_width_s":     pmu_cfg.width_s,
-                "pulse_delay_s":     seq_cfg.delay_after_pulse_s,
-                "n_pulses":          pmu_cfg.n_pulses,
-                "pulse_voltage_measured_V": pinfo.get("pulse_voltage_measured_V"),
-                "pulse_current_measured_A": pinfo.get("pulse_current_measured_A"),
-                "pulse_2wire_resistance_ohm": _pulse_resistance(pinfo),
-                "pulse_base_voltage_V": pinfo.get("pulse_base_voltage_V"),
-                "pulse_base_current_A": pinfo.get("pulse_base_current_A"),
-                "reset_enabled":     seq_cfg.reset_enabled,
-                "reset_amplitude_V": seq_cfg.reset_amplitude_V if seq_cfg.reset_enabled else None,
-                "sense_current_A":   read_cfg.sense_current_A,
-                "hall_voltage_V":    rv["mean"],
-                "hall_voltage_sem_V": rv["sem"],
-                "hall_voltage_even_V":     rv["even_mean"],
-                "hall_voltage_even_sem_V": rv["even_sem"],
-                "hall_resistance_ohm": r_xy,
-                "n_reversals":       rv["n_reversals"],
-                "magnet_current_A":  magnet_current_A,
-                "assist_field_measured_mT": field_measured_mT,
-                "field_angle_from_oop_deg": field_angle_from_oop_deg,
-                "temperature_1_K":   t1_K,
-                "temperature_2_K":   t2_K,
-            }
-            records.append(record)
-            if on_point is not None:
-                on_point(record)
+        if write_csv is not None:
+            write_csv(records)
+        else:
+            Path(output_file).parent.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame(records).to_csv(output_file, index=False)
 
-            if write_csv is not None:
-                write_csv(records)
-            else:
-                Path(seq_cfg.output_file).parent.mkdir(parents=True, exist_ok=True)
-                pd.DataFrame(records).to_csv(seq_cfg.output_file, index=False)
+        log.info("amp %d/%d  V_pulse=%.4g V  R_xy=%.6g Ω",
+                 a_idx + 1, len(points), pt.amplitude_V, r_xy)
 
-            log.info("amp %d/%d  rep %d/%d  V_pulse=%.4g V  R_xy=%.6g Ω",
-                     a_idx + 1, len(points), rep + 1, seq_cfg.n_repeats,
-                     pt.amplitude_V, r_xy)
-
-    log.info("Done. %d rows → '%s'", len(records), seq_cfg.output_file)
+    log.info("Done. %d rows → '%s'", len(records), output_file)
     return pd.DataFrame(records)
 
 
@@ -477,17 +456,13 @@ def main() -> None:
     # need touching.
     pmu_cfg = PMUPulseConfig(
         pmu_channel=1, pmu_id="PMU1",
-        width_s=100e-9, rise_s=20e-9, fall_s=20e-9, period_s=1e-3,
+        width_s=1e-6, rise_s=20e-9, fall_s=20e-9, period_s=1e-3,
         v_range_V=10.0, i_range_A=0.01,   # RPM 10 V range caps the measure range at 10 mA
         dut_res_ohm=1e3,                  # ← set near your real channel R (4-probe it first)
         v_limit_V=5.0,
     )
-    read_cfg = ReadConfig(sense_current_A=1e-4, n_reversals=5, nplc=5)
+    read_cfg = ReadConfig(sense_current_A=1e-4, n_reversals=5, nplc=5, delay_after_pulse_s=1.0)
     _check_read_safety(read_cfg)   # before connect_source — connect() leaves the 6221 live
-    seq_cfg = PulseSequenceConfig(
-        delay_after_pulse_s=5.0, n_repeats=50, reset_enabled=True, reset_amplitude_V=-2.0,
-        output_file=str(_DATA_DIR / f"sot_pulsed_{datetime.now():%Y%m%d_%H%M%S}.csv"),
-    )
 
     src_cfg = SourceConfig(visa_resource="GPIB0::20::INSTR", sense_current_A=read_cfg.sense_current_A,
                            compliance_V=read_cfg.compliance_V, source_delay_s=read_cfg.source_delay_s)
@@ -501,7 +476,9 @@ def main() -> None:
 
     FIELD_ANGLE_FROM_OOP_DEG = 85.0     # ← SET TO YOUR REAL MOUNT ANGLE (recorded, not measured)
     STATIC_MAGNET_CURRENT_A = 1.5       # ← the static read field; re-run at -1.5 for the ±Hz check
-    AMPLITUDES_V = list(linear_sweep(0.2, 2.0, 0.1, bidirectional=False))
+    # Full loop: up then down. The sweep itself sets each pulse's starting state.
+    AMPLITUDES_V = list(linear_sweep(0.2, 2.0, 0.1, bidirectional=True))
+    OUTPUT_FILE = str(_DATA_DIR / f"sot_pulsed_{datetime.now():%Y%m%d_%H%M%S}.csv")
 
     k4200 = connect_4200a(k_cfg)
     log.info("Installed user libraries (UL):\n%s", list_user_libraries(k4200))
@@ -518,11 +495,12 @@ def main() -> None:
 
     points = [AmplitudePoint(amplitude_V=float(v)) for v in AMPLITUDES_V]
     try:
-        df = run_measurement(k4200, pmu_cfg, source, voltmeter, read_cfg, seq_cfg, points,
+        df = run_measurement(k4200, pmu_cfg, source, voltmeter, read_cfg, points,
                              gaussmeter=gaussmeter, gauss_cfg=gauss_cfg,
                              temp_ctrl=temp_ctrl, temp_cfg=temp_cfg,
                              magnet_current_A=STATIC_MAGNET_CURRENT_A,
-                             field_angle_from_oop_deg=FIELD_ANGLE_FROM_OOP_DEG)
+                             field_angle_from_oop_deg=FIELD_ANGLE_FROM_OOP_DEG,
+                             output_file=OUTPUT_FILE)
         print("\n", df.to_string(index=False))
     finally:
         # 6221 down first (it shares the channel pin), then the 4200A, then the

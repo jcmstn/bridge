@@ -5,10 +5,11 @@ Textual TUI for sot/sot_pulsed_switching.py
 Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
 Created: 2026-09-08
 
-Probability-of-switching vs. pulse amplitude: the 4200A PMU delivers the write
-pulse, then after a fixed delay the 6221 forces ±I_read and the 2182 reads V_xy
-across the transverse arms — at a single static tilted field. One output file
-for the whole amplitude sweep (rows = amplitude × repeat).
+The switching curve: R_xy vs. pulse amplitude, one pulse per amplitude, at a
+single static tilted field. The 4200A PMU delivers the write pulse; after a
+fixed delay the 6221 forces ±I_read and the 2182 reads V_xy across the
+transverse arms. One row per amplitude. For switching-probability statistics,
+re-run the sweep N times.
 
 Run:  python sot_pulsed_switching_tui.py
 """
@@ -24,7 +25,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
-import numpy as np
 from rich.text import Text
 
 from textual import work
@@ -47,7 +47,6 @@ from sot.sot_pulsed_switching import (
     Keithley4200AConfig,
     MagnetConfig,
     PMUPulseConfig,
-    PulseSequenceConfig,
     ReadConfig,
     SourceConfig,
     TemperatureControllerConfig,
@@ -98,16 +97,17 @@ SETTINGS_PATH = _DEFAULT_DATA_DIR / "sot_pulsed_switching_tui_settings.json"
 MEASUREMENT_TYPE = "SOTPS"
 
 SOT_PULSED_DESCRIPTION = (
-    "Pulsed SOT switching (Stage 4): the 4200A PMU fires a write pulse into the "
-    "main channel through RPM1, then after a fixed delay (e.g. 5 s) the 6221 "
-    "forces ±I_read through the same path while the 2182 reads V_xy across the "
-    "Hall arms — reversal-averaged, which is what cancels the thermal EMF and "
-    "the 2182's offset. Repeated n_repeats× per amplitude across an amplitude "
-    "sweep, at one static field held slightly out of plane so the two in-plane "
-    "remanent states read as different R_xy. The pulse runs the KULT module "
-    "instruments/kult/bridge_sot_pulse.c, which also routes RPM1 back to the "
-    "SMU on exit. Turn the reset pulse ON for proper probability statistics. "
-    "Re-run at the opposite field sign for the ±H_z control."
+    "SOT switching curve: the 4200A PMU fires ONE write pulse per amplitude into "
+    "the main channel through RPM1, then after a fixed delay the 6221 forces "
+    "±I_read through the same path while the 2182 reads V_xy across the Hall arms "
+    "(reversal-averaged, which cancels the thermal EMF and the 2182's offset). "
+    "One row per amplitude, at one static field held slightly out of plane so "
+    "the two in-plane remanent states read as different R_xy. Make the amplitude "
+    "list a full loop (up then down) — the sweep sets each pulse's starting "
+    "state, which is what gives the hysteresis. The pulse runs the KULT module "
+    "instruments/kult/bridge_sot_pulse.c, which routes RPM1 back to the SMU on "
+    "exit. Re-run the whole sweep for switching-probability statistics, or at "
+    "the opposite field sign for the ±H_z control."
 )
 
 # Current MEASURE ceiling with a 4225-RPM on the PMU 10 V range. Above this the
@@ -146,12 +146,7 @@ DEFAULTS: dict = {
     "auto_range": True,
     "n_reversals": "5",
     "settle_after_enable_s": "0.3",
-    # pulse sequence
-    "delay_after_pulse_s": "5.0",
-    "n_repeats": "50",
-    "reset_enabled": False,
-    "reset_amplitude_V": "-2.0",
-    "reset_delay_after_s": "0.01",
+    "delay_after_pulse_s": "1.0",
     # static field
     "magnet_current_A": "1.5",
     "field_angle_from_oop_deg": "85",
@@ -198,9 +193,6 @@ NUMERIC_FIELDS: dict = {
     "n_reversals": int,
     "settle_after_enable_s": float,
     "delay_after_pulse_s": float,
-    "n_repeats": int,
-    "reset_amplitude_V": float,
-    "reset_delay_after_s": float,
     "magnet_current_A": float,
     "field_angle_from_oop_deg": float,
     "field_settle_tolerance_mT": float,
@@ -218,12 +210,11 @@ TEXT_FIELDS = ["k4200_visa_resource", "pmu_library", "pmu_module",
                "temperature_sensor_uids", "data_dir"]
 OPTIONAL_NUMERIC_FIELDS = ["temperature_setpoint_K"]
 TEMPERATURE_FIELD_IDS = ["temperature_visa_resource", "temperature_sensor_uids"]
-RESET_FIELD_IDS = ["reset_amplitude_V", "reset_delay_after_s"]
 
 # Every Switch id on the form. Hardcoded in collect_raw / _load_settings /
 # parse_state -- they must move together, and parse_state runs on every
 # keystroke, so a stale entry here is an immediate crash.
-SWITCH_FIELD_IDS = ("auto_range", "reset_enabled", "enable_temperature")
+SWITCH_FIELD_IDS = ("auto_range", "enable_temperature")
 
 
 def parse_sensor_uids(raw: str) -> tuple:
@@ -267,7 +258,6 @@ class MeasurementPlan:
     src_cfg: SourceConfig       # 6221 — forces ±I_read through the main channel
     volt_cfg: VoltmeterConfig   # 2182 — reads V_xy across the transverse arms
     read_cfg: ReadConfig
-    seq_cfg: PulseSequenceConfig
     magnet_cfg: MagnetConfig
     gauss_cfg: GaussmeterConfig
     amplitudes_V: List[float]
@@ -285,7 +275,7 @@ class MeasurementPlan:
 
     @property
     def total_points(self) -> int:
-        return len(self.amplitudes_V) * self.seq_cfg.n_repeats
+        return len(self.amplitudes_V)
 
 
 def build_header_fields(plan: "MeasurementPlan", ctx: RunContext, records: list[dict], *,
@@ -428,30 +418,29 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
                         "< 1 V of headroom; a lower value limits what an open contact can put "
                         "on the shared bus.")
 
-    # sequence
-    if state["n_repeats"] < 1:
-        errors.append("Repeats per amplitude must be ≥ 1.")
-    if not state["reset_enabled"]:
-        warnings.append("Reset pulse is OFF — probability statistics (Stage 4) want it ON so "
-                        "each write starts from a known state.")
-    elif amps and state["reset_amplitude_V"] != 0 and all(
-            np.sign(a) == np.sign(state["reset_amplitude_V"]) for a in amps if a != 0):
-        warnings.append("Reset amplitude has the same sign as every write amplitude — the "
-                        "reset should be the opposite polarity.")
+    # amplitude list: warn if it is not a loop (no descending or opposite-sign
+    # leg) — a one-way ramp won't show hysteresis.
+    if amps and len(amps) > 1:
+        ascending_only = all(b >= a for a, b in zip(amps, amps[1:]))
+        one_sign = all(a >= 0 for a in amps) or all(a <= 0 for a in amps)
+        if ascending_only and one_sign:
+            warnings.append("Amplitude list is a one-way ramp — for a switching loop make it go "
+                            "up then back down (and/or through both polarities); the sweep is "
+                            "what sets each pulse's starting state.")
 
     # field
     if abs(state["magnet_current_A"]) > state["current_limit_A"]:
         errors.append(f"Static magnet current {state['magnet_current_A']:g} A exceeds the "
                       f"magnet limit ±{state['current_limit_A']:g} A.")
 
-    total = max(1, len(amps)) * max(1, state["n_repeats"])
-    per_cycle_s = (state["delay_after_pulse_s"] + state["settle_after_enable_s"]
+    n = max(1, len(amps))
+    per_point_s = (state["delay_after_pulse_s"] + state["settle_after_enable_s"]
                    + state["n_reversals"] * 2 * max(state["source_delay_s"], state["nplc"] / 50.0)
-                   + (state["reset_delay_after_s"] if state["reset_enabled"] else 0.0)
                    + 0.2)
-    info.append(f"{max(1, len(amps))} amplitudes × {state['n_repeats']} repeats = {total} cycles")
-    info.append(f"Estimated run time ≈ {format_duration(total * per_cycle_s)} "
+    info.append(f"{n} amplitudes, one pulse each")
+    info.append(f"Estimated run time ≈ {format_duration(n * per_point_s)} "
                 f"({format_si(state['delay_after_pulse_s'], 's')} post-pulse wait dominates)")
+    info.append(f"For P(V) / I50 statistics, re-run this sweep several times.")
     info.append(f"PMU module: {state['pmu_library']}/{state['pmu_module'] or '<unset>'} "
                 f"({state['pmu_id']} ch {state['pmu_channel']})")
 
@@ -511,7 +500,7 @@ def _live_plot_worker(queue: "mp.Queue") -> None:
         pass
     ax.set_xlabel("Pulse amplitude (V)")
     ax.set_ylabel("R_xy (Ω)")
-    ax.set_title("Live — R_xy vs pulse amplitude (all repeats)")
+    ax.set_title("Live — R_xy vs pulse amplitude")
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
     (pts,) = ax.plot([], [], "o", ms=4, alpha=0.5, color="#2E3192")
@@ -550,7 +539,7 @@ def _save_measurement_png(records: list[dict], png_path: Path) -> None:
             [r["hall_resistance_ohm"] for r in records], "o", ms=4, alpha=0.5, color="#2E3192")
     ax.set_xlabel("Pulse amplitude (V)")
     ax.set_ylabel("R_xy (Ω)")
-    ax.set_title("R_xy vs pulse amplitude (all repeats)")
+    ax.set_title("R_xy vs pulse amplitude")
     ax.grid(alpha=0.3)
     fig.tight_layout()
     fig.savefig(png_path, dpi=150)
@@ -614,7 +603,7 @@ class RunScreen(Screen):
 
     def on_mount(self) -> None:
         self.query_one("#results_table", DataTable).add_columns(
-            "amp", "rep", "V_pulse (V)", "I_pulse (A)", "V_xy (V)", "R_xy (Ω)", "T1 (K)")
+            "amp #", "V_pulse (V)", "I_pulse (A)", "V_xy (V)", "R_xy (Ω)", "T1 (K)")
         self._log_handler = _LogRelay(self)
         logging.getLogger().addHandler(self._log_handler)
         self._start_live_plot()
@@ -658,7 +647,6 @@ class RunScreen(Screen):
         t1 = record.get("temperature_1_K")
         table.add_row(
             str(record["amplitude_index"] + 1),
-            str(record["repeat_index"]),
             f"{record['pulse_amplitude_V']:.4g}",
             f"{i_pulse:.4e}" if i_pulse is not None else "—",
             f"{record['hall_voltage_V']:.4e}",
@@ -667,7 +655,7 @@ class RunScreen(Screen):
         )
         table.move_cursor(row=table.row_count - 1, scroll=True)
         self.query_one("#progress", ProgressBar).advance(1)
-        self._set_status(f"Cycle {len(self._records)} / {self.plan.total_points}.")
+        self._set_status(f"Amplitude {len(self._records)} / {self.plan.total_points}.")
 
     def _make_on_point(self):
         def _cb(record: dict) -> None:
@@ -706,7 +694,7 @@ class RunScreen(Screen):
     def action_abort(self) -> None:
         if self._measurement_running and not self._stop_event.is_set():
             self._stop_event.set()
-            self._set_status("Abort requested — finishing the cycle, then ramping the 6221 + magnet down …")
+            self._set_status("Abort requested — finishing this amplitude, then ramping the 6221 + magnet down …")
 
     def action_back_or_abort(self) -> None:
         if self._measurement_running:
@@ -758,7 +746,6 @@ class RunScreen(Screen):
                                temperature_setpoint_K=plan.temperature_setpoint_K,
                                key_axis=("current_A", plan.magnet_current_A), series=plan.series)
             self._ctx = ctx
-            plan.seq_cfg.output_file = str(ctx.raw_path)
             write_csv = make_incremental_writer(
                 ctx.raw_path,
                 lambda records: build_header_fields(plan, ctx, records,
@@ -766,18 +753,17 @@ class RunScreen(Screen):
 
             points = [AmplitudePoint(amplitude_V=float(v)) for v in plan.amplitudes_V]
 
-            self._set_status_threadsafe("Running pulsed switching …")
+            self._set_status_threadsafe("Running the switching sweep …")
             iter_error: Optional[BaseException] = None
             try:
                 run_measurement(
-                    k4200, plan.pmu_cfg, source, voltmeter,
-                    plan.read_cfg, plan.seq_cfg, points,
+                    k4200, plan.pmu_cfg, source, voltmeter, plan.read_cfg, points,
                     stop_event=self._stop_event, on_point=self._make_on_point(),
                     gaussmeter=gaussmeter, gauss_cfg=plan.gauss_cfg,
                     temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg,
                     magnet_current_A=plan.magnet_current_A,
                     field_angle_from_oop_deg=plan.field_angle_from_oop_deg,
-                    write_csv=write_csv)
+                    write_csv=write_csv, output_file=str(ctx.raw_path))
             except Exception as exc:
                 iter_error = exc
 
@@ -886,24 +872,21 @@ class SOTPulsedSwitchingApp(App):
                     yield card(
                         "Write pulse (4200A PMU)",
                         field("amplitudes_V", "Pulse amplitudes (V)", DEFAULTS["amplitudes_V"],
-                              kind="text", hint="Comma-separated — the swept axis (forced volts)."),
+                              kind="text",
+                              hint="Comma-separated — one pulse each. Make it a loop: up then "
+                                   "back down (and/or both polarities)."),
                         field("pulse_width_s", "Pulse width (s)", DEFAULTS["pulse_width_s"]),
                         field("pulse_rise_s", "Rise time (s)", DEFAULTS["pulse_rise_s"]),
                         field("pulse_fall_s", "Fall time (s)", DEFAULTS["pulse_fall_s"]),
                         field("pulse_period_s", "Pulse period (s)", DEFAULTS["pulse_period_s"],
                               hint="≥ delay + width + rise + fall."),
-                        field("pulse_delay_s", "Pulse delay before rise (s)",
-                              DEFAULTS["pulse_delay_s"],
-                              validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
-                        field("n_pulses", "Pulses per cycle", DEFAULTS["n_pulses"], kind="integer",
-                              hint="A burst of N, meaned into one spot mean."),
                     )
                     yield card(
                         "Delayed R_xy read (6221 + 2182)",
                         field("delay_after_pulse_s", "Delay after pulse (s)",
                               DEFAULTS["delay_after_pulse_s"],
                               validators=[Number(minimum=0.0, failure_description="must be ≥ 0")],
-                              hint="Wait between pulse end and the read (e.g. 5 s)."),
+                              hint="Wait between pulse end and the read."),
                         field("sense_current_A", "6221 sense current (A)", DEFAULTS["sense_current_A"],
                               hint="Keep well below the switching current."),
                         field("n_reversals", "Reversal pairs per read", DEFAULTS["n_reversals"],
@@ -911,19 +894,6 @@ class SOTPulsedSwitchingApp(App):
                               validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
                         field("settle_after_enable_s", "6221 settle after enable (s)",
                               DEFAULTS["settle_after_enable_s"],
-                              validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
-                    )
-                    yield card(
-                        "Cycle / statistics",
-                        field("n_repeats", "Repeats per amplitude", DEFAULTS["n_repeats"],
-                              kind="integer",
-                              validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
-                        switch_field("reset_enabled", "Reset pulse before each write",
-                                     DEFAULTS["reset_enabled"]),
-                        field("reset_amplitude_V", "Reset amplitude (V, opposite polarity)",
-                              DEFAULTS["reset_amplitude_V"]),
-                        field("reset_delay_after_s", "Settle after reset pulse (s)",
-                              DEFAULTS["reset_delay_after_s"],
                               validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
                     )
                     yield card(
@@ -971,6 +941,15 @@ class SOTPulsedSwitchingApp(App):
                                   hint="With an RPM on the 10 V range the ceiling is 0.01 A."),
                             field("pmu_v_limit_V", "Pulse amplitude software limit (V)",
                                   DEFAULTS["pmu_v_limit_V"]),
+                            field("pulse_delay_s", "Pulse delay before rise (s)",
+                                  DEFAULTS["pulse_delay_s"],
+                                  validators=[Number(minimum=0.0, failure_description="must be ≥ 0")],
+                                  hint="Dead time before the rise. Normally 0."),
+                            field("n_pulses", "Pulses per point (burst-average)",
+                                  DEFAULTS["n_pulses"], kind="integer",
+                                  hint="PMU averages N identical pulses for the measured V/I "
+                                       "readback only. Leave at 1 for switching — N means N "
+                                       "switching attempts per amplitude."),
                             field("pmu_sample_rate", "PMU sample rate (S/s)",
                                   DEFAULTS["pmu_sample_rate"]),
                             field("pmu_meas_start_perc", "Spot-mean window start (0-1)",
@@ -1039,7 +1018,6 @@ class SOTPulsedSwitchingApp(App):
         logging.getLogger().handlers.clear()
         self._load_settings()
         self._set_temperature_fields_enabled(self.query_one("#enable_temperature", Switch).value)
-        self._set_reset_fields_enabled(self.query_one("#reset_enabled", Switch).value)
         self.refresh_summary()
 
     # sample picker
@@ -1163,16 +1141,10 @@ class SOTPulsedSwitchingApp(App):
     def on_switch_changed(self, event: Switch.Changed) -> None:
         if event.switch.id == "enable_temperature":
             self._set_temperature_fields_enabled(event.value)
-        elif event.switch.id == "reset_enabled":
-            self._set_reset_fields_enabled(event.value)
         self.refresh_summary()
 
     def _set_temperature_fields_enabled(self, enabled: bool) -> None:
         for fid in TEMPERATURE_FIELD_IDS:
-            self.query_one(f"#{fid}", Input).disabled = not enabled
-
-    def _set_reset_fields_enabled(self, enabled: bool) -> None:
-        for fid in RESET_FIELD_IDS:
             self.query_one(f"#{fid}", Input).disabled = not enabled
 
     def refresh_summary(self) -> None:
@@ -1241,11 +1213,7 @@ class SOTPulsedSwitchingApp(App):
             source_delay_s=state["source_delay_s"], nplc=state["nplc"],
             auto_range=state["auto_range"], n_reversals=state["n_reversals"],
             settle_after_enable_s=state["settle_after_enable_s"],
-        )
-        seq_cfg = PulseSequenceConfig(
-            delay_after_pulse_s=state["delay_after_pulse_s"], n_repeats=state["n_repeats"],
-            reset_enabled=state["reset_enabled"], reset_amplitude_V=state["reset_amplitude_V"],
-            reset_delay_after_s=state["reset_delay_after_s"], output_file="",
+            delay_after_pulse_s=state["delay_after_pulse_s"],
         )
         src_cfg = SourceConfig(
             visa_resource=state["source_visa_resource"], sense_current_A=state["sense_current_A"],
@@ -1285,9 +1253,6 @@ class SOTPulsedSwitchingApp(App):
             "pmu_dut_res_ohm": state["pmu_dut_res_ohm"],
             "n_pulses": state["n_pulses"],
             "delay_after_pulse_s": state["delay_after_pulse_s"],
-            "n_repeats": state["n_repeats"],
-            "reset_enabled": state["reset_enabled"],
-            "reset_amplitude_V": state["reset_amplitude_V"] if state["reset_enabled"] else "",
             "sense_current_A": state["sense_current_A"],
             "n_reversals": state["n_reversals"],
             "field_angle_from_oop_deg": state["field_angle_from_oop_deg"],
@@ -1295,7 +1260,7 @@ class SOTPulsedSwitchingApp(App):
         }
         return MeasurementPlan(
             k4200_cfg=k4200_cfg, pmu_cfg=pmu_cfg, src_cfg=src_cfg, volt_cfg=volt_cfg,
-            read_cfg=read_cfg, seq_cfg=seq_cfg, magnet_cfg=magnet_cfg, gauss_cfg=gauss_cfg,
+            read_cfg=read_cfg, magnet_cfg=magnet_cfg, gauss_cfg=gauss_cfg,
             amplitudes_V=state["amplitude_list"], magnet_current_A=state["magnet_current_A"],
             field_angle_from_oop_deg=state["field_angle_from_oop_deg"],
             field_settle_tolerance_mT=state["field_settle_tolerance_mT"],
