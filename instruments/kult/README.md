@@ -87,17 +87,16 @@ mode over LPT; if you want it to, `pulse_remote_sense()` is the call — confirm
 local-sense constant in your `keithley.h` first.
 
 
-## 6221 front-panel checks (shared-bus wiring)
+## 6221 on the shared-bus wiring
 
 The 6221 output sits on the same I+/I- pads as the PMU pulse. `sot_pulsed_switching.py`
-opens the 6221 output before every pulse, so the 6221 only sees the pulse across open
-terminals — but two 6221 settings the code cannot read back must be right for that to
-hold:
+puts the 6221 in standby (`OUTPUT OFF`) before every pulse, so it only sees the pulse
+across a non-sourcing high-Z output stage rated to its ±105 V compliance — nothing to
+configure (the 6221 has no 2400-style output-off-state selector).
 
-* **Output-off state = NORMAL** (factory default — the output relay physically opens).
-  `ZERO` keeps the relay closed and the 6221 output stage absorbs every pulse transient.
-* **OUTPUT LOW = floating** (not earthed). The common bus already ties I- to the 4200A
-  common; a second internal earth is a ground loop through that bus.
+* **OUTPUT LOW = float** (`OUTPut:LTEarth OFF`; front panel CONFIG→OUTPUT). The common
+  bus already ties I- / 6221-LO to the 4200A common; `:LTEarth ON` adds a second internal
+  earth = a ground loop. Triax inner shield `OUTPut:ISHield` = OLOW (default) is fine.
 
 The program refuses a read `sense_current_A` > 10 mA or `compliance_V` > 21 V (mistyped
 exponent guard) and the TUI warns well below those.

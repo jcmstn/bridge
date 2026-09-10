@@ -87,12 +87,16 @@ the read time. See docs/current-reversal.md.
 
 Instrument protection (the 6221 shares the main-channel pins with the PMU)
 ------------------------------------------------------------------------
-What makes the shared-bus wiring safe is that the 6221 output relay is OPEN
-during every pulse — ``_six221_output_off()`` runs before every ``pulse_once``
-(and on abort). With the output disabled the 6221 only sees the pulse voltage
-across open terminals (<= ``v_limit_V``, 5 V by default; hardware <= 10 V on
-the default range), far inside its +/-105 V output isolation. The OFF/ON
-ordering is load-bearing and is covered by ``tests/test_sot_run_loops.py``.
+What makes the shared-bus wiring safe is that the 6221 output is in STANDBY
+during every pulse — ``_six221_output_off()`` (``OUTPUT OFF``) runs before
+every ``pulse_once`` (and on abort). In standby the 6221 is not sourcing and
+presents a high output impedance; the pulse voltage sits across its output
+stage, which withstands up to the 6221's full ±105 V compliance between HI and
+LO — far above the pulse (<= ``v_limit_V``, 5 V by default; hardware <= 10 V
+on the default range). The 6221 has NO configurable "output-off state" (that
+is a 2400-SourceMeter feature) — nothing to set; ``OUTPUT OFF`` is the whole
+mechanism. The OFF/ON ordering is load-bearing and is covered by
+``tests/test_sot_run_loops.py``.
 
 Guards against a fat-fingered read setting (they would put a large DC current
 or voltage on the shared bus, hence on the 2182 and the disabled PMU/6221):
@@ -128,25 +132,21 @@ It exists for higher switching currents; be deliberate about it:
     has recovered. Keep the 2182 leads short, twisted, and routed away from
     the PMU/RPM triax and the I+/I- pulse leads; the ≥100 ns rise/fall floor
     the 40 V range enforces already cuts the edge spikes.
-  * 6221: its output relay is OPEN during every pulse, so it only sees the
-    pulse voltage across the open contacts — 40 V vs its ~±105 V output
-    isolation. The dV/dt spike through the open relay's few-pF parasitic is
-    ~4x the 10 V case but brief (~10 mA, ~10 ns) into a protection network
-    built for hot-circuit connection. Confirm the output-off state is NORMAL
-    (a ZERO setting keeps the relay closed and puts that transient into the
-    connected output amp).
+  * 6221: in standby it only sees the pulse across its (non-sourcing, high-Z)
+    output stage — 40 V vs its ±105 V compliance rating. Fast dV/dt couples a
+    brief spike (~ns, ~mA) into the output protection, ~4x the 10 V case but
+    still small; the 6221 is built for hot-circuit connection. No setting to
+    check — ``OUTPUT OFF`` is all there is.
 
-The instrument risk (6221 / 2182) at 40 V is small with output-off = NORMAL,
-slow edges, and 2182 leads dressed away from the pulse path. The DUT risk is
-inherent and must be managed by ``v_limit_V`` and the measured pulse current.
+The instrument risk (6221 / 2182) at 40 V is small with slow edges and the
+2182 leads dressed away from the pulse path. The DUT risk is inherent and must
+be managed by ``v_limit_V`` and the measured pulse current.
 
-Two 6221 front-panel settings this code cannot read back — check them once:
-  * Output-off state = NORMAL (factory default: the relay opens). If it is
-    set to ZERO the relay stays closed and the 6221 output stage eats every
-    pulse transient. The "safe" claim above depends on this.
-  * Low-terminal earth (OUTPUT LOW) = floating. The external common bus
-    already references I- to the 4200A common; a second internal earth is a
-    ground loop through that bus.
+One 6221 setting this code does not touch — confirm it once for this rig:
+  * OUTPUT LOW = float (``OUTPut:LTEarth OFF``; front panel CONFIG→OUTPUT).
+    The external common bus already ties I- / 6221-LO to the 4200A common;
+    ``:LTEarth ON`` adds a second internal earth = a ground loop through that
+    bus. (Triax inner shield ``OUTPut:ISHield`` = OLOW, the default, is fine.)
 
 During ``delay_after_pulse_s`` the 6221 is OFF, so the main channel is
 open-circuit for that wait and charge on the Hall arms has no bleed path. If

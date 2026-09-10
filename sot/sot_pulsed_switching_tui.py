@@ -376,11 +376,10 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
                         "the pulse current stays safe, and watch pulse_current_measured_A. "
                         "(2) The 4225-RPM is a 10 V device: a 40 V pulse through it may error "
                         "or bypass the RPM — fire one pulse and confirm EX returns 0. "
-                        "(3) The 2182 and the disabled 6221 tolerate the ~10-20 V pulse "
-                        "transient on the shared bus (2182 CH1 limit 120 V, 6221 output "
-                        "isolation ~±105 V) — keep the 2182 leads short and away from the "
-                        "pulse path, and confirm the 6221 output-off state is NORMAL. See the "
-                        "module docstring's 'Instrument protection' section.")
+                        "(3) The 2182 and the standby 6221 tolerate the ~10-20 V pulse "
+                        "transient on the shared bus (2182 CH1 limit 120 V, 6221 ±105 V "
+                        "compliance rating) — keep the 2182 leads short and away from the "
+                        "pulse path. See the module docstring's 'The 40 V range' section.")
     if state["pulse_width_s"] <= 0:
         errors.append("Pulse width must be > 0 s.")
     if (state["pulse_period_s"] < state["pulse_delay_s"] + state["pulse_width_s"]
