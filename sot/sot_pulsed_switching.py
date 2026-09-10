@@ -291,6 +291,29 @@ def _pulse_resistance(pinfo: dict) -> Optional[float]:
     return v / i
 
 
+# The KULT module returns 0 on success, a negative LPT code on a bad pulse
+# (e.g. -826 = no flat top, -824 = timing too short), or KXCI itself replies
+# with an "EX ERROR: ..." string. Any of those means the pulse did not fire —
+# so does an empty reply.
+_MAX_CONSECUTIVE_PULSE_FAILURES = 3
+
+
+def _pulse_failure_reason(module_return) -> Optional[str]:
+    """None if the ``EX`` reply looks like a clean success, else a short reason.
+    A non-numeric reply that is not an obvious error is let through (some KXCI
+    builds echo status text) rather than aborting a run that is really working."""
+    if module_return is None:
+        return "no reply from EX"
+    s = str(module_return).strip()
+    if "ERROR" in s.upper():
+        return s
+    try:
+        code = float(s)
+    except ValueError:
+        return None
+    return None if code == 0 else f"module returned {s}"
+
+
 def _six221_output_off(source: Keithley6221) -> None:
     """Zero and disable the 6221 output — the state it must be in whenever the
     PMU pulses the shared channel pin."""
@@ -330,6 +353,11 @@ def run_measurement(
 
     ``stop_event`` is checked before each cycle, inside the post-pulse wait,
     and mid-reversal. ``temp_ctrl=None`` never stops the run.
+
+    Raises ``RuntimeError`` after ``_MAX_CONSECUTIVE_PULSE_FAILURES`` write
+    pulses in a row come back with a non-zero module return or an ``EX ERROR``
+    — a systematic config/hardware fault, not worth grinding the whole sweep
+    into rows of pure read noise.
     """
     _check_read_safety(read_cfg)
 
@@ -341,6 +369,7 @@ def run_measurement(
 
     records: List[dict] = []
     total = len(points) * seq_cfg.n_repeats
+    consecutive_pulse_failures = 0
 
     for a_idx, pt in enumerate(points):
         for rep in range(seq_cfg.n_repeats):
@@ -361,6 +390,20 @@ def run_measurement(
             # ── 3. write pulse (the module owns the RPM pathway) ──────────
             pinfo = pulse_once(k4200, pmu_cfg, amplitude_V=pt.amplitude_V,
                                stop_event=stop_event)
+            aborting = stop_event is not None and stop_event.is_set()
+            fail = None if aborting else _pulse_failure_reason(pinfo.get("module_return"))
+            if fail is not None:
+                consecutive_pulse_failures += 1
+                log.warning("Write pulse did not fire (amp %.4g V, %d in a row): %s",
+                            pt.amplitude_V, consecutive_pulse_failures, fail)
+                if consecutive_pulse_failures >= _MAX_CONSECUTIVE_PULSE_FAILURES:
+                    _six221_output_off(source)
+                    raise RuntimeError(
+                        f"{consecutive_pulse_failures} consecutive pulse failures "
+                        f"— last: {fail}. Aborting; check the KXCI log and the pulse "
+                        "timing / PMU config.")
+            else:
+                consecutive_pulse_failures = 0
 
             # ── 4. wait ─────────────────────────────────────────────────
             _interruptible_sleep(seq_cfg.delay_after_pulse_s, stop_event)

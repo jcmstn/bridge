@@ -294,6 +294,28 @@ def test_pulsed_stop_event_breaks_early():
     assert 0 < len(df) < 5
 
 
+def test_pulsed_aborts_after_repeated_pulse_failures():
+    """A non-zero module return (here -826) three cycles running raises instead
+    of filling the whole sweep with read-only noise."""
+    import pytest
+
+    class _FailingKXCI(_FakeKXCI):
+        def query(self, cmd):
+            self.writes.append(cmd)
+            if cmd.startswith("EX"):
+                return "-826"
+            return f"{next(self._n) * 1e-4:.6E}"
+
+    dev = _FailingKXCI()
+    pmu_cfg, read_cfg, seq_cfg = _pulsed_cfgs()
+    seq_cfg.n_repeats = 10
+    seen: list[dict] = []
+    with pytest.raises(RuntimeError, match="consecutive pulse failures"):
+        _run_pulsed(dev, pmu_cfg, read_cfg, seq_cfg,
+                    [ps.AmplitudePoint(amplitude_V=0.5)], on_point=seen.append)
+    assert len(seen) == ps._MAX_CONSECUTIVE_PULSE_FAILURES - 1   # 2 rows, 3rd cycle raises
+
+
 def test_pulsed_refuses_absurd_read_current_or_compliance():
     """The mistyped-exponent guard: run_measurement raises before touching
     hardware, so the standalone main() path is covered, not just the TUI."""
