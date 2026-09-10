@@ -371,10 +371,16 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     if state["pmu_v_range_V"] not in (10.0, 40.0):
         errors.append("PMU voltage range must be 10 or 40 V.")
     elif state["pmu_v_range_V"] == 40.0:
-        warnings.append("40 V PMU range: the RPM pulse-current ceiling rises from ~10 mA to "
-                        "~0.8 A. On this shared-bus rig that current also has to be survived by "
-                        "the disabled 6221 output and coupled onto the Hall arms — stay on 10 V "
-                        "unless you truly need > 10 V pulses.")
+        warnings.append("40 V PMU range — check these before running: (1) the DUT: the bare "
+                        "PMU can source up to 0.8 A, so keep v_limit_V / your channel R where "
+                        "the pulse current stays safe, and watch pulse_current_measured_A. "
+                        "(2) The 4225-RPM is a 10 V device: a 40 V pulse through it may error "
+                        "or bypass the RPM — fire one pulse and confirm EX returns 0. "
+                        "(3) The 2182 and the disabled 6221 tolerate the ~10-20 V pulse "
+                        "transient on the shared bus (2182 CH1 limit 120 V, 6221 output "
+                        "isolation ~±105 V) — keep the 2182 leads short and away from the "
+                        "pulse path, and confirm the 6221 output-off state is NORMAL. See the "
+                        "module docstring's 'Instrument protection' section.")
     if state["pulse_width_s"] <= 0:
         errors.append("Pulse width must be > 0 s.")
     if (state["pulse_period_s"] < state["pulse_delay_s"] + state["pulse_width_s"]

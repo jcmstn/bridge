@@ -103,8 +103,42 @@ or voltage on the shared bus, hence on the 2182 and the disabled PMU/6221):
     softly above 1 mA / 5 V.
   * The PMU pulse amplitude is clamped by ``PMUPulseConfig.v_limit_V`` in
     ``configure_pmu_pulse`` / ``pulse_once``, and on the default 10 V range
-    the RPM caps the pulse current near 10 mA in hardware. The 40 V range
-    lifts that to ~0.8 A — the TUI warns when it is selected.
+    the RPM caps the pulse current near 10 mA in hardware.
+
+The 40 V range
+--------------
+It exists for higher switching currents; be deliberate about it:
+
+  * DUT (the real risk): the bare PMU can source up to 0.8 A. That current
+    flows I+ → channel → I- → common bus, so 0.8 A (or even 100 mA) through
+    a narrow Hall channel is Joule heating / electromigration / physical
+    destruction. Set ``v_limit_V`` so amplitude / channel-R keeps the pulse
+    current where you want it, ramp the amplitude up, and watch
+    ``pulse_current_measured_A``.
+  * 4225-RPM: it is a 10 V device. The rig pulses through RPM1
+    (``KI_RPM_PULSE``); a 40 V pulse there either returns an LPT error (the
+    consecutive-failure abort catches it) or the firmware bypasses the RPM,
+    leaving you on the bare PMU 40 V current ranges (100 µA / 10 mA / 0.8 A).
+    Fire one 40 V pulse and check ``EX`` returns 0 before trusting it.
+  * 2182: the pulse puts a common-mode transient of roughly half the channel
+    drop on the Hall arms (~10-20 V for a 40 V pulse vs ~5 V at 10 V), plus
+    fast-edge spikes. The 2182 CH1 HI-LO damage limit is 120 V and its
+    common-mode limit ~±60 V, so a ~10-20 V transient is well inside both,
+    and the read is ``delay_after_pulse_s`` later so any input-amp saturation
+    has recovered. Keep the 2182 leads short, twisted, and routed away from
+    the PMU/RPM triax and the I+/I- pulse leads; the ≥100 ns rise/fall floor
+    the 40 V range enforces already cuts the edge spikes.
+  * 6221: its output relay is OPEN during every pulse, so it only sees the
+    pulse voltage across the open contacts — 40 V vs its ~±105 V output
+    isolation. The dV/dt spike through the open relay's few-pF parasitic is
+    ~4x the 10 V case but brief (~10 mA, ~10 ns) into a protection network
+    built for hot-circuit connection. Confirm the output-off state is NORMAL
+    (a ZERO setting keeps the relay closed and puts that transient into the
+    connected output amp).
+
+The instrument risk (6221 / 2182) at 40 V is small with output-off = NORMAL,
+slow edges, and 2182 leads dressed away from the pulse path. The DUT risk is
+inherent and must be managed by ``v_limit_V`` and the measured pulse current.
 
 Two 6221 front-panel settings this code cannot read back — check them once:
   * Output-off state = NORMAL (factory default: the relay opens). If it is
