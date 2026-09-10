@@ -69,7 +69,7 @@ from sot.sot_pulsed_switching import (
     shutdown_temperature_controller,
 )
 from sot.sot_pulsed_switching import _six221_output_off
-from dc.dc_sweep_utils import parse_value_list, safe_shutdown
+from dc.dc_sweep_utils import linear_sweep, safe_shutdown
 from instruments.data_dir import DataDirPickerScreen, validate_directory
 from instruments.data_naming import (
     TEST_SAMPLE,
@@ -122,7 +122,10 @@ DEFAULTS: dict = {
     "pmu_module": "bridge_sot_pulse",
     "pmu_channel": "1",
     "pmu_id": "PMU1",
-    "amplitudes_V": "0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.4, 1.6, 1.8, 2.0",
+    "amplitude_start_V": "0.2",
+    "amplitude_stop_V": "2.0",
+    "amplitude_step_V": "0.2",
+    "amplitude_bidirectional": True,
     "pulse_width_s": "1e-7",
     "pulse_rise_s": "2e-8",
     "pulse_fall_s": "2e-8",
@@ -173,6 +176,9 @@ DEFAULTS: dict = {
 
 NUMERIC_FIELDS: dict = {
     "pmu_channel": int,
+    "amplitude_start_V": float,
+    "amplitude_stop_V": float,
+    "amplitude_step_V": float,
     "pulse_width_s": float,
     "pulse_rise_s": float,
     "pulse_fall_s": float,
@@ -204,7 +210,7 @@ NUMERIC_FIELDS: dict = {
     "gaussmeter_read_delay_s": float,
 }
 TEXT_FIELDS = ["k4200_visa_resource", "pmu_library", "pmu_module",
-               "pmu_id", "amplitudes_V", "pmu_return_names", "device", "cooldown",
+               "pmu_id", "pmu_return_names", "device", "cooldown",
                "source_visa_resource", "voltmeter_visa_resource", "magnet_visa_resource",
                "gaussmeter_visa_resource", "temperature_visa_resource",
                "temperature_sensor_uids", "data_dir"]
@@ -214,7 +220,7 @@ TEMPERATURE_FIELD_IDS = ["temperature_visa_resource", "temperature_sensor_uids"]
 # Every Switch id on the form. Hardcoded in collect_raw / _load_settings /
 # parse_state -- they must move together, and parse_state runs on every
 # keystroke, so a stale entry here is an immediate crash.
-SWITCH_FIELD_IDS = ("auto_range", "enable_temperature")
+SWITCH_FIELD_IDS = ("auto_range", "enable_temperature", "amplitude_bidirectional")
 
 
 def parse_sensor_uids(raw: str) -> tuple:
@@ -224,6 +230,20 @@ def parse_sensor_uids(raw: str) -> tuple:
 
 def parse_return_names(raw: str) -> tuple:
     return tuple(n.strip() for n in raw.split(",") if n.strip())
+
+
+def _resolve_amplitudes(state: dict) -> tuple[list[float], Optional[str]]:
+    """(list, None) or ([], error) — the amplitude sweep from start/stop/step
+    (+ the bidirectional toggle). Shared by parse_state and the tests."""
+    try:
+        if state["amplitude_start_V"] == state["amplitude_stop_V"]:
+            raise ValueError("Amplitude start and stop must differ.")
+        return [float(v) for v in linear_sweep(
+            state["amplitude_start_V"], state["amplitude_stop_V"],
+            state["amplitude_step_V"],
+            bidirectional=state["amplitude_bidirectional"])], None
+    except ValueError as exc:
+        return [], str(exc)
 
 
 # ── formatting helpers (per-TUI copies) ─────────────────────────────────────
@@ -389,8 +409,14 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         if over_range:
             errors.append(f"Pulse amplitude(s) {over_range} V exceed the "
                           f"{state['pmu_v_range_V']:g} V PMU range.")
-        info.append(f"Amplitude sweep: {len(amps)} values "
-                    f"{format_si(min(amps), 'V')}…{format_si(max(amps), 'V')}" if amps else "")
+        loop = " loop" if state["amplitude_bidirectional"] else ""
+        info.append(f"Amplitude sweep: {len(amps)} pulses "
+                    f"{state['amplitude_start_V']:g} → {state['amplitude_stop_V']:g} V "
+                    f"step {state['amplitude_step_V']:g}{loop}" if amps else "")
+        if not state["amplitude_bidirectional"]:
+            warnings.append("One-way sweep — turn on 'Sweep up then back down' for a "
+                            "hysteresis loop; the sweep is what sets each pulse's starting "
+                            "state.")
 
     # read (6221 + 2182) — the 6221 shares the main-channel pins with the PMU,
     # so a fat-fingered current/compliance lands on the 2182 and the disabled
@@ -417,16 +443,6 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         warnings.append(f"6221 compliance {state['compliance_V']:g} V — the Hall read needs "
                         "< 1 V of headroom; a lower value limits what an open contact can put "
                         "on the shared bus.")
-
-    # amplitude list: warn if it is not a loop (no descending or opposite-sign
-    # leg) — a one-way ramp won't show hysteresis.
-    if amps and len(amps) > 1:
-        ascending_only = all(b >= a for a, b in zip(amps, amps[1:]))
-        one_sign = all(a >= 0 for a in amps) or all(a <= 0 for a in amps)
-        if ascending_only and one_sign:
-            warnings.append("Amplitude list is a one-way ramp — for a switching loop make it go "
-                            "up then back down (and/or through both polarities); the sweep is "
-                            "what sets each pulse's starting state.")
 
     # field
     if abs(state["magnet_current_A"]) > state["current_limit_A"]:
@@ -871,10 +887,17 @@ class SOTPulsedSwitchingApp(App):
                 with Vertical(classes="param-grid"):
                     yield card(
                         "Write pulse (4200A PMU)",
-                        field("amplitudes_V", "Pulse amplitudes (V)", DEFAULTS["amplitudes_V"],
-                              kind="text",
-                              hint="Comma-separated — one pulse each. Make it a loop: up then "
-                                   "back down (and/or both polarities)."),
+                        field("amplitude_start_V", "Amplitude start (V)",
+                              DEFAULTS["amplitude_start_V"]),
+                        field("amplitude_stop_V", "Amplitude stop (V)",
+                              DEFAULTS["amplitude_stop_V"]),
+                        field("amplitude_step_V", "Amplitude step (V)",
+                              DEFAULTS["amplitude_step_V"],
+                              validators=[Number(minimum=1e-12, failure_description="must be > 0")],
+                              hint="One pulse per step."),
+                        switch_field("amplitude_bidirectional",
+                                     "Sweep up then back down (hysteresis loop)",
+                                     DEFAULTS["amplitude_bidirectional"]),
                         field("pulse_width_s", "Pulse width (s)", DEFAULTS["pulse_width_s"]),
                         field("pulse_rise_s", "Rise time (s)", DEFAULTS["pulse_rise_s"]),
                         field("pulse_fall_s", "Fall time (s)", DEFAULTS["pulse_fall_s"]),
@@ -1125,12 +1148,7 @@ class SOTPulsedSwitchingApp(App):
         sample_value = self.query_one("#sample_select", Select).value
         state["sample"] = sample_value if sample_value not in (None, Select.BLANK) else ""
 
-        state["amplitude_list"] = []
-        state["amplitude_parse_error"] = None
-        try:
-            state["amplitude_list"] = parse_value_list(state["amplitudes_V"])
-        except ValueError as exc:
-            state["amplitude_parse_error"] = str(exc)
+        state["amplitude_list"], state["amplitude_parse_error"] = _resolve_amplitudes(state)
         return state, errors
 
     def on_input_changed(self, event: Input.Changed) -> None:
@@ -1256,6 +1274,10 @@ class SOTPulsedSwitchingApp(App):
             "sense_current_A": state["sense_current_A"],
             "n_reversals": state["n_reversals"],
             "field_angle_from_oop_deg": state["field_angle_from_oop_deg"],
+            "amplitude_start_V": state["amplitude_start_V"],
+            "amplitude_stop_V": state["amplitude_stop_V"],
+            "amplitude_step_V": state["amplitude_step_V"],
+            "amplitude_bidirectional": state["amplitude_bidirectional"],
             "amplitudes_V": state["amplitude_list"],
         }
         return MeasurementPlan(

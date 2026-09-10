@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 import sot.sot_pulsed_switching_tui as tui
 
 
@@ -15,7 +17,8 @@ def _state(**overrides) -> dict:
         k4200_visa_resource="GPIB0::17::INSTR",
         pmu_library="bridge_sot", pmu_module="bridge_sot_pulse", pmu_channel=1,
         pmu_id="PMU1",
-        amplitudes_V="0.2, 0.6, 1.0, 1.4, 1.8", pmu_return_names="",
+        amplitude_start_V=0.2, amplitude_stop_V=2.0, amplitude_step_V=0.4,
+        amplitude_bidirectional=True, pmu_return_names="",
         pulse_width_s=1e-7, pulse_rise_s=2e-8, pulse_fall_s=2e-8, pulse_period_s=1e-3,
         pulse_delay_s=0.0, n_pulses=1,
         pmu_sample_rate=2e8, pmu_meas_start_perc=0.75, pmu_meas_stop_perc=0.90,
@@ -34,8 +37,7 @@ def _state(**overrides) -> dict:
         sample="A", data_dir="",
     )
     base.update(overrides)
-    base["amplitude_list"] = [float(v) for v in str(base["amplitudes_V"]).split(",")]
-    base["amplitude_parse_error"] = None
+    base["amplitude_list"], base["amplitude_parse_error"] = tui._resolve_amplitudes(base)
     return base
 
 
@@ -45,8 +47,13 @@ def test_summary_blocks_on_empty_pmu_module():
 
 
 def test_summary_blocks_amplitude_over_v_limit():
-    _, _, errors = tui.build_summary(_state(amplitudes_V="0.5, 8.0", pmu_v_limit_V=5.0))
+    _, _, errors = tui.build_summary(_state(amplitude_stop_V=8.0, pmu_v_limit_V=5.0))
     assert any("PMU voltage limit" in e for e in errors)
+
+
+def test_summary_blocks_zero_step():
+    _, _, errors = tui.build_summary(_state(amplitude_step_V=0.0))
+    assert any("Pulse amplitudes:" in e for e in errors)
 
 
 def test_summary_blocks_bad_pulse_timing():
@@ -61,14 +68,22 @@ def test_summary_blocks_no_pulse_top():
     assert any("No flat pulse top" in e for e in errors)
 
 
-def test_summary_warns_one_way_ramp():
-    _, warnings, _ = tui.build_summary(_state(amplitudes_V="0.2, 0.6, 1.0, 1.4, 1.8"))
-    assert any("one-way ramp" in w for w in warnings)
+def test_summary_warns_bidirectional_off():
+    _, warnings, _ = tui.build_summary(_state(amplitude_bidirectional=False))
+    assert any("One-way sweep" in w for w in warnings)
 
 
-def test_summary_no_ramp_warning_for_a_loop():
-    _, warnings, _ = tui.build_summary(_state(amplitudes_V="0.2, 0.6, 1.0, 0.6, 0.2"))
-    assert not any("one-way ramp" in w for w in warnings)
+def test_summary_no_warning_when_bidirectional():
+    _, warnings, _ = tui.build_summary(_state(amplitude_bidirectional=True))
+    assert not any("One-way sweep" in w for w in warnings)
+
+
+def test_resolve_amplitudes_bidirectional_loop():
+    amps, err = tui._resolve_amplitudes(_state(
+        amplitude_start_V=0.0, amplitude_stop_V=1.0, amplitude_step_V=0.5,
+        amplitude_bidirectional=True))
+    assert err is None
+    assert amps == [0.0, 0.5, 1.0, 0.5, 0.0]
 
 
 def test_summary_blocks_magnet_current_over_limit():
@@ -116,8 +131,8 @@ def test_summary_warns_40v_pmu_range():
 
 def test_summary_warns_pulse_current_over_rpm_measure_ceiling():
     # 2 V across 100 Ω = 20 mA, past the RPM's 10 mA measure range
-    _, warnings, _ = tui.build_summary(_state(amplitudes_V="0.5, 2.0",
-                                              pmu_dut_res_ohm=100.0,
+    _, warnings, _ = tui.build_summary(_state(amplitude_start_V=0.5, amplitude_stop_V=2.0,
+                                              amplitude_step_V=1.5, pmu_dut_res_ohm=100.0,
                                               pmu_v_range_V=10.0, pmu_i_range_A=0.01))
     assert any("measure ceiling" in w for w in warnings)
 
@@ -133,9 +148,10 @@ def test_summary_blocks_edge_below_range_minimum():
 def test_build_plan_shapes(tmp_path: Path):
     app = tui.SOTPulsedSwitchingApp()
     app.data_root = tmp_path
-    plan = app._build_plan(_state(amplitudes_V="0.2, 0.6, 1.0"))
+    plan = app._build_plan(_state(amplitude_start_V=0.2, amplitude_stop_V=1.0,
+                                  amplitude_step_V=0.4, amplitude_bidirectional=False))
 
-    assert plan.amplitudes_V == [0.2, 0.6, 1.0]
+    assert plan.amplitudes_V == pytest.approx([0.2, 0.6, 1.0])
     assert plan.total_points == 3                         # one pulse per amplitude
     assert plan.series == ""                              # single file
     assert plan.pmu_cfg.module == "bridge_sot_pulse"
