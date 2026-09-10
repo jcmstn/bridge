@@ -488,7 +488,9 @@ def main() -> None:
         # magnet — never ramp an inductive field while the DUT still carries current.
         safe_shutdown("6221 (ramp)", lambda: ramp_current_to_zero(source))
         safe_shutdown("6221", lambda: shutdown_source(source))
-        safe_shutdown("4200A", lambda: shutdown_4200a(k4200))
+        # channels=() — this program never forces the 4200A SMUs, so there is
+        # nothing to zero; the KULT module already left the PMU/RPM clean.
+        safe_shutdown("4200A", lambda: shutdown_4200a(k4200, channels=()))
         safe_shutdown("magnet", lambda: shutdown_magnet(magnet, magnet_cfg))
         safe_shutdown("gaussmeter", lambda: shutdown_gaussmeter(gaussmeter))
         safe_shutdown("temperature controller", lambda: shutdown_temperature_controller(temp_ctrl))

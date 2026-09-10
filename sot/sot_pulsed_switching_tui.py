@@ -795,7 +795,8 @@ class RunScreen(Screen):
                 safe_shutdown("6221 (ramp)", lambda: ramp_current_to_zero(source))
                 safe_shutdown("6221", lambda: shutdown_source(source))
             if k4200 is not None:
-                safe_shutdown("4200A", lambda: shutdown_4200a(k4200))
+                # channels=() — this program never forces the 4200A SMUs.
+                safe_shutdown("4200A", lambda: shutdown_4200a(k4200, channels=()))
             if magnet is not None:
                 safe_shutdown("magnet", lambda: shutdown_magnet(magnet, plan.magnet_cfg))
             if gaussmeter is not None:
