@@ -55,7 +55,10 @@ Derived from Keithley's `PMU_1Chan_Sweep_Example`, with four deliberate differen
 3. **The RPM pathway is routed back to the SMU on every exit path**, including every
    error. This is the important one — see below.
 4. **Self-contained includes.** Only `keithley.h`, so the module drops into a brand new
-   user library without needing `PMU_examples_ulib_internal.h` on the include path.
+   user library without needing `PMU_examples_ulib_internal.h` on the include path. That
+   means no `Sleep()` / `printf()` (those need `<windows.h>` / `<stdio.h>` which the
+   vendor examples pull in through that internal header) — the poll loop uses LPT
+   `delay()` and the error paths just return a status code.
 
 Why the route-back matters
 --------------------------
@@ -174,7 +177,6 @@ int bridge_sot_pulse( double PulseWidth, double RiseTime, double FallTime, doubl
     int InstId = 0;
     int rpm_routed = 0;
     double elapsedt;
-    int verbose = 0;
 
     /* pulse_fetch returns two records for one amplitude with both levels
        acquired: [0] = pulse top, [1] = pulse base. */
@@ -188,16 +190,11 @@ int bridge_sot_pulse( double PulseWidth, double RiseTime, double FallTime, doubl
     *I_Base = 0.0;
 
     if ( !LPTIsInCurrentConfiguration(PMU_ID) )
-    {
-        printf("bridge_sot_pulse: instrument %s is not in the system configuration", PMU_ID);
         return -BRIDGE_ERR_WRONGCARDID;
-    }
 
     getinstid(PMU_ID, &InstId);
     if ( -1 == InstId )
         return BRIDGE_ERR_CARDHANDLEFAIL;
-
-//    verbose = 1;      //Enable printf messages to msgcon for troubleshooting
 
     /* Route the 4225-RPM (if fitted) onto the pulse pathway. From here on EVERY
        exit goes through cleanup:, which routes it back to the SMU -- the DC R_xy
@@ -263,17 +260,17 @@ int bridge_sot_pulse( double PulseWidth, double RiseTime, double FallTime, doubl
     if ( status )
         goto cleanup;
 
-    if ( verbose )
-        printf("bridge_sot_pulse: chan=%d ampl=%g V base=%g V width=%g s", Chan, AmplitudeV, BaseV, PulseWidth);
-
     /* Simple mode: fixed current ranges, no LLE comp, no IVP thresholds -- the
        shortest test time, which matters when this runs once per write/read cycle. */
     status = pulse_exec(PULSE_MODE_SIMPLE);
     if ( status )
         goto cleanup;
 
+    /* delay() is the LPT-native millisecond sleep (keithley.h) -- the vendor
+       examples use Win32 Sleep(), which needs <windows.h> via their internal
+       header; this module stays keithley.h-only. */
     while ( pulse_exec_status(&elapsedt) == 1 )
-        Sleep(1);
+        delay(1);
 
     status = pulse_fetch(InstId, Chan, 0, 1, Vbuf, Ibuf, Tbuf, Sbuf);
     if ( status )
