@@ -519,7 +519,9 @@ def _live_plot_worker(queue: "mp.Queue") -> None:
     ax.set_title("Live — R_xy vs pulse amplitude")
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
-    (pts,) = ax.plot([], [], "o", ms=4, alpha=0.5, color="#2E3192")
+    # line + markers, in acquisition order → the connecting line shows the
+    # sweep direction (up-leg then down-leg for a bidirectional list).
+    (pts,) = ax.plot([], [], "o-", ms=4, lw=1, alpha=0.6, color="#2E3192")
     xs: list = []
     ys: list = []
 
@@ -551,8 +553,10 @@ def _save_measurement_png(records: list[dict], png_path: Path) -> None:
     import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots(figsize=(7, 5))
+    # records are in acquisition order → the line traces the sweep direction.
     ax.plot([r["pulse_amplitude_V"] for r in records],
-            [r["hall_resistance_ohm"] for r in records], "o", ms=4, alpha=0.5, color="#2E3192")
+            [r["hall_resistance_ohm"] for r in records],
+            "o-", ms=4, lw=1, alpha=0.6, color="#2E3192")
     ax.set_xlabel("Pulse amplitude (V)")
     ax.set_ylabel("R_xy (Ω)")
     ax.set_title("R_xy vs pulse amplitude")
