@@ -379,6 +379,12 @@ def acquire_reversal_averaged(
 # returns the module's return value; ``GN`` then fetches each output parameter
 # in order.
 #
+# KXCI's ``EX`` wants a value for EVERY module parameter positionally, output
+# parameters included — they are passed as a placeholder ``0`` and their real
+# values come back through ``GN``. So the call sends
+# ``len(arg_order) + n_output_params`` args (16 + 4 for bridge_sot_pulse); a
+# short count is the ``EX ERROR: invalid number of UTM parameters`` reply.
+#
 # The defaults below target ``instruments/kult/bridge_sot_pulse.c`` — written
 # for this measurement and tracked in this repo. Compile it on the 4200A in
 # KULT (see ``instruments/kult/README.md``) and the defaults are correct as
@@ -448,6 +454,9 @@ class PMUPulseConfig:
     return_names: tuple = (                 # output params GN fetches, in module order
         "pulse_voltage_measured_V", "pulse_current_measured_A",
         "pulse_base_voltage_V", "pulse_base_current_A")
+    n_output_params: int = 4               # module output-param count — passed as
+                                           # placeholders in the EX call (KXCI wants
+                                           # every param); ≥ len(return_names)
 
 
 def _fmt_arg(value) -> str:
@@ -517,7 +526,11 @@ def configure_pmu_pulse(dev: _Keithley4200A_KXCI, cfg: PMUPulseConfig) -> None:
     missing = [n for n in cfg.arg_order if not hasattr(cfg, n)]
     if missing:
         raise ValueError(f"arg_order names not on PMUPulseConfig: {missing}")
-    template = ", ".join(f"<{n}>" for n in cfg.arg_order)
+    if cfg.n_output_params < len(cfg.return_names):
+        raise ValueError(f"n_output_params ({cfg.n_output_params}) < return_names "
+                         f"({len(cfg.return_names)}) — can't GN-fetch more outputs "
+                         "than the module has")
+    template = ", ".join([f"<{n}>" for n in cfg.arg_order] + ["0"] * cfg.n_output_params)
     log.info("4200A PMU pulse via KULT: EX %s %s(%s)  [%s ch %d, %.4g V, %.3g s wide, "
              "%.4g V range, %.4g A measure range]",
              cfg.library, cfg.module or "<unset>", template, cfg.pmu_id,
@@ -545,8 +558,11 @@ def pulse_once(
     if stop_event is not None and stop_event.is_set():
         return {"module_return": None}
 
-    args = ", ".join(_fmt_arg(amp if name == "amplitude_V" else getattr(cfg, name))
-                     for name in cfg.arg_order)
+    in_args = [_fmt_arg(amp if name == "amplitude_V" else getattr(cfg, name))
+               for name in cfg.arg_order]
+    # KXCI EX wants a value for every module parameter — output params too.
+    # They ride as placeholder 0 here and come back via GN below.
+    args = ", ".join(in_args + ["0"] * cfg.n_output_params)
     cmd = f"EX {cfg.library} {cfg.module}({args})"
 
     prev_timeout = None

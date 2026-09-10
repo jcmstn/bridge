@@ -68,7 +68,10 @@ rather than erroring. If you edit the module's parameter list, edit `arg_order` 
 same commit.
 
 Likewise `PMUPulseConfig.return_names` lists the output parameters in module order, since
-they are fetched one at a time with `GN`.
+they are fetched one at a time with `GN`. KXCI's `EX` also wants a value for every output
+parameter in the call itself (as a placeholder `0`), so `PMUPulseConfig.n_output_params`
+must equal the module's output count — a short `EX` call comes back
+`EX ERROR: invalid number of UTM parameters`.
 
 If `PMU_ID` comes back rejected, it is the string quoting: `_fmt_arg` passes `str` values
 through verbatim, so set `pmu_id` to `"PMU1"` or `'"PMU1"'` depending on what your KXCI

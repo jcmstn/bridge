@@ -164,7 +164,8 @@ def test_configure_pmu_pulse_rejects_amplitude_over_limit():
 def test_pulse_once_builds_ex_command_and_substitutes_amplitude():
     """Pins the default arg_order against instruments/kult/bridge_sot_pulse.c's
     signature — KXCI passes arguments positionally, so a drift between the two
-    pulses with the wrong numbers instead of erroring."""
+    pulses with the wrong numbers instead of erroring. The 4 trailing 0s are
+    placeholders for the module's output params (KXCI EX wants every param)."""
     dev = _FakeKXCI(["OK"])
     cfg = PMUPulseConfig(return_names=())
     out = k4200.pulse_once(dev, cfg, amplitude_V=1.2)
@@ -172,7 +173,8 @@ def test_pulse_once_builds_ex_command_and_substitutes_amplitude():
         "EX bridge_sot bridge_sot_pulse("
         "1.000000E-07, 2.000000E-08, 2.000000E-08, 1.000000E-03, 0.000000E+00, "
         "2.000000E+08, 7.500000E-01, 9.000000E-01, 1, 1.000000E+03, "
-        "1.000000E+01, 1.000000E-02, 1.200000E+00, 0.000000E+00, 1, PMU1)"
+        "1.000000E+01, 1.000000E-02, 1.200000E+00, 0.000000E+00, 1, PMU1, "
+        "0, 0, 0, 0)"
     ]
     assert out == {"module_return": "OK"}
 
@@ -237,17 +239,22 @@ def _kult_signature():
 
 
 def test_arg_order_matches_the_kult_module_signature():
-    c_inputs, _ = _kult_signature()
+    c_inputs, c_outputs = _kult_signature()
     cfg = PMUPulseConfig()
     assert len(cfg.arg_order) == len(c_inputs), (
         f"arg_order has {len(cfg.arg_order)} names but bridge_sot_pulse.c takes "
         f"{len(c_inputs)} inputs")
+    assert cfg.n_output_params == len(c_outputs), (
+        f"n_output_params is {cfg.n_output_params} but bridge_sot_pulse.c has "
+        f"{len(c_outputs)} output params — the EX call would be the wrong length")
     # Names differ by convention (C: PulseWidth, Python: width_s), so pin the
-    # ORDER via the values pulse_once actually sends.
+    # ORDER via the values pulse_once actually sends. 16 inputs then 4 output
+    # placeholders = the module's 20 params.
     dev = _FakeKXCI(["OK"])
     k4200.pulse_once(dev, PMUPulseConfig(return_names=()), amplitude_V=1.2)
     sent = dev.writes[0].split("(", 1)[1].rstrip(")").split(", ")
-    assert len(sent) == len(c_inputs)
+    assert len(sent) == len(c_inputs) + cfg.n_output_params == 20
+    assert sent[len(c_inputs):] == ["0"] * len(c_outputs)
     assert sent[c_inputs.index("AmplitudeV")] == "1.200000E+00"
     assert sent[c_inputs.index("Chan")] == "1"
     assert sent[c_inputs.index("PMU_ID")] == "PMU1"
