@@ -50,21 +50,26 @@ SWITCHING_SCHEMATIC = """\
 """
 
 PULSED_SCHEMATIC = """\
-  KEITHLEY 4200A-SCS  (KXCI — GPIB 17)
-    PMU1-1 ─┐
-            ├─▶ RPM1 ──▶ main channel of the Hall cross   (2-wire, shared)
-    SMU1   ─┘            RPM1 switches which one reaches the DUT; the KULT
-                         module instruments/kult/bridge_sot_pulse.c owns
-                         that switch and always routes back to the SMU
+  KEITHLEY 4200A-SCS  (KXCI — GPIB 17)   — pulse only, FORCE triax, 2-wire local sense
+    PMU1-1 ──▶ RPM1 ──▶ I+ pad of the Hall-cross main channel
+                        centre = force, guard = floating, outer = circuit COMMON.
+                        The KULT module bridge_sot_pulse.c routes RPM1 to the
+                        pulse pathway for the burst and back on exit — that
+                        lifts the PMU's 50 Ω out of the 6221 read path.
 
-    SMU2  ──▶ transverse (Hall) arms   (forces 0 A, reads V_xy)
-              Direct-wired, no RPM needed — an RPM is a *current* preamp
+  COMMON BUS ──▶ I- pad   (PMU FORCE outer shell + 6221 output LO land here)
+
+  KEITHLEY 6221  HI ──▶ I+ pad ,  LO ──▶ common bus   (delayed R_xy read)
+                 In parallel with the PMU — OFF while pulsing.
+  KEITHLEY 2182  ──▶ transverse (Hall) arms           (V_xy, floating diff)
+
+  The two 4200A SMUs and the preamps are unused.
 
   KEPCO BOP-GL      ──GPIB──▶ electromagnet   (ONE static tilted field)
   LAKE SHORE 475    ──GPIB──▶ Gaussmeter probe at the sample
 
-  Cycle: park SMU1 → [reset pulse] → write pulse → wait (e.g. 5 s) →
-  SMU1 forces ±I_read / SMU2 reads V_xy → park SMU1.
+  Cycle: 6221 OFF → [reset pulse] → write pulse → wait (e.g. 5 s) →
+  6221 ON, reversal-averaged R_xy (6221 forces ±I, 2182 reads V_xy) → 6221 OFF.
   Re-run at ∓field for the ±H_z control.
 """
 

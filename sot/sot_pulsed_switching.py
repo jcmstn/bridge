@@ -1,51 +1,67 @@
 #!/usr/bin/env python3
 """
-SOT pulsed switching — 4200A PMU write pulse + delayed dual-SMU R_xy readout
+SOT pulsed switching — 4200A PMU write pulse + delayed 6221/2182 R_xy readout
 ============================================================================
 Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
 Created: 2026-09-08
 
 Stage 4 of the SOT plan: probability-of-switching vs. pulse amplitude for an
-in-plane ferromagnet, read out anomalous-Hall. Everything electrical is on the
-4200A — the PMU writes, two SMUs read.
+in-plane ferromagnet, read out anomalous-Hall. The 4200A ONLY pulses; a
+6221 + 2182 pair does the delayed R_xy read.
 
 Per cycle:
-  1. park SMU1 at 0 A  (relays never switch under load)
+  1. 6221 output OFF  (never pulse into a live current source on the shared pin)
   2. optional reset pulse   (PMU, opposite polarity, fixed amplitude)
   3. write pulse            (PMU, the swept amplitude) — the KULT module routes
      RPM1 to the PMU on entry and back to the SMU on exit, so nothing else has
      to sequence the pathway
   4. wait ``delay_after_pulse_s``   (e.g. 5 s — let the state settle and any
      transient thermal gradient die away before reading)
-  5. SMU1 forces ±I_read, SMU2 reads V_xy — reversal-averaged
-  6. SMU1 back to 0 A — channel quiet until the next pulse
+  5. 6221 output ON, settle, reversal-averaged R_xy read (6221 forces ±I,
+     2182 reads V_xy across the transverse arms)
+  6. 6221 output OFF again — channel quiet until the next pulse
 
 Repeated ``n_repeats`` times per amplitude for the probability statistics
 (Stage 4 wants ~50-100; that also wants the reset pulse ON so each write starts
 from a known state).
 
-Wiring
-------
-    4200A PMU1-1 ──▶ RPM1 ─┐
-    4200A SMU1   ──▶ RPM1 ─┴──▶ main channel of the Hall cross
-      Force and sense share one wire path (2-wire). RPM1 switches which of the
-      two reaches the DUT; the KULT module owns that switch.
+Wiring  (2-wire local sense, FORCE triax only)
+---------------------------------------------
+    4200A PMU1-1 ──▶ RPM1 ──▶ I+ pad of the Hall-cross main channel
+      Only the RPM FORCE triax is wired, and the RPM channel is in LOCAL
+      (2-wire) sense — its SENSE output is capped. Triax breakout:
+        centre = force            → I+ pad
+        inner  = guard            → floating (unterminated)
+        outer  = circuit COMMON   → the common bus (below)
+      The KULT module routes RPM1 onto the pulse pathway for the burst and
+      back to the SMU pathway on exit, which lifts the PMU's 50 Ω output out
+      of the channel while the 6221 reads.
 
-    4200A SMU2   ──▶ transverse (Hall) arms   (forces 0 A, reads V_xy)
-      Direct-wired, no RPM. An RPM is a *current* preamp + pathway switch, so
-      it would do nothing for a voltage measurement — not having a second one
-      costs this measurement nothing.
+    COMMON BUS ──▶ I- pad of the Hall cross
+      The 4200A circuit common (PMU FORCE outer shell) and the 6221 output LO
+      both land here. During the read it is circuit common; during the pulse
+      it is the pulse-current return.
+
+    Keithley 6221 (current source)   HI ──▶ I+ pad ;  LO ──▶ common bus
+      In parallel with the PMU on the main channel — hence the OFF/ON dance
+      (never pulse into a live current source). Confirm the 6221 is actually
+      landed on I+ / common before the first run.
+
+    Keithley 2182 (nanovoltmeter)  Ch 1 ──▶ transverse (Hall) voltage arms
+      Floating differential input — a bare 4200A SMU could not do this read
+      (its LO is bonded to circuit common, so it only ever measures
+      arm-to-common, i.e. R_xx with a Hall ripple).
+
+    The two 4200A SMUs and the 4225 / 4200-PA preamps are unused.
 
     Kepco BOP-GL   ──GPIB──▶ electromagnet (ONE static tilted field, set once)
     Lake Shore 475 ──GPIB──▶ Gaussmeter probe at the sample
 
-Why 2-wire on the main channel is fine
---------------------------------------
-R_xy = V_xy / I. V_xy comes from a separate contact pair (SMU2), so no lead
-drop enters the numerator, and I is set and measured by SMU1. The series lead +
-contact resistance cancels out of the Hall number entirely. What 2-wire does
-cost is an *absolute* R_xx: ``channel_voltage_V`` below includes the leads, so
-treat it as a relative heating monitor, not a resistance.
+Why the readout is clean
+------------------------
+R_xy = V_xy / I. V_xy comes from the 2182 across a separate contact pair, so no
+lead drop enters the numerator; I is set and measured by the 6221. Series lead +
+contact resistance cancels out of the Hall number entirely.
 
 Reading the pulse back
 ----------------------
@@ -64,13 +80,44 @@ Current reversal
 ----------------
 The read current is small, fixed, and independent of the pulse, so ±I_read
 reversal IS available here (unlike sot_switching.py, where the current is the
-swept axis). It cancels the thermal EMF and SMU2's static offset for 2x the
-read time, and is on by default. See docs/current-reversal.md.
+swept axis). The 6221 flips polarity, the 2182 reads each side; it cancels the
+thermal EMF and the 2182's static offset for 2x the read time. See
+docs/current-reversal.md.
 
-    # ponytail: SMU2-as-voltmeter has tens-of-uV-class offset drift, which is
-    # this measurement's real noise floor. If the two states' V_xy contrast is
-    # not comfortably above it, move V_xy to the 2182 (SMU1 keeps forcing) —
-    # instruments/keithley2182.py, ~20 lines here.
+Instrument protection (the 6221 shares the main-channel pins with the PMU)
+------------------------------------------------------------------------
+What makes the shared-bus wiring safe is that the 6221 output relay is OPEN
+during every pulse — ``_six221_output_off()`` runs at the top of each cycle
+(and on abort) BEFORE any ``pulse_once``. With the output disabled the 6221
+only sees the pulse voltage across open terminals (<= ``v_limit_V``, 5 V by
+default; hardware <= 10 V on the default range), far inside its +/-105 V
+output isolation. The OFF/ON ordering is load-bearing and is covered by
+``tests/test_sot_run_loops.py``.
+
+Guards against a fat-fingered read setting (they would put a large DC current
+or voltage on the shared bus, hence on the 2182 and the disabled PMU/6221):
+
+  * ``run_measurement`` raises if ``sense_current_A`` > 10 mA or
+    ``compliance_V`` > 21 V — nothing this measurement can legitimately need,
+    so the ceiling catches ``1e-4`` typed as ``1e-1`` etc. The TUI also warns
+    softly above 1 mA / 5 V.
+  * The PMU pulse amplitude is clamped by ``PMUPulseConfig.v_limit_V`` in
+    ``configure_pmu_pulse`` / ``pulse_once``, and on the default 10 V range
+    the RPM caps the pulse current near 10 mA in hardware. The 40 V range
+    lifts that to ~0.8 A — the TUI warns when it is selected.
+
+Two 6221 front-panel settings this code cannot read back — check them once:
+  * Output-off state = NORMAL (factory default: the relay opens). If it is
+    set to ZERO the relay stays closed and the 6221 output stage eats every
+    pulse transient. The "safe" claim above depends on this.
+  * Low-terminal earth (OUTPUT LOW) = floating. The external common bus
+    already references I- to the 4200A common; a second internal earth is a
+    ground loop through that bus.
+
+During ``delay_after_pulse_s`` the 6221 is OFF, so the main channel is
+open-circuit for those ~5 s and charge on the Hall arms has no bleed path.
+If the first reads after the wait look erratic, that is the suspect — not a
+damaged 2182.
 
 Field
 -----
@@ -105,22 +152,25 @@ from pathlib import Path
 from typing import Callable, List, Optional
 
 import pandas as pd
+from pymeasure.instruments.keithley import Keithley2182, Keithley6221
 
 from instruments.keithley4200a import (
     Keithley4200AConfig,
     PMUPulseConfig,
-    SMUChannelConfig,
-    acquire_measurement,
-    acquire_reversal_averaged,
     configure_pmu_pulse,
-    configure_smu,
     connect_4200a,
     list_user_libraries,
     pulse_once,
-    read_measurement,
-    set_source_level,
     shutdown_4200a,
 )
+from instruments.keithley6221 import (
+    SourceConfig,
+    acquire_reversal_averaged_voltage,
+    connect_source,
+    ramp_current_to_zero,
+    shutdown_source,
+)
+from instruments.keithley2182 import VoltmeterConfig, connect_voltmeter
 from instruments.kepco_magnet import (
     MagnetConfig,
     connect_magnet,
@@ -154,23 +204,49 @@ log = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────────────────
 # Configuration
 # ─────────────────────────────────────────────────────────────────────────────
-# Keithley4200AConfig / PMUPulseConfig / SMUChannelConfig come from
-# instruments.keithley4200a; MagnetConfig / GaussmeterConfig /
+# Keithley4200AConfig / PMUPulseConfig come from instruments.keithley4200a;
+# SourceConfig / VoltmeterConfig / MagnetConfig / GaussmeterConfig /
 # TemperatureControllerConfig from their instruments/ modules (imported above
 # and re-exported for the TUI). Only the read timing and the pulse-sequence
 # shape are local.
 
+# Absolute ceilings for the delayed read — not tuning knobs. Anything this
+# measurement legitimately needs is far below them; the point is to stop a
+# mistyped exponent putting a large current/voltage on the shared main-channel
+# bus (and thus on the 2182 and the disabled PMU/6221). See the "Instrument
+# protection" section of the module docstring.
+_READ_CURRENT_CEILING_A     = 10e-3
+_READ_COMPLIANCE_CEILING_V  = 21.0
+
+
 @dataclass
 class ReadConfig:
-    """The delayed R_xy read: SMU1 forces, SMU2 measures.
+    """The 6221 + 2182 delayed R_xy read."""
+    sense_current_A: float        = 1e-4    # 6221 probe current for the Hall read [A]
+    compliance_V: float           = 2.0
+    source_delay_s: float         = 0.05    # 6221 settle after each +I/-I flip [s]
+    nplc: float                   = 5.0     # 2182 integration
+    auto_range: bool              = True
+    n_reversals: int              = 5       # +I/-I reversal pairs averaged per read
+    settle_after_enable_s: float  = 0.3     # dwell after re-enabling the 6221, before reading [s]
 
-    No compliance field here — that lives on the two ``SMUChannelConfig``s,
-    which is what ``set_source_level`` actually reads."""
-    read_current_A: float       = 1e-4    # SMU1 probe current for the Hall read [A]
-    source_delay_s: float       = 0.05    # settle after each +I/-I flip [s]
-    n_reversals: int            = 5       # reversal pairs (or plain V samples) per read
-    settle_before_read_s: float = 0.3     # extra dwell before the first read [s]
-    reversal_enabled: bool      = True    # ±I_read decomposition — see docs/current-reversal.md
+
+def _check_read_safety(read_cfg: ReadConfig) -> None:
+    """Refuse a read current / compliance that has no business in this
+    measurement — the shared-bus wiring means either would land on the 2182
+    and the (disabled) PMU output. Called before connect_source() on every
+    entry path (main, the TUI's do_run, and run_measurement itself), because
+    connect_source() returns with the 6221 already sourcing sense_current_A."""
+    if not 0 < read_cfg.sense_current_A <= _READ_CURRENT_CEILING_A:
+        raise ValueError(
+            f"sense_current_A must be in (0, {_READ_CURRENT_CEILING_A} A]; got "
+            f"{read_cfg.sense_current_A} A. The Hall read needs microamps-to-"
+            "milliamps — check for a mistyped exponent.")
+    if not 0 < read_cfg.compliance_V <= _READ_COMPLIANCE_CEILING_V:
+        raise ValueError(
+            f"compliance_V must be in (0, {_READ_COMPLIANCE_CEILING_V} V]; got "
+            f"{read_cfg.compliance_V} V. On an open contact the 6221 rails to "
+            "this across the shared bus.")
 
 
 @dataclass
@@ -215,6 +291,13 @@ def _pulse_resistance(pinfo: dict) -> Optional[float]:
     return v / i
 
 
+def _six221_output_off(source: Keithley6221) -> None:
+    """Zero and disable the 6221 output — the state it must be in whenever the
+    PMU pulses the shared channel pin."""
+    source.source_current = 0.0
+    source.disable_source()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Main measurement loop  (docs/architecture.md §3 contract)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -222,8 +305,8 @@ def _pulse_resistance(pinfo: dict) -> Optional[float]:
 def run_measurement(
     k4200,
     pmu_cfg: PMUPulseConfig,
-    src_cfg: SMUChannelConfig,
-    hall_cfg: SMUChannelConfig,
+    source: Keithley6221,
+    voltmeter: Keithley2182,
     read_cfg: ReadConfig,
     seq_cfg: PulseSequenceConfig,
     points: List[AmplitudePoint],
@@ -238,20 +321,18 @@ def run_measurement(
     write_csv: Optional[Callable[[List[dict]], None]] = None,
 ) -> pd.DataFrame:
     """For each amplitude in ``points`` × ``seq_cfg.n_repeats`` cycles:
-    park SMU1 → [reset pulse] → write pulse → wait → SMU1 ±I_read / SMU2 reads
-    V_xy → park SMU1. One row per cycle; CSV rewritten in full every row.
-
-    ``src_cfg`` is the SMU that forces the read current through the main
-    channel (SMU1, behind RPM1); ``hall_cfg`` is the SMU parked at 0 A across
-    the Hall arms (SMU2). The caller parks ``hall_cfg`` once before calling.
+    (6221 off) → [reset pulse] → write pulse → wait → (6221 on, read R_xy) →
+    (6221 off). One row per cycle; CSV rewritten in full every row.
 
     The static field is set by the caller before this is called;
-    ``magnet_current_A`` is recorded nominal, and if a gaussmeter is passed the
-    field is measured once here → ``assist_field_measured_mT``.
+    ``magnet_current_A`` is recorded nominal, and if a gaussmeter is passed
+    the field is measured once here → ``assist_field_measured_mT``.
 
-    ``stop_event`` is checked before each cycle, inside every wait, and
-    mid-reversal. ``temp_ctrl=None`` never stops the run.
+    ``stop_event`` is checked before each cycle, inside the post-pulse wait,
+    and mid-reversal. ``temp_ctrl=None`` never stops the run.
     """
+    _check_read_safety(read_cfg)
+
     field_measured_mT = None
     if gaussmeter is not None and gauss_cfg is not None:
         field_measured_mT = read_field_mT(gaussmeter, gauss_cfg)
@@ -265,11 +346,11 @@ def run_measurement(
         for rep in range(seq_cfg.n_repeats):
             if stop_event is not None and stop_event.is_set():
                 log.info("Aborted after %d / %d cycles.", len(records), total)
-                set_source_level(k4200, src_cfg, 0.0)
+                _six221_output_off(source)
                 return pd.DataFrame(records)
 
-            # ── 1. park SMU1 — relays must not switch under load ────────────
-            set_source_level(k4200, src_cfg, 0.0)
+            # ── 1. 6221 OFF — never pulse into a live current source ────────
+            _six221_output_off(source)
 
             # ── 2. optional reset pulse ───────────────────────────────────
             if seq_cfg.reset_enabled:
@@ -283,33 +364,17 @@ def run_measurement(
 
             # ── 4. wait ─────────────────────────────────────────────────
             _interruptible_sleep(seq_cfg.delay_after_pulse_s, stop_event)
-            _interruptible_sleep(read_cfg.settle_before_read_s, stop_event)
 
-            # ── 5. read R_xy: SMU1 forces ±I_read, SMU2 measures V_xy ────
-            if read_cfg.reversal_enabled:
-                rv = acquire_reversal_averaged(
-                    k4200, src_cfg, hall_cfg, read_cfg.read_current_A,
-                    read_cfg.n_reversals, stop_event,
-                    source_delay_s=read_cfg.source_delay_s)
-                v_xy, v_xy_sem = rv["mean"], rv["sem"]
-                v_even, v_even_sem = rv["even_mean"], rv["even_sem"]
-                n_rev_used = rv["n_reversals"]
-            else:
-                set_source_level(k4200, src_cfg, read_cfg.read_current_A)
-                _interruptible_sleep(read_cfg.source_delay_s, stop_event)
-                av = acquire_measurement(k4200, hall_cfg, read_cfg.n_reversals, stop_event)
-                v_xy, v_xy_sem = av["mean"], av["sem"]
-                v_even = v_even_sem = None
-                n_rev_used = 0
+            # ── 5. 6221 ON, settle, reversal-averaged R_xy read ──────────
+            source.enable_source()
+            _interruptible_sleep(read_cfg.settle_after_enable_s, stop_event)
+            rv = acquire_reversal_averaged_voltage(
+                source, voltmeter, read_cfg.sense_current_A, read_cfg.n_reversals,
+                stop_event, source_delay_s=read_cfg.source_delay_s)
+            r_xy = rv["mean"] / read_cfg.sense_current_A
 
-            r_xy = v_xy / read_cfg.read_current_A
-            channel_V = read_measurement(k4200, src_cfg)   # 2-wire heating monitor
-
-            # ── 6. park SMU1 again ──────────────────────────────────────
-            # Explicit: acquire_reversal_averaged returns with SMU1 forcing
-            # +level, so without this the LAST cycle leaves current in the DUT
-            # until shutdown_4200a().
-            set_source_level(k4200, src_cfg, 0.0)
+            # ── 6. 6221 OFF again ───────────────────────────────────────
+            _six221_output_off(source)
 
             t1_K, t2_K = read_temperature(temp_ctrl, temp_cfg) if temp_cfg is not None else (None, None)
 
@@ -328,14 +393,13 @@ def run_measurement(
                 "pulse_base_current_A": pinfo.get("pulse_base_current_A"),
                 "reset_enabled":     seq_cfg.reset_enabled,
                 "reset_amplitude_V": seq_cfg.reset_amplitude_V if seq_cfg.reset_enabled else None,
-                "read_current_A":    read_cfg.read_current_A,
-                "channel_voltage_V": channel_V,
-                "hall_voltage_V":    v_xy,
-                "hall_voltage_sem_V": v_xy_sem,
-                "hall_voltage_even_V":     v_even,
-                "hall_voltage_even_sem_V": v_even_sem,
+                "sense_current_A":   read_cfg.sense_current_A,
+                "hall_voltage_V":    rv["mean"],
+                "hall_voltage_sem_V": rv["sem"],
+                "hall_voltage_even_V":     rv["even_mean"],
+                "hall_voltage_even_sem_V": rv["even_sem"],
                 "hall_resistance_ohm": r_xy,
-                "n_reversals":       n_rev_used,
+                "n_reversals":       rv["n_reversals"],
                 "magnet_current_A":  magnet_current_A,
                 "assist_field_measured_mT": field_measured_mT,
                 "field_angle_from_oop_deg": field_angle_from_oop_deg,
@@ -377,22 +441,17 @@ def main() -> None:
         dut_res_ohm=1e3,                  # ← set near your real channel R (sot_dc_characterization)
         v_limit_V=5.0,
     )
-    # SMU1 forces the read current through RPM1 into the main channel; SMU2 sits
-    # at 0 A across the Hall arms. four_wire=False: the RPM1 path is shared
-    # 2-wire, and this field is recorded provenance only (KXCI cannot set it).
-    src_cfg = SMUChannelConfig(channel=1, source_function="current",
-                               compliance_voltage_V=2.0, four_wire=False,
-                               source_limit_A=10e-3)
-    hall_cfg = SMUChannelConfig(channel=2, source_function="current",  # forces 0 A
-                                compliance_voltage_V=2.0, four_wire=False,
-                                source_limit_A=1e-9)
-
-    read_cfg = ReadConfig(read_current_A=1e-4, n_reversals=5, reversal_enabled=True)
+    read_cfg = ReadConfig(sense_current_A=1e-4, n_reversals=5, nplc=5)
+    _check_read_safety(read_cfg)   # before connect_source — connect() leaves the 6221 live
     seq_cfg = PulseSequenceConfig(
         delay_after_pulse_s=5.0, n_repeats=50, reset_enabled=True, reset_amplitude_V=-2.0,
         output_file=str(_DATA_DIR / f"sot_pulsed_{datetime.now():%Y%m%d_%H%M%S}.csv"),
     )
 
+    src_cfg = SourceConfig(visa_resource="GPIB0::20::INSTR", sense_current_A=read_cfg.sense_current_A,
+                           compliance_V=read_cfg.compliance_V, source_delay_s=read_cfg.source_delay_s)
+    volt_cfg = VoltmeterConfig(visa_resource="GPIB0::7::INSTR", nplc=read_cfg.nplc,
+                               auto_range=read_cfg.auto_range)
     magnet_cfg = MagnetConfig(visa_resource="GPIB0::6::INSTR", current_limit_A=35.0,
                               voltage_compliance_V=15.0, ramp_step_A=0.1, ramp_delay_s=0.05)
     gauss_cfg = GaussmeterConfig(visa_resource="GPIB0::12::INSTR", unit="T", n_averages=10)
@@ -406,11 +465,10 @@ def main() -> None:
     k4200 = connect_4200a(k_cfg)
     log.info("Installed user libraries (UL):\n%s", list_user_libraries(k4200))
     configure_pmu_pulse(k4200, pmu_cfg)
-    configure_smu(k4200, src_cfg)
-    configure_smu(k4200, hall_cfg)
-    set_source_level(k4200, hall_cfg, 0.0)   # park SMU2 as the voltmeter
-    set_source_level(k4200, src_cfg, 0.0)
 
+    source = connect_source(src_cfg)
+    _six221_output_off(source)
+    voltmeter = connect_voltmeter(volt_cfg)
     magnet = connect_magnet(magnet_cfg)
     gaussmeter = connect_gaussmeter(gauss_cfg)
     temp_ctrl = connect_temperature_controller(temp_cfg)
@@ -419,15 +477,17 @@ def main() -> None:
 
     points = [AmplitudePoint(amplitude_V=float(v)) for v in AMPLITUDES_V]
     try:
-        df = run_measurement(k4200, pmu_cfg, src_cfg, hall_cfg, read_cfg, seq_cfg, points,
+        df = run_measurement(k4200, pmu_cfg, source, voltmeter, read_cfg, seq_cfg, points,
                              gaussmeter=gaussmeter, gauss_cfg=gauss_cfg,
                              temp_ctrl=temp_ctrl, temp_cfg=temp_cfg,
                              magnet_current_A=STATIC_MAGNET_CURRENT_A,
                              field_angle_from_oop_deg=FIELD_ANGLE_FROM_OOP_DEG)
         print("\n", df.to_string(index=False))
     finally:
-        # SMUs down before the magnet — never ramp an inductive field while the
-        # DUT still carries current.
+        # 6221 down first (it shares the channel pin), then the 4200A, then the
+        # magnet — never ramp an inductive field while the DUT still carries current.
+        safe_shutdown("6221 (ramp)", lambda: ramp_current_to_zero(source))
+        safe_shutdown("6221", lambda: shutdown_source(source))
         safe_shutdown("4200A", lambda: shutdown_4200a(k4200))
         safe_shutdown("magnet", lambda: shutdown_magnet(magnet, magnet_cfg))
         safe_shutdown("gaussmeter", lambda: shutdown_gaussmeter(gaussmeter))

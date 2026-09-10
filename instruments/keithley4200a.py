@@ -20,9 +20,10 @@ Scope of THIS module:
     RPM-pathway trap.
 
 The PMU here does not measure the switched state — that is a separate delayed
-dual-SMU read (SMU1 forces ±I_read through the same RPM, SMU2 reads V_xy across
-the Hall arms) in ``sot/sot_pulsed_switching.py``. The PMU's only job is to
-deliver the write pulse.
+6221 + 2182 read (6221 forces ±I_read through the shared main-channel pin, 2182
+reads V_xy across the Hall arms) in ``sot/sot_pulsed_switching.py``. A bare
+4200A SMU cannot do that read: its LO is bonded to circuit common, so it only
+ever measures arm-to-common. The PMU's only job is to deliver the write pulse.
 
 Transport
 ---------

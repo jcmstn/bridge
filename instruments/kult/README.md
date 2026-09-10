@@ -75,6 +75,33 @@ through verbatim, so set `pmu_id` to `"PMU1"` or `'"PMU1"'` depending on what yo
 build wants.
 
 
+## RPM sense mode
+
+The rig wires only the RPM **FORCE** triax (2-wire), so the RPM channel must be in
+**LOCAL (2-wire) sense** — that is the 4225-PMU/RPM power-up default, and no vendor
+example (nor this module) changes it, so normally there is nothing to do. If the channel
+was ever switched to remote sense in **KCON**, switch it back: a remote-sense channel with
+the SENSE triax capped will not source correctly. `bridge_sot_pulse` does not assert the
+mode over LPT; if you want it to, `pulse_remote_sense()` is the call — confirm the
+local-sense constant in your `keithley.h` first.
+
+
+## 6221 front-panel checks (shared-bus wiring)
+
+The 6221 output sits on the same I+/I- pads as the PMU pulse. `sot_pulsed_switching.py`
+opens the 6221 output before every pulse, so the 6221 only sees the pulse across open
+terminals — but two 6221 settings the code cannot read back must be right for that to
+hold:
+
+* **Output-off state = NORMAL** (factory default — the output relay physically opens).
+  `ZERO` keeps the relay closed and the 6221 output stage absorbs every pulse transient.
+* **OUTPUT LOW = floating** (not earthed). The common bus already ties I- to the 4200A
+  common; a second internal earth is a ground loop through that bus.
+
+The program refuses a read `sense_current_A` > 10 mA or `compliance_V` > 21 V (mistyped
+exponent guard) and the TUI warns well below those.
+
+
 ## The RPM pathway trap
 
 `bridge_sot_pulse` routes the RPM back to the SMU pathway on **every** exit, including

@@ -12,6 +12,9 @@ wheels/
 # macOS
 .DS_Store
 
-# Keithley vendor KULT example, kept locally as a reference for
+# Keithley vendor KULT examples, kept locally as a reference for
 # instruments/kult/bridge_sot_pulse.c but not redistributed here
 instruments/PMU_1Chan_Sweep_Example.c
+instruments/PMU_1Chan_Waveform_Example.c
+instruments/PMU_IV_sweep_Example.c
+instruments/PMU_IV_sweep_step_Example.c

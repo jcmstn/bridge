@@ -63,9 +63,9 @@ def test_set_source_level_voltage_command():
     assert dev.writes == ["DV2, 0, -1.500000E+00, 1.000000E-04"]
 
 
-def test_set_source_level_parks_a_pinned_voltmeter_channel():
-    """SMU2 is pinned as a voltmeter with source_limit_A=1e-9; parking it at 0 A
-    must not trip that limit -- do_run calls this on every run."""
+def test_set_source_level_at_zero_never_trips_a_tiny_limit():
+    """sot_switching pins its voltmeter SMU with source_limit_A=1e-9; forcing it
+    to 0 A must not trip that limit (abs(0) is not > 1e-9)."""
     dev = _FakeKXCI([])
     cfg = SMUChannelConfig(channel=2, source_function="current",
                            compliance_voltage_V=2.0, source_limit_A=1e-9)
