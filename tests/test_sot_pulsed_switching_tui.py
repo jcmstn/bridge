@@ -26,7 +26,7 @@ def _state(**overrides) -> dict:
         sense_current_A=1e-4, compliance_V=2.0, source_delay_s=0.05, nplc=5.0,
         auto_range=True, n_reversals=5, settle_after_enable_s=0.3,
         delay_after_pulse_s=1.0,
-        magnet_current_A=1.5, field_angle_from_oop_deg=85.0, field_settle_tolerance_mT=0.05,
+        magnet_current_A="1.5", field_angle_from_oop_deg=85.0, field_settle_tolerance_mT=0.05,
         device="HB3", cooldown="3", temperature_setpoint_K=300.0,
         source_visa_resource="GPIB0::20::INSTR", voltmeter_visa_resource="GPIB0::7::INSTR",
         magnet_visa_resource="GPIB0::6::INSTR", current_limit_A=35.0,
@@ -38,6 +38,8 @@ def _state(**overrides) -> dict:
     )
     base.update(overrides)
     base["amplitude_list"], base["amplitude_parse_error"] = tui._resolve_amplitudes(base)
+    base["magnet_currents_A"], base["magnet_currents_parse_error"] = \
+        tui._resolve_magnet_currents(base)
     return base
 
 
@@ -87,8 +89,19 @@ def test_resolve_amplitudes_bidirectional_loop():
 
 
 def test_summary_blocks_magnet_current_over_limit():
-    _, _, errors = tui.build_summary(_state(magnet_current_A=50.0, current_limit_A=35.0))
+    _, _, errors = tui.build_summary(_state(magnet_current_A="50.0", current_limit_A=35.0))
     assert any("magnet limit" in e for e in errors)
+
+
+def test_summary_blocks_magnet_current_parse_error():
+    _, _, errors = tui.build_summary(_state(magnet_current_A="not-a-number"))
+    assert any("Magnet current(s)" in e for e in errors)
+
+
+def test_resolve_magnet_currents_list():
+    currents, err = tui._resolve_magnet_currents(_state(magnet_current_A="1, -1, 5"))
+    assert err is None
+    assert currents == [1.0, -1.0, 5.0]
 
 
 def test_summary_blocks_zero_sense_current():
@@ -160,13 +173,25 @@ def test_build_plan_shapes(tmp_path: Path):
     assert plan.read_cfg.n_reversals == 5
     assert plan.read_cfg.sense_current_A == 1e-4
     assert plan.read_cfg.delay_after_pulse_s == 1.0
-    assert plan.magnet_current_A == 1.5
+    assert plan.magnet_currents_A == [1.5]
     assert plan.field_angle_from_oop_deg == 85.0
     # 6221 forces the read current, 2182 reads V_xy
     assert plan.src_cfg.visa_resource == "GPIB0::20::INSTR"
     assert plan.src_cfg.sense_current_A == 1e-4 and plan.src_cfg.compliance_V == 2.0
     assert plan.volt_cfg.visa_resource == "GPIB0::7::INSTR"
     assert plan.volt_cfg.nplc == 5.0 and plan.volt_cfg.auto_range is True
+
+
+def test_build_plan_multiple_magnet_currents(tmp_path: Path):
+    app = tui.SOTPulsedSwitchingApp()
+    app.data_root = tmp_path
+    plan = app._build_plan(_state(amplitude_start_V=0.2, amplitude_stop_V=1.0,
+                                  amplitude_step_V=0.4, amplitude_bidirectional=False,
+                                  magnet_current_A="1.5, -1.5, 3"))
+
+    assert plan.magnet_currents_A == [1.5, -1.5, 3.0]
+    assert plan.series_values == [1.5, -1.5, 3.0]
+    assert plan.total_points == 3 * 3                     # amplitudes × assist currents
 
 
 def test_build_plan_channel_resistance_field_is_gone(tmp_path: Path):
