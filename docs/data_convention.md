@@ -82,6 +82,7 @@ Example: `A_0001_HB3_NOISE_T293K_20260811T143022.csv`
 | `NOISE` | Noise spectrum (`mfli_noise_spectrum`)        |
 | `RT`    | Resistance vs. temperature (`examples/custom_program.py`) |
 | `SOTPS` | SOT pulsed switching — 4200A PMU write pulse + delayed 6221/2182 R_xy read (`sot/sot_pulsed_switching`) |
+| `SOT2H` | SOT pulsed switching, 2nd-harmonic read — 4200A PMU write pulse + delayed 6221 AC / MFLI 1f+2f read (`sot/sot_pulsed_switching_2h`) |
 
 A genuinely new measurement kind gets a new short all-caps code added
 here and to nowhere else — `type_code` is just a string parameter to

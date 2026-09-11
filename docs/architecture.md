@@ -25,6 +25,7 @@ reference. This file is the map, not a second copy of them.
 | `uv run python dc/dc_tui.py`   | DC suite picker (Hall, I–V, gate sweep, spin-valve) — Textual |
 | `uv run python mfli/mfli_tui.py` | MFLI suite picker (dual-harmonic, diff-resistance, phase calibration) — Textual |
 | `uv run python sot/sot_pulsed_switching_tui.py` | SOT pulsed switching (4200A PMU pulse + delayed 6221/2182 R_xy) — Textual |
+| `uv run python sot/sot_pulsed_switching_2h_tui.py` | SOT pulsed switching, 2nd-harmonic read (4200A PMU pulse + delayed 6221 AC / MFLI 1f+2f) — Textual |
 | `uv run python web/app.py`     | Browser front end, same 7 measurements — NiceGUI, `http://localhost:8080` |
 | `uv run python tools/curate_sample.py <sample>` | Post-hoc curation TUI: mark runs `paper_include` / `figure_ref` |
 
@@ -129,7 +130,7 @@ raw driver classes.
 
 | Module | Instrument | Config / helpers | Driver source |
 |--------|-----------|------------------|---------------|
-| `keithley6221.py` | Keithley 6221 current source | `SourceConfig`, `connect_source`, `shutdown_source`, `acquire_reversal_averaged_voltage`, low-level `connect()` | thin wrapper over pymeasure |
+| `keithley6221.py` | Keithley 6221 current source | **DC:** `SourceConfig`, `connect_source`, `shutdown_source`, `acquire_reversal_averaged_voltage`, low-level `connect()`. **AC/WAVE + phase marker:** `ACSourceConfig`, `connect_ac_source`, `shutdown_ac_source` | thin wrapper over pymeasure |
 | `keithley2182.py` | Keithley 2182 nanovoltmeter | `VoltmeterConfig` (`channel` 1/2), `connect_voltmeter`, `acquire_averaged_voltage` | thin wrapper over pymeasure |
 | `keithley2400.py` | Keithley 2400 SourceMeter | **gate:** `GateConfig`, `connect_gate`, `set_gate_voltage`, `shutdown_gate`. **general SMU:** `SMUConfig`, `connect_smu`, `set_source_level`, `read_measurement`, `acquire_measurement`, `measure_buffered`, `shutdown_smu` | thin wrapper over pymeasure |
 | `keithley2450.py` | Keithley 2450 SourceMeter | `Keithley2450` class (native-2450 SCPI + `defbuffer1` stats, private `_Keithley2450Buffer` mixin in-file); general SMU wrapper — same `SMUConfig` / `connect_smu` / … surface as `keithley2400.py`, swap by import | **hand-written** (pymeasure's 2450 lacks native buffer support) |

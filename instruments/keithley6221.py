@@ -43,6 +43,79 @@ class SourceConfig:
     source_delay_s: float  = 0.05    # Settle time after each current step [s]
 
 
+@dataclass
+class ACSourceConfig:
+    """Keithley 6221 as an AC (sine) current source with a hardware phase
+    marker on the Trigger Link, for external-reference lock-in detection
+    (used by sot/sot_pulsed_switching_2h.py: an MFLI locks to this marker
+    via its Aux Input, per the Zurich Instruments external-reference guide).
+
+    `phasemarker_line` is the Trigger Link output pin the marker square wave
+    (one edge per excitation cycle) appears on — wire that BNC to the
+    lock-in's Aux Input. Pass a line other than the 6221's factory default if
+    that pin is already claimed by something else on the rig; confirm the
+    factory default against your own 6221 (front panel CONFIG →
+    Trigger Link) before assuming which one that is."""
+    visa_resource: str        = "GPIB0::20::INSTR"
+    amplitude_A: float        = 1e-4     # AC current amplitude, peak [A]
+    frequency_Hz: float       = 977.0    # Excitation frequency [Hz] — avoid 50/60 Hz harmonics
+    compliance_V: float       = 2.0      # Voltage compliance [V]
+    ranging: str              = "best"   # "best" or "fixed"
+    phasemarker_line: int     = 1        # Trigger Link pin (1-6) the phase marker appears on
+
+
+def connect_ac_source(cfg: ACSourceConfig) -> Keithley6221:
+    """Open and arm a Keithley 6221 as an AC current source with its phase
+    marker enabled. Every WAVE parameter (function/amplitude/frequency/
+    ranging/phase-marker state+line) must be set before `waveform_arm()` — a
+    write after arming does not take effect until the next arm(), per the
+    pymeasure driver's WAVE-mode example. `waveform_arm()` + `waveform_start()`
+    is the official sequence for starting continuous sourcing (no separate
+    `enable_source()` call needed — arming brings the output up itself); the
+    duration is set to infinite so the wave runs until `waveform_abort()`.
+
+    Reads the phase-marker line back after arming and raises if it didn't
+    take — the usual cause is another Trigger Link function already owning
+    that pin.
+    """
+    source = Keithley6221(cfg.visa_resource)
+    source.reset()
+    source.source_compliance = cfg.compliance_V
+    source.waveform_function = "sine"
+    source.waveform_amplitude = cfg.amplitude_A
+    source.waveform_offset = 0.0
+    source.waveform_frequency = cfg.frequency_Hz
+    source.waveform_ranging = cfg.ranging
+    source.waveform_use_phasemarker = True
+    source.waveform_phasemarker_line = cfg.phasemarker_line
+    source.waveform_duration_set_infinity()
+    source.waveform_arm()
+    readback = source.waveform_phasemarker_line
+    if int(readback) != cfg.phasemarker_line:
+        # Leave nothing armed behind a raise — the caller never gets a
+        # handle back to shut down otherwise, and this program's whole
+        # safety story is "the 6221 is quiet unless we say otherwise".
+        source.waveform_abort()
+        source.shutdown()
+        raise RuntimeError(
+            f"6221 phase-marker line rejected: asked for {cfg.phasemarker_line}, "
+            f"device reports {readback}. Another Trigger Link function likely "
+            "already owns that pin.")
+    source.waveform_start()
+    log.info("Keithley 6221 connected: %s  AC I=%.4g A peak  f=%.4g Hz  "
+              "compliance=%.2f V  phase marker → Trigger Link pin %d",
+              cfg.visa_resource, cfg.amplitude_A, cfg.frequency_Hz,
+              cfg.compliance_V, cfg.phasemarker_line)
+    return source
+
+
+def shutdown_ac_source(source: Keithley6221) -> None:
+    """Stop the AC wave and disable the 6221's output."""
+    source.waveform_abort()
+    source.shutdown()
+    log.info("Keithley 6221 AC wave stopped, output disabled")
+
+
 def connect(visa_resource: str, compliance_V: float, source_delay_s: float,
             initial_current_A: float = 0.0) -> Keithley6221:
     """Open and configure a Keithley 6221 as a DC current source."""
