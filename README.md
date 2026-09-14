@@ -27,7 +27,7 @@ picker:
 
 ```
 uv run python dc/dc_tui.py             # DC suite TUI (Hall, I-V, gate sweep, spin-valve)
-uv run python mfli/mfli_tui.py         # MFLI suite TUI (dual-harmonic, diff resistance, phase calibration)
+uv run python mfli/mfli_tui.py         # MFLI suite TUI (dual-harmonic, dual-harmonic w/ 6221 AC source, diff resistance, phase calibration)
 uv run python sot/sot_pulsed_switching_tui.py   # SOT pulsed switching TUI — 4200A PMU pulse + delayed 6221/2182 R_xy
 uv run python web/app.py               # Browser front end, DC + MFLI suites, http://localhost:8080
 ```

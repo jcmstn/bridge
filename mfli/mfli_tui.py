@@ -26,6 +26,7 @@ from textual.containers import Vertical, VerticalScroll
 from textual.widgets import Button, Footer, Header, Static
 
 from mfli.mfli_dual_harmonic_tui import MFLIDualHarmonicApp
+from mfli.mfli_dual_harmonic_6221_tui import MFLIDualHarmonic6221App
 from mfli.mfli_diff_resistance_tui import MFLIDiffResistanceApp
 from mfli.mfli_phase_calibration_tui import MFLIPhaseCalibrationApp
 
@@ -55,6 +56,38 @@ DUAL_HARMONIC_SCHEMATIC = """\
     Leader Ref Out      ───BNC───▶ Follower Ref In
     Leader Trigger Out 1 ──▶ fanned out to Trigger In 1 on BOTH units
     (equal cable lengths on the fan-out)
+
+  Magnet field sweep  (optional, "Sweep magnetic field" switch)
+    Kepco BOP-GL      ──GPIB──▶ electromagnet coil
+    Lake Shore 475    ──GPIB──▶ Gaussmeter probe at the sample
+"""
+
+DUAL_HARMONIC_6221_DESC = (
+    "Same 1f/2f dual-harmonic measurement, but the AC excitation current is "
+    "sourced by a Keithley 6221 (an ideal current source) instead of an "
+    "MFLI Signal Output — its Trigger Link phase marker drives BOTH MFLIs' "
+    "Aux In 1, and each locks its own oscillator to it (ExtRef). Everything "
+    "else — filters, magnet field sweep, temperature logging, phase "
+    "calibration, sample geometry — matches the pure-MFLI version."
+)
+
+DUAL_HARMONIC_6221_SCHEMATIC = """\
+  Keithley 6221  (WAVE, sine, continuous — the current source)
+    HI/LO ──▶ sample/DUT ── common ground
+    Trigger Link phase marker ──▶ split (BNC T, equal lengths) to
+      Aux In 1 on BOTH the leader AND the follower — REQUIRED on both,
+      not leader-only (see module docstring: a follower synced only via
+      MDS silently loses 2f signal as the two clocks drift apart).
+
+  LEADER MFLI  (ExtRef-locked, 1f)
+    Signal Input 1  (differential)  ──▶ demod 1f
+
+  FOLLOWER MFLI  (ExtRef-locked, 2f)
+    Signal Input 1  (differential)  ──▶ demod 2f
+
+  MDS cabling  (both units — common sample clock, not oscillator frequency)
+    Leader Ref Out      ───BNC───▶ Follower Ref In
+    Leader Trigger Out 1 ──▶ fanned out to Trigger In 1 on BOTH units
 
   Magnet field sweep  (optional, "Sweep magnetic field" switch)
     Kepco BOP-GL      ──GPIB──▶ electromagnet coil
@@ -165,13 +198,19 @@ class LauncherApp(App):
                     "launch_dual", "▶  Launch dual-harmonic TUI",
                 )
                 yield _card(
-                    "2) Differential Resistance vs. Bias (dV/dI)",
+                    "2) Dual-Harmonic Measurement, 6221 AC source (1f / 2f)",
+                    DUAL_HARMONIC_6221_DESC,
+                    DUAL_HARMONIC_6221_SCHEMATIC,
+                    "launch_dual_6221", "▶  Launch dual-harmonic (6221) TUI",
+                )
+                yield _card(
+                    "3) Differential Resistance vs. Bias (dV/dI)",
                     DIFF_RESISTANCE_DESC,
                     DIFF_RESISTANCE_SCHEMATIC,
                     "launch_diff", "▶  Launch differential-resistance TUI",
                 )
                 yield _card(
-                    "3) Phase Calibration (1f Y-null + 2f channel ID)",
+                    "4) Phase Calibration (1f Y-null + 2f channel ID)",
                     PHASE_CALIBRATION_DESC,
                     PHASE_CALIBRATION_SCHEMATIC,
                     "launch_phase_cal", "▶  Launch phase-calibration TUI",
@@ -181,6 +220,8 @@ class LauncherApp(App):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "launch_dual":
             self.exit(result="dual")
+        elif event.button.id == "launch_dual_6221":
+            self.exit(result="dual_6221")
         elif event.button.id == "launch_diff":
             self.exit(result="diff")
         elif event.button.id == "launch_phase_cal":
@@ -196,6 +237,8 @@ def main() -> None:
         mode = LauncherApp().run()
         if mode == "dual":
             MFLIDualHarmonicApp().run()
+        elif mode == "dual_6221":
+            MFLIDualHarmonic6221App().run()
         elif mode == "diff":
             MFLIDiffResistanceApp().run()
         elif mode == "phase_cal":

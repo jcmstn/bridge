@@ -6,7 +6,7 @@ Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
 Created: 2026-08-07
 
 Alternative front end to the Textual TUI (dc/dc_tui.py, mfli/mfli_tui.py),
-covering the same 7 measurements plus one new capability the TUI doesn't
+covering the same 8 measurements plus one new capability the TUI doesn't
 have: freely choosing the save directory for a run, anywhere on disk (see
 directory_picker.py), rather than only a sub-folder name under a hardcoded
 data/ root. Runs alongside the TUI, not instead of it.
@@ -38,7 +38,7 @@ import os
 from nicegui import app, ui
 
 from web.dc import hall, iv_curve, gate_sweep, spin_valve
-from web.mfli import dual_harmonic, diff_resistance, phase_calibration
+from web.mfli import dual_harmonic, dual_harmonic_6221, diff_resistance, phase_calibration
 from web import run_index
 from web.run_controller import busy_banner
 
@@ -106,6 +106,11 @@ def _dc_spin_valve_page() -> None:
 @ui.page("/mfli/dual-harmonic")
 def _mfli_dual_harmonic_page() -> None:
     dual_harmonic.page()
+
+
+@ui.page("/mfli/dual-harmonic-6221")
+def _mfli_dual_harmonic_6221_page() -> None:
+    dual_harmonic_6221.page()
 
 
 @ui.page("/mfli/diff-resistance")
@@ -181,6 +186,8 @@ def landing() -> None:
             ui.label("MFLI Suite").classes("text-xl font-bold")
             _card("MFLI Dual-Harmonic Measurement",
                   dual_harmonic.MFLI_DUAL_HARMONIC_DESCRIPTION, "/mfli/dual-harmonic")
+            _card("MFLI Dual-Harmonic Measurement (6221 AC source)",
+                  dual_harmonic_6221.MFLI_DUAL_HARMONIC_6221_DESCRIPTION, "/mfli/dual-harmonic-6221")
             _card("MFLI Differential Resistance vs. Bias",
                   diff_resistance.MFLI_DIFF_RESISTANCE_DESCRIPTION, "/mfli/diff-resistance")
             _card("MFLI Phase Calibration",

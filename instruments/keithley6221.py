@@ -116,6 +116,112 @@ def shutdown_ac_source(source: Keithley6221) -> None:
     log.info("Keithley 6221 AC wave stopped, output disabled")
 
 
+@dataclass
+class PulseWaveConfig:
+    """A single HARDWARE-TIMED current pulse via WAVE mode's square function,
+    run for exactly one cycle — the 6221's real, verified, no-2182-required
+    single-pulse mechanism. Confirmed against the Model 6220/6221 User's
+    Manual (622x-900-01 Rev. C, Section 7 "Wave Functions"):
+
+      * A square wave swings between (offset - amplitude) and
+        (offset + amplitude) (manual Fig. 7-1). fire_wave_pulse() below sets
+        offset = amplitude = pulse_current_A / 2, so the wave sits at 0 and
+        rises to pulse_current_A for the duty-cycle "high" fraction of one
+        period, then returns to 0 — a clean unipolar pulse, not the
+        alternating-polarity triplet Pulse Delta mode uses.
+      * "The output will turn off after the currently set duration period
+        has expired" (manual, Section 7 "Duration") — with
+        waveform_duration_cycles = 1, that is real hardware-timed
+        auto-termination after exactly one pulse, not a software sleep
+        guess. fire_wave_pulse() polls the OUTPUT state for this rather than
+        trusting elapsed wall time.
+      * This is DIFFERENT from Pulse Delta / Differential Conductance
+        (`:SOUR:PDEL`, `:SOUR:DCON`), which require a 2182/2182A wired via
+        the rear-panel Trigger Link cable and are architecturally built
+        around alternating-polarity offset-cancelling measurement, not a
+        single deliberate-polarity write pulse. Nothing here touches a 2182.
+
+    Duty cycle is fixed at 50% internally so ``width_s`` alone determines
+    the frequency this programs (frequency = 1 / (2 x width_s)) — pick
+    ``width_s`` so that frequency stays inside the WAVE subsystem's 1 mHz to
+    100 kHz range (width_s below ~5 µs pushes frequency past 100 kHz and the
+    instrument will clip it).
+
+    Spec floor: manual quotes "Settable to 1 µs min. pulse duration" for
+    square-wave duty cycle, footnoted "minimum realizable duty cycle is
+    limited by current range response and load impedance" — the datasheet's
+    own headline number is 5 µs. Both are best-case; the true floor at your
+    actual pulse amplitude/range is whatever fire_wave_pulse() measures and
+    returns as ``pulse_width_measured_s`` — check that, not this docstring,
+    before trusting a sub-10 µs pulse.
+    """
+    pulse_current_A: float = 5e-3    # peak pulse current [A] — pulse rises from 0 to this
+    width_s: float          = 1e-3    # pulse width (duty-cycle "high" time) [s]
+    compliance_V: float     = 5.0     # pulse voltage compliance [V]
+    ranging: str             = "best"  # "best" or "fixed"
+
+
+def fire_wave_pulse(source: Keithley6221, cfg: PulseWaveConfig,
+                     stop_event: Optional[threading.Event] = None,
+                     timeout_margin_s: float = 0.5) -> dict:
+    """Fire ONE hardware-timed current pulse — see PulseWaveConfig's
+    docstring for the mechanism and why it's the 6221's real supported
+    single-pulse capability, not Pulse Delta and not a software sleep loop.
+
+    Every WAVE parameter must be set before ``waveform_arm()`` (same
+    pymeasure/SCPI ordering rule as connect_ac_source() — a write after
+    arming doesn't take effect until the next arm). Disables the phase
+    marker for the pulse (it's only meaningful during the continuous AC
+    read elsewhere in this codebase) and always sets every parameter
+    explicitly — never assumes a retained level from a prior AC-read or
+    pulse cycle.
+
+    Completion is detected by polling ``source_enabled`` (``OUTPUT?``)
+    rather than trusting elapsed wall time or SRQ (SRQ needs GPIB; this
+    driver's configs default to GPIB but nothing stops a TCPIP/LAN
+    resource string) — bounded by the pulse's own period plus
+    ``timeout_margin_s`` so a stuck poll can't hang a run forever; a
+    timeout still returns rather than raising; the caller sees it via a
+    ``pulse_width_measured_s`` that doesn't shrink back down. ``waveform_
+    abort()`` + ``disable_source()`` run unconditionally afterward so the
+    instrument is left in the same disarmed state the caller's next action
+    (another pulse, or connect_ac_source()'s continuous read) expects.
+
+    Returns ``{"pulse_width_measured_s": <elapsed to the instrument's own
+    auto-off, or the timeout bound>}``.
+    """
+    half = cfg.pulse_current_A / 2.0
+    period_s = 2.0 * cfg.width_s
+    frequency_Hz = 1.0 / period_s
+
+    source.source_compliance = cfg.compliance_V
+    source.waveform_function = "square"
+    source.waveform_amplitude = half
+    source.waveform_offset = half
+    source.waveform_dutycycle = 50.0
+    source.waveform_frequency = frequency_Hz
+    source.waveform_ranging = cfg.ranging
+    source.waveform_use_phasemarker = False
+    source.waveform_duration_cycles = 1
+    source.waveform_arm()
+    t0 = time.monotonic()
+    source.waveform_start()
+
+    timeout_s = period_s + timeout_margin_s
+    poll_interval_s = min(0.001, timeout_s)
+    while time.monotonic() - t0 < timeout_s:
+        if stop_event is not None and stop_event.is_set():
+            break
+        if not source.source_enabled:
+            break
+        time.sleep(poll_interval_s)
+    elapsed = time.monotonic() - t0
+
+    source.waveform_abort()
+    source.disable_source()
+    return {"pulse_width_measured_s": elapsed}
+
+
 def connect(visa_resource: str, compliance_V: float, source_delay_s: float,
             initial_current_A: float = 0.0) -> Keithley6221:
     """Open and configure a Keithley 6221 as a DC current source."""
@@ -213,8 +319,12 @@ def acquire_reversal_averaged_voltage(
 
     used_odd = samples_odd[:n_used]
     used_even = samples_even[:n_used]
-    sem_odd = float(np.std(used_odd, ddof=1) / np.sqrt(n_used)) if n_used >= 2 else float("nan")
-    sem_even = float(np.std(used_even, ddof=1) / np.sqrt(n_used)) if n_used >= 2 else float("nan")
+    if n_used >= 2:
+        sqrt_n = np.sqrt(n_used)
+        sem_odd = float(np.std(used_odd, ddof=1) / sqrt_n)
+        sem_even = float(np.std(used_even, ddof=1) / sqrt_n)
+    else:
+        sem_odd = sem_even = float("nan")
     return {
         "mean": float(np.mean(used_odd)),
         "sem": sem_odd,
