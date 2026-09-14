@@ -218,14 +218,20 @@ _ADCSELECT_AUX_IN_BASE = 8
 # a bandwidth tuned for a different signal from a previous run.
 _EXTREF_AUTOMODE_DYNAMIC = 4
 
-# demods/n/rate ("number of samples sent to host per second" per the node
-# doc — this MFLI's actual max is in the ~460 kSa/s range, clamped to
-# whichever value the firmware actually supports) — like harmonic, this is
-# never set elsewhere and would otherwise inherit whatever this demod index
-# was last left at (e.g. the ~1 kSa/s a normal signal demod uses), which
-# under-samples the 6221's ~1 µs marker pulse the same way a too-slow LabOne
-# Scope trace visually smears it into a shallow dip instead of a real edge.
-_PLL_DETECTOR_RATE_HZ = 460.8e3
+# demods/n/rate is "number of samples sent to the host / LabOne Data
+# Server per second" (node doc). MFLI's spec sheet lists 200 kSa/s as the
+# "maximum transfer rate over 1 GbE (all demodulators)" — but that's an
+# explicitly-labeled NETWORK/STORAGE limit, not the demodulator's native
+# rate (docs.zhinst.com/mfli_user_manual/specifications.html); the Aux
+# Input's own raw ADC is 16-bit/15 MSa/s with 5 MHz analog bandwidth (same
+# page) — comfortably fast enough to resolve the 6221's ~1 µs marker pulse.
+# Whether the on-device PLL's phase detection depends on this demod's own
+# decimated rate at all isn't documented either way. Rather than guess a
+# number, request something intentionally far above anything this device
+# could really support and let the firmware clamp it — the node doc says a
+# requested value "may be approximated to the nearest value supported by
+# the instrument" — then read back and log what was actually applied.
+_PLL_DETECTOR_RATE_REQUEST_HZ = 1e9
 
 
 def configure_external_reference(daq: "zi.ziDAQServer", cfg: ExtRefConfig,
@@ -256,15 +262,18 @@ def configure_external_reference(daq: "zi.ziDAQServer", cfg: ExtRefConfig,
     # run's demod2_cfg reusing the same index) — a stale harmonic here has
     # the PLL searching the wrong frequency entirely and never locking.
     daq.setInt(f"/{d}/demods/{cfg.pll_demod_index}/harmonic", 1)
-    daq.setDouble(f"/{d}/demods/{cfg.pll_demod_index}/rate", _PLL_DETECTOR_RATE_HZ)
+    daq.setDouble(f"/{d}/demods/{cfg.pll_demod_index}/rate", _PLL_DETECTOR_RATE_REQUEST_HZ)
     daq.setInt(f"/{d}/demods/{cfg.pll_demod_index}/enable", 1)
     daq.setInt(f"/{d}/extrefs/{cfg.extref_index}/demodselect", cfg.pll_demod_index)
     daq.setInt(f"/{d}/extrefs/{cfg.extref_index}/automode", _EXTREF_AUTOMODE_DYNAMIC)
     daq.setInt(f"/{d}/extrefs/{cfg.extref_index}/enable", 1)
     daq.sync()
+    applied_rate = daq.getDouble(f"/{d}/demods/{cfg.pll_demod_index}/rate")
     log.info("MFLI %s: oscillator %d locking to Aux In %d via extrefs/%d "
-             "(phase detector demod%d, target %.4f Hz)", d, cfg.osc_index,
-             cfg.aux_input_ch + 1, cfg.extref_index, cfg.pll_demod_index, frequency_Hz)
+             "(phase detector demod%d, target %.4f Hz, detector rate "
+             "requested %.4g Sa/s -> device applied %.4g Sa/s)", d, cfg.osc_index,
+             cfg.aux_input_ch + 1, cfg.extref_index, cfg.pll_demod_index, frequency_Hz,
+             _PLL_DETECTOR_RATE_REQUEST_HZ, applied_rate)
 
 
 def wait_for_reference_lock(daq: "zi.ziDAQServer", cfg: ExtRefConfig,
