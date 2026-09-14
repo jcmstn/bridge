@@ -238,6 +238,11 @@ def configure_external_reference(daq: "zi.ziDAQServer", cfg: ExtRefConfig,
     daq.setInt(f"/{d}/demods/{cfg.pll_demod_index}/adcselect",
               _ADCSELECT_AUX_IN_BASE + cfg.aux_input_ch)
     daq.setInt(f"/{d}/demods/{cfg.pll_demod_index}/oscselect", cfg.osc_index)
+    # Phase detector must track the marker's FUNDAMENTAL, not whatever
+    # harmonic this demod index was last left at (e.g. 2, from a previous
+    # run's demod2_cfg reusing the same index) — a stale harmonic here has
+    # the PLL searching the wrong frequency entirely and never locking.
+    daq.setInt(f"/{d}/demods/{cfg.pll_demod_index}/harmonic", 1)
     daq.setInt(f"/{d}/demods/{cfg.pll_demod_index}/enable", 1)
     daq.setInt(f"/{d}/extrefs/{cfg.extref_index}/demodselect", cfg.pll_demod_index)
     daq.setInt(f"/{d}/extrefs/{cfg.extref_index}/automode", _EXTREF_AUTOMODE_DYNAMIC)
