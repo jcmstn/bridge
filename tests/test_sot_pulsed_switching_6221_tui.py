@@ -27,7 +27,7 @@ def _state(**overrides) -> dict:
         device="HB3", cooldown="3", temperature_setpoint_K=300.0,
         source_visa_resource="GPIB0::20::INSTR",
         mfli_host="localhost", mfli_port=8004, mfli_device="dev1234",
-        aux_input_ch=0, osc_index=0, extref_index=0, demod_index=1,
+        aux_input_ch=0, osc_index=0, extref_index=0, pll_demod_index=0, demod_index=1,
         input_ch=0, input_range_V=1.0, sample_rate_Hz=857.0,
         filter_time_constant_s=0.3, filter_order=4,
         differential=True, ac_coupling=True, filter_sinc=True,
@@ -54,6 +54,13 @@ def test_summary_blocks_zero_step():
 def test_summary_blocks_pulse_current_over_hardware_ceiling():
     _, _, errors = tui.build_summary(_state(pulse_current_stop_A=0.5))   # 500 mA
     assert any("hardware range" in e for e in errors)
+
+
+def test_summary_blocks_pll_demod_collision():
+    # extrefs/N/adcselect is read-only on real firmware — the PLL phase-detector
+    # demod can't be the same index as the demod reading the real signal.
+    _, _, errors = tui.build_summary(_state(pll_demod_index=1, demod_index=1))
+    assert any("phase-detector demod" in e for e in errors)
 
 
 def test_summary_warns_bidirectional_off():

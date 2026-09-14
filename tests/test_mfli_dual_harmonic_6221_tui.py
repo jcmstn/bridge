@@ -37,8 +37,9 @@ def _state(**overrides) -> dict:
         phase_cal_n_averages=20, phase_cal_max_iterations=5,
         hall_bar_length_um=None, hall_bar_width_um=None,
         hall_bar_thickness_nm=None, field_angle_from_oop_deg=None,
-        leader_extref_index=0, leader_aux_input_ch=0, leader_osc_index=0,
+        leader_extref_index=0, leader_aux_input_ch=0, leader_osc_index=0, leader_pll_demod_index=1,
         follower_extref_index=0, follower_aux_input_ch=0, follower_osc_index=0,
+        follower_pll_demod_index=1,
         extref_lock_timeout_s=5.0,
         sample="A",
     )
@@ -72,3 +73,12 @@ def test_build_summary_flags_excitation_current_ceiling(tmp_path) -> None:
 def test_build_summary_ok_for_default_state(tmp_path) -> None:
     _, _, errors = tui.build_summary(_state(data_dir=str(tmp_path)))
     assert errors == []
+
+
+def test_build_summary_flags_pll_demod_collision_with_signal_demod(tmp_path) -> None:
+    # demod 0 reads the real 1f/2f signal (see _build_plan) — extrefs/N/adcselect
+    # is read-only on real firmware, so the PLL detector can't reuse it.
+    _, _, errors = tui.build_summary(_state(data_dir=str(tmp_path), leader_pll_demod_index=0))
+    assert any("Leader PLL phase-detector demod" in e for e in errors)
+    _, _, errors = tui.build_summary(_state(data_dir=str(tmp_path), follower_pll_demod_index=0))
+    assert any("Follower PLL phase-detector demod" in e for e in errors)

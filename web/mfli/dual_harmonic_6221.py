@@ -93,10 +93,12 @@ def build_plan(state: dict) -> MeasurementPlan:
     leader_extref_cfg = ExtRefConfig(
         device=state["leader_device"], extref_index=int(state["leader_extref_index"]),
         aux_input_ch=int(state["leader_aux_input_ch"]), osc_index=int(state["leader_osc_index"]),
+        pll_demod_index=int(state["leader_pll_demod_index"]),
     )
     follower_extref_cfg = ExtRefConfig(
         device=state["follower_device"], extref_index=int(state["follower_extref_index"]),
         aux_input_ch=int(state["follower_aux_input_ch"]), osc_index=int(state["follower_osc_index"]),
+        pll_demod_index=int(state["follower_pll_demod_index"]),
     )
     filt = FilterConfig(
         time_constant_s=state["time_constant_s"], order=int(state["order"]),
@@ -315,12 +317,22 @@ def page() -> None:
                             "Leader Aux In channel (0 = Aux In 1)", float(d("leader_aux_input_ch")), integer=True)
                         inputs["leader_osc_index"] = num_field(
                             "Leader oscillator index", float(d("leader_osc_index")), integer=True)
+                        inputs["leader_pll_demod_index"] = num_field(
+                            "Leader PLL phase-detector demod index", float(d("leader_pll_demod_index")),
+                            integer=True,
+                            hint="Must differ from demod 0 (used for the real 1f signal) — "
+                                 "extrefs/N/adcselect is read-only on real firmware, this demod's "
+                                 "OWN adcselect is what actually selects Aux In.")
                         inputs["follower_extref_index"] = num_field(
                             "Follower ExtRef module index", float(d("follower_extref_index")), integer=True)
                         inputs["follower_aux_input_ch"] = num_field(
                             "Follower Aux In channel (0 = Aux In 1)", float(d("follower_aux_input_ch")), integer=True)
                         inputs["follower_osc_index"] = num_field(
                             "Follower oscillator index", float(d("follower_osc_index")), integer=True)
+                        inputs["follower_pll_demod_index"] = num_field(
+                            "Follower PLL phase-detector demod index", float(d("follower_pll_demod_index")),
+                            integer=True,
+                            hint="Must differ from demod 0 (used for the real 2f signal).")
 
                     with stable_card("Magnet & gaussmeter addresses"):
                         inputs["visa_resource"] = text_field("Magnet VISA resource", d("visa_resource"))

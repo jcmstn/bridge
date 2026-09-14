@@ -75,17 +75,20 @@ Bench-verify before trusting a run
 -----------------------------------
 ``configure_external_reference`` below logs the MFLI's actual
 ``extrefs/N/*`` node tree (via ``listNodesJSON``) the first time it runs —
-only ``extrefs/*/enable`` is confirmed against this rig's zhinst-utils
-install; ``adcselect`` (which Aux Input) and the lock-status node name are
-this function's best-effort guess at Zurich's own naming convention, not
-verified against real firmware. Read that log on the first bench run and
-fix the node paths in this file if the device disagrees.
+read it. ``extrefs/N/adcselect`` and ``extrefs/N/oscselect`` are READ-ONLY
+(confirmed against docs.zhinst.com/mfli_user_manual/nodedoc.html and a live
+device dump) — they only mirror whichever demodulator is wired in via
+``extrefs/N/demodselect``. There is no way to point the PLL at an Aux Input
+directly: a demodulator's own ``adcselect``/``oscselect`` select the Aux
+Input and target oscillator, and ``extrefs/N/demodselect`` wires that
+demodulator in as the phase detector.
 
-Also confirm on the bench, once: whether your MFLI's ExtRef/PLL module
-claims one of its demodulators internally as its own phase detector (true
-on some MF/UHF hardware). If so, that demod index is not available for
-``demod1_cfg``/``demod2_cfg`` below — the same ``listNodesJSON`` dump should
-show a demod-select node under ``extrefs`` if this applies to your unit.
+That demodulator (``ExtRefConfig.pll_demod_index``, default 2) is
+DEDICATED to being the PLL's phase detector and is not available for
+``demod1_cfg``/``demod2_cfg`` below (indices 0/1) — needs a free demod slot
+beyond those two (MF-MD / multi-demod option). If index 2 doesn't exist on
+your unit, the same ``listNodesJSON`` dump (or ``/{device}/demods/*``) shows
+how many you actually have.
 
 RMS vs. peak
 ------------
@@ -213,13 +216,36 @@ class FilterConfig:
 @dataclass
 class ExtRefConfig:
     """The MFLI external-reference PLL, locked to the 6221's phase marker
-    wired into an Aux Input. See the module docstring's "Bench-verify"
-    section — the node paths configure_external_reference() writes are a
-    best-effort guess, logged and checkable on first connect."""
-    device: str        = "dev1234"
-    extref_index: int  = 0     # which ExtRef/PLL module (0-based)
-    aux_input_ch: int  = 0     # which Aux Input carries the marker (0-based; 0 = Aux In 1)
-    osc_index: int     = 0     # oscillator the PLL locks — demods reference this
+    wired into an Aux Input.
+
+    `pll_demod_index` is a demodulator DEDICATED to being the PLL's phase
+    detector — must differ from demod1_cfg/demod2_cfg's demod_index (0/1
+    below). Confirmed against docs.zhinst.com/mfli_user_manual/nodedoc.html
+    and a live device dump: `extrefs/N/adcselect` / `extrefs/N/oscselect`
+    are READ-ONLY (they only mirror whichever demod is wired in via
+    `extrefs/N/demodselect`) — there is no way to point the PLL at an Aux
+    Input directly. You point a demodulator's OWN `adcselect` at the Aux
+    Input and its OWN `oscselect` at the target oscillator, then tell
+    `extrefs/N/demodselect` to use that demodulator. Needs a free demod
+    slot beyond the two used for the real 1f/2f signal (MF-MD /
+    multi-demod option) — default is demod index 2; verify against the
+    `demods/*` node count if that index doesn't exist on your unit."""
+    device: str            = "dev1234"
+    extref_index: int      = 0     # which ExtRef/PLL module (0-based)
+    aux_input_ch: int      = 0     # which Aux Input carries the marker (0-based; 0 = Aux In 1)
+    osc_index: int         = 0     # oscillator the PLL steers — demods reference this
+    pll_demod_index: int   = 2     # demod DEDICATED as the PLL's phase detector (≠ 0, ≠ 1)
+
+
+# ZI demods/n/adcselect enum (docs.zhinst.com/mfli_user_manual/nodedoc.html):
+# 8 = Aux In 1, 9 = Aux In 2 — NOT the same numbering as ExtRefConfig.aux_input_ch
+# (0-based channel index), so the two must be added, not used interchangeably.
+_ADCSELECT_AUX_IN_BASE = 8
+
+# extrefs/N/automode enum (same doc): "all"/dynamic PID adaptation for the
+# lock loop — left at whatever the device last had otherwise, which could be
+# a bandwidth tuned for a different signal from a previous run.
+_EXTREF_AUTOMODE_DYNAMIC = 4
 
 
 @dataclass
@@ -238,6 +264,21 @@ class DemodConfig:
     filter: FilterConfig = field(default_factory=FilterConfig)
 
 
+def _check_extref_demod_conflict(demod1_cfg: DemodConfig, demod2_cfg: DemodConfig,
+                                  extref_cfg: ExtRefConfig) -> None:
+    """Refuse a run where the PLL's dedicated phase-detector demod (see
+    ExtRefConfig.pll_demod_index's docstring) collides with either the 1f
+    or 2f signal demod — that demod's adcselect can only point at one input
+    (Aux In for the marker, or Signal Input for the real read), not both."""
+    for cfg in (demod1_cfg, demod2_cfg):
+        if cfg.device == extref_cfg.device and cfg.demod_index == extref_cfg.pll_demod_index:
+            raise ValueError(
+                f"demod_index ({cfg.demod_index}) and ExtRefConfig.pll_demod_index "
+                f"({extref_cfg.pll_demod_index}) are the same demod on {cfg.device} — "
+                "one demod can't simultaneously read Aux In (for the PLL) and Signal "
+                "Input (for the real signal). Pick a different pll_demod_index.")
+
+
 @dataclass
 class AmplitudePoint:
     amplitude_V: float
@@ -252,13 +293,14 @@ class AmplitudePoint:
 def configure_external_reference(daq: "zi.ziDAQServer", cfg: ExtRefConfig,
                                   frequency_Hz: float) -> None:
     """Lock ``cfg.osc_index`` to the 6221's phase marker wired into
-    ``cfg.aux_input_ch``. Pre-sets the oscillator to the known 6221
-    frequency first — whether the PLL does a full frequency search or a
-    phase-only lock, starting close to correct shortens or removes that
-    search (same reasoning as sync_follower_oscillator() in
+    ``cfg.aux_input_ch``, via a dedicated ``cfg.pll_demod_index`` phase-
+    detector demodulator (see ExtRefConfig's docstring for why — extrefs/N/
+    adcselect is read-only on real firmware). Pre-sets the oscillator to
+    the known 6221 frequency first — whether the PLL does a full frequency
+    search or a phase-only lock, starting close to correct shortens or
+    removes that search (same reasoning as sync_follower_oscillator() in
     instruments/mfli_daq.py). Logs the live ``extrefs`` node tree so the
-    node names below can be checked against real firmware on first
-    connect — see the module docstring's "Bench-verify" section.
+    node names below can be checked against real firmware on first connect.
     """
     d = cfg.device
     daq.setDouble(f"/{d}/oscs/{cfg.osc_index}/freq", frequency_Hz)
@@ -269,12 +311,17 @@ def configure_external_reference(daq: "zi.ziDAQServer", cfg: ExtRefConfig,
     except Exception:
         log.exception("Could not list /%s/extrefs/%d/* — node names below are "
                       "unverified for this device/firmware.", d, cfg.extref_index)
-    daq.setInt(f"/{d}/extrefs/{cfg.extref_index}/adcselect", cfg.aux_input_ch)
+    daq.setInt(f"/{d}/demods/{cfg.pll_demod_index}/adcselect",
+              _ADCSELECT_AUX_IN_BASE + cfg.aux_input_ch)
+    daq.setInt(f"/{d}/demods/{cfg.pll_demod_index}/oscselect", cfg.osc_index)
+    daq.setInt(f"/{d}/demods/{cfg.pll_demod_index}/enable", 1)
+    daq.setInt(f"/{d}/extrefs/{cfg.extref_index}/demodselect", cfg.pll_demod_index)
+    daq.setInt(f"/{d}/extrefs/{cfg.extref_index}/automode", _EXTREF_AUTOMODE_DYNAMIC)
     daq.setInt(f"/{d}/extrefs/{cfg.extref_index}/enable", 1)
     daq.sync()
     log.info("MFLI %s: oscillator %d locking to Aux In %d via extrefs/%d "
-             "(target %.4f Hz)", d, cfg.osc_index, cfg.aux_input_ch + 1,
-             cfg.extref_index, frequency_Hz)
+             "(phase detector demod%d, target %.4f Hz)", d, cfg.osc_index,
+             cfg.aux_input_ch + 1, cfg.extref_index, cfg.pll_demod_index, frequency_Hz)
 
 
 def wait_for_reference_lock(daq: "zi.ziDAQServer", cfg: ExtRefConfig,
@@ -431,6 +478,7 @@ def run_measurement(
     pulses in a row fail — identical guard to sot_pulsed_switching.py.
     """
     _check_read_safety(read_cfg)
+    _check_extref_demod_conflict(demod1_cfg, demod2_cfg, extref_cfg)
 
     field_measured_mT = None
     if gaussmeter is not None and gauss_cfg is not None:
@@ -576,12 +624,13 @@ def main() -> None:
         visa_resource="TCPIP0::192.168.1.5::7020::SOCKET", sensor_uids=("MB1.T1",))
 
     MFLI_DEVICE = "dev1234"
-    extref_cfg = ExtRefConfig(device=MFLI_DEVICE, aux_input_ch=0, osc_index=0)
+    extref_cfg = ExtRefConfig(device=MFLI_DEVICE, aux_input_ch=0, osc_index=0, pll_demod_index=2)
     shared_filter = FilterConfig(time_constant_s=0.3, order=4, sinc_filter=True)
     demod1_cfg = DemodConfig(device=MFLI_DEVICE, demod_index=0, harmonic=1,
                              osc_index=0, filter=shared_filter)
     demod2_cfg = DemodConfig(device=MFLI_DEVICE, demod_index=1, harmonic=2,
                              osc_index=0, filter=shared_filter)
+    _check_extref_demod_conflict(demod1_cfg, demod2_cfg, extref_cfg)
 
     FIELD_ANGLE_FROM_OOP_DEG = 85.0
     STATIC_MAGNET_CURRENT_A = 1.5

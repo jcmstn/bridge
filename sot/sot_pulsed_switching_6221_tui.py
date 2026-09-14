@@ -46,6 +46,7 @@ from sot.sot_pulsed_switching_6221 import (
     _READ_CURRENT_CEILING_A,
     _WRITE_CURRENT_HARD_MAX_A,
     _check_pulse_currents,
+    _check_extref_demod_conflict,
     _check_read_safety,
     _check_write_safety,
     ACSourceConfig,
@@ -154,6 +155,7 @@ DEFAULTS: dict = {
     "aux_input_ch": "0",
     "osc_index": "0",
     "extref_index": "0",
+    "pll_demod_index": "0",
     "demod_index": "1",
     "input_ch": "0",
     "input_range_V": "1.0",
@@ -197,6 +199,7 @@ NUMERIC_FIELDS: dict = {
     "aux_input_ch": int,
     "osc_index": int,
     "extref_index": int,
+    "pll_demod_index": int,
     "demod_index": int,
     "input_ch": int,
     "input_range_V": float,
@@ -481,6 +484,12 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
                 f"{state['frequency_Hz']:g} Hz, {state['harmonic']}f read, phase marker on "
                 f"Trigger Link pin {state['phasemarker_line']} → MFLI Aux In "
                 f"{state['aux_input_ch'] + 1}")
+
+    if state["pll_demod_index"] == state["demod_index"]:
+        errors.append(
+            f"PLL phase-detector demod index and signal demod index are both "
+            f"{state['demod_index']} — extrefs/N/adcselect is read-only, so the PLL "
+            "phase-detector demod can't double as the signal demod. Pick distinct indices.")
 
     if len(currents) > 1:
         cur_str = ", ".join(f"{i:g}" for i in currents)
@@ -782,6 +791,7 @@ class RunScreen(Screen):
             _check_write_safety(plan.pulse_cfg)
             _check_pulse_currents(points)
             _check_read_safety(plan.read_cfg)
+            _check_extref_demod_conflict(plan.demod_cfg, plan.extref_cfg)
             self._set_status_threadsafe("Connecting to Keithley 6221 …")
             source = connect_ac_source(plan.ac_cfg)
             _six221_ac_output_off(source)          # channel quiet before any pulse
@@ -1031,11 +1041,15 @@ class SOTPulsedSwitching6221App(App):
                                   kind="integer"),
                             field("extref_index", "ExtRef/PLL module index", DEFAULTS["extref_index"],
                                   kind="integer"),
+                            field("pll_demod_index", "PLL phase-detector demod index (≠ demod below)",
+                                  DEFAULTS["pll_demod_index"], kind="integer",
+                                  hint="extrefs/N/adcselect is read-only on real firmware — the PLL "
+                                       "is steered via THIS dedicated demod's own adcselect/oscselect "
+                                       "instead. Must differ from the demod index below."),
                             field("demod_index", "Demodulator index", DEFAULTS["demod_index"],
                                   kind="integer",
-                                  hint="Default skips index 0 — the most likely one an ExtRef/PLL "
-                                       "claims internally on some units. See the module docstring's "
-                                       "'Bench-verify' section before assuming it's free."),
+                                  hint="Default skips index 0 — that's the PLL phase-detector demod "
+                                       "above. See the module docstring's 'Bench-verify' section."),
                             field("input_ch", "Signal Input channel (0-based)",
                                   DEFAULTS["input_ch"], kind="integer"),
                             switch_field("differential", "Differential input (IN+ / IN−)",
@@ -1286,6 +1300,7 @@ class SOTPulsedSwitching6221App(App):
         extref_cfg = ExtRefConfig(
             device=state["mfli_device"], extref_index=state["extref_index"],
             aux_input_ch=state["aux_input_ch"], osc_index=state["osc_index"],
+            pll_demod_index=state["pll_demod_index"],
         )
         shared_filter = FilterConfig(
             time_constant_s=state["filter_time_constant_s"], order=state["filter_order"],

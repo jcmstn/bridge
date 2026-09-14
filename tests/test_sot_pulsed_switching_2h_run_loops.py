@@ -249,6 +249,19 @@ def test_pulsed_refuses_absurd_read_current_or_compliance():
         _run_pulsed(dev, pmu_cfg, read_cfg, demod1_cfg, demod2_cfg, extref_cfg, pt)
 
 
+def test_pulsed_refuses_extref_demod_collision():
+    """extrefs/N/adcselect is read-only on real firmware (confirmed against
+    a live device) — the PLL's dedicated phase-detector demod must differ
+    from both signal demods, checked before any hardware call."""
+    import pytest
+    dev = _FakeKXCI()
+    pmu_cfg, read_cfg, demod1_cfg, demod2_cfg, extref_cfg = _pulsed_cfgs()
+    extref_cfg.pll_demod_index = demod1_cfg.demod_index
+    pt = [ps.AmplitudePoint(amplitude_V=0.5)]
+    with pytest.raises(ValueError):
+        _run_pulsed(dev, pmu_cfg, read_cfg, demod1_cfg, demod2_cfg, extref_cfg, pt)
+
+
 def test_pulsed_lock_timeout_tags_row_instead_of_aborting():
     """A PLL that never reports locked degrades the row (reference_locked=False),
     logged, not fatal — see wait_for_reference_lock()'s docstring."""

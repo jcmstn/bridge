@@ -36,8 +36,9 @@ def _state(data_dir: Path, **overrides) -> dict:
         phase_cal_n_averages=20, phase_cal_max_iterations=5,
         hall_bar_length_um=None, hall_bar_width_um=None,
         hall_bar_thickness_nm=None, field_angle_from_oop_deg=None,
-        leader_extref_index=0, leader_aux_input_ch=0, leader_osc_index=0,
+        leader_extref_index=0, leader_aux_input_ch=0, leader_osc_index=0, leader_pll_demod_index=1,
         follower_extref_index=0, follower_aux_input_ch=0, follower_osc_index=0,
+        follower_pll_demod_index=1,
         extref_lock_timeout_s=5.0,
         sample="A", data_dir=str(data_dir),
     )

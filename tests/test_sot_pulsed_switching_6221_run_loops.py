@@ -238,6 +238,17 @@ def test_refuses_bad_pulse_width_or_compliance():
         _run(pulse_cfg, read_cfg, demod_cfg, extref_cfg, pt)
 
 
+def test_refuses_extref_demod_collision():
+    """extrefs/N/adcselect is read-only on real firmware (confirmed against
+    a live device) — the PLL's dedicated phase-detector demod must differ
+    from the signal demod, checked before any hardware call."""
+    pulse_cfg, read_cfg, demod_cfg, extref_cfg = _cfgs()
+    extref_cfg.pll_demod_index = demod_cfg.demod_index
+    pt = [ps.PulsePoint(pulse_current_A=5e-3)]
+    with pytest.raises(ValueError):
+        _run(pulse_cfg, read_cfg, demod_cfg, extref_cfg, pt)
+
+
 def test_harmonic_is_configurable_and_recorded():
     pulse_cfg, read_cfg, demod_cfg, extref_cfg = _cfgs(harmonic=1)
     demod_cfg.harmonic = 1

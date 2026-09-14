@@ -173,9 +173,11 @@ DEFAULTS: dict = {
     "leader_extref_index": "0",
     "leader_aux_input_ch": "0",
     "leader_osc_index": "0",
+    "leader_pll_demod_index": "1",
     "follower_extref_index": "0",
     "follower_aux_input_ch": "0",
     "follower_osc_index": "0",
+    "follower_pll_demod_index": "1",
     "extref_lock_timeout_s": "5.0",
 }
 
@@ -207,9 +209,11 @@ NUMERIC_FIELDS: dict = {
     "leader_extref_index": int,
     "leader_aux_input_ch": int,
     "leader_osc_index": int,
+    "leader_pll_demod_index": int,
     "follower_extref_index": int,
     "follower_aux_input_ch": int,
     "follower_osc_index": int,
+    "follower_pll_demod_index": int,
     "extref_lock_timeout_s": float,
 }
 TEXT_FIELDS = ["leader_device", "follower_device", "daq_host", "ac_visa_resource", "device", "cooldown",
@@ -433,6 +437,17 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         "toward zero once the two clocks drift apart. See the module "
         "docstring."
     )
+
+    # ── PLL phase-detector demod ────────────────────────────────────────────
+    # The real 1f/2f signal demod is fixed at index 0 (see _build_plan below)
+    # — the PLL detector must be a different demod (extrefs/N/adcselect is
+    # read-only on real firmware; see ExtRefConfig's docstring).
+    if state["leader_pll_demod_index"] == 0:
+        errors.append("Leader PLL phase-detector demod index must differ from 0 "
+                       "(demod 0 reads the real 1f signal).")
+    if state["follower_pll_demod_index"] == 0:
+        errors.append("Follower PLL phase-detector demod index must differ from 0 "
+                       "(demod 0 reads the real 2f signal).")
 
     # ── Filter / timing ─────────────────────────────────────────────────────
     tc = state["time_constant_s"]
@@ -1202,12 +1217,22 @@ class MFLIDualHarmonic6221App(App):
                                   DEFAULTS["leader_aux_input_ch"], kind="integer"),
                             field("leader_osc_index", "Leader oscillator index",
                                   DEFAULTS["leader_osc_index"], kind="integer"),
+                            field("leader_pll_demod_index", "Leader PLL phase-detector demod index",
+                                  DEFAULTS["leader_pll_demod_index"], kind="integer",
+                                  hint="Must differ from demod 0 (used for the real 1f signal) — "
+                                       "extrefs/N/adcselect is read-only on real firmware, this "
+                                       "demod's OWN adcselect is what actually selects Aux In.",
+                                  validators=[Number(minimum=0, failure_description="must be ≥ 0")]),
                             field("follower_extref_index", "Follower ExtRef module index",
                                   DEFAULTS["follower_extref_index"], kind="integer"),
                             field("follower_aux_input_ch", "Follower Aux In channel (0 = Aux In 1)",
                                   DEFAULTS["follower_aux_input_ch"], kind="integer"),
                             field("follower_osc_index", "Follower oscillator index",
                                   DEFAULTS["follower_osc_index"], kind="integer"),
+                            field("follower_pll_demod_index", "Follower PLL phase-detector demod index",
+                                  DEFAULTS["follower_pll_demod_index"], kind="integer",
+                                  hint="Must differ from demod 0 (used for the real 2f signal).",
+                                  validators=[Number(minimum=0, failure_description="must be ≥ 0")]),
                             muted=True,
                         )
                         yield card(
@@ -1525,10 +1550,12 @@ class MFLIDualHarmonic6221App(App):
         leader_extref_cfg = ExtRefConfig(
             device=state["leader_device"], extref_index=state["leader_extref_index"],
             aux_input_ch=state["leader_aux_input_ch"], osc_index=state["leader_osc_index"],
+            pll_demod_index=state["leader_pll_demod_index"],
         )
         follower_extref_cfg = ExtRefConfig(
             device=state["follower_device"], extref_index=state["follower_extref_index"],
             aux_input_ch=state["follower_aux_input_ch"], osc_index=state["follower_osc_index"],
+            pll_demod_index=state["follower_pll_demod_index"],
         )
         filt = FilterConfig(
             time_constant_s=state["time_constant_s"],

@@ -33,7 +33,8 @@ def _state(**overrides) -> dict:
         device="HB3", cooldown="3", temperature_setpoint_K=300.0,
         source_visa_resource="GPIB0::20::INSTR",
         mfli_host="localhost", mfli_port=8004, mfli_device="dev1234",
-        aux_input_ch=0, osc_index=0, extref_index=0, demod1_index=1, demod2_index=2,
+        aux_input_ch=0, osc_index=0, extref_index=0, pll_demod_index=0,
+        demod1_index=1, demod2_index=2,
         input_ch=0, input_range_V=1.0, sample_rate_Hz=857.0,
         filter_time_constant_s=0.3, filter_order=4,
         differential=True, ac_coupling=True, filter_sinc=True,
@@ -59,6 +60,15 @@ def test_summary_blocks_on_empty_pmu_module():
 def test_summary_blocks_amplitude_over_v_limit():
     _, _, errors = tui.build_summary(_state(amplitude_stop_V=8.0, pmu_v_limit_V=5.0))
     assert any("PMU voltage limit" in e for e in errors)
+
+
+def test_summary_blocks_pll_demod_collision():
+    # extrefs/N/adcselect is read-only on real firmware — the PLL phase-detector
+    # demod can't double as either signal demod.
+    _, _, errors = tui.build_summary(_state(pll_demod_index=1, demod1_index=1))
+    assert any("phase-detector demod" in e for e in errors)
+    _, _, errors = tui.build_summary(_state(pll_demod_index=2, demod2_index=2))
+    assert any("phase-detector demod" in e for e in errors)
 
 
 def test_summary_blocks_zero_step():
