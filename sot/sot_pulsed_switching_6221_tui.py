@@ -156,6 +156,7 @@ DEFAULTS: dict = {
     "osc_index": "0",
     "extref_index": "0",
     "pll_demod_index": "0",
+    "automode": "4",
     "demod_index": "1",
     "input_ch": "0",
     "input_range_V": "1.0",
@@ -177,6 +178,16 @@ DEFAULTS: dict = {
     "temperature_visa_resource": "TCPIP0::192.168.1.5::7020::SOCKET",
     "temperature_sensor_uids": "MB1.T1",
 }
+
+# extrefs/N/automode options — see ExtRefConfig.automode's docstring in
+# sot_pulsed_switching_6221.py for the full rationale.
+AUTOMODE_OPTIONS: list[tuple[str, int]] = [
+    ("2 — low bandwidth", 2),
+    ("3 — high bandwidth", 3),
+    ("4 — dynamic (auto)", 4),
+]
+AUTOMODE_HINT = ("2=most forgiving acquisition (marginal/noisy signal), "
+                 "3=fastest tracking once locked, 4=auto-adapts (default).")
 
 NUMERIC_FIELDS: dict = {
     "pulse_current_start_A": float,
@@ -361,6 +372,18 @@ def switch_field(field_id: str, label_text: str, default: bool) -> Horizontal:
                      classes="switch-row")
     row.styles.margin = (0, 0, 1, 0)
     return row
+
+
+def select_field(field_id: str, label_text: str, options: list[tuple[str, int]] | list[int],
+                  default: int, *, hint: str = "") -> list:
+    label = Label(label_text, classes="field-label")
+    opts = [(str(o), o) for o in options] if options and not isinstance(options[0], tuple) else options
+    sel = Select(opts, id=field_id, value=default, allow_blank=False)
+    widgets = [label, sel]
+    if hint:
+        widgets.append(Label(hint, classes="hint"))
+    widgets[-1].styles.margin = (0, 0, 1, 0)
+    return widgets
 
 
 def card(title: str, *groups, muted: bool = False) -> Vertical:
@@ -1046,6 +1069,9 @@ class SOTPulsedSwitching6221App(App):
                                   hint="extrefs/N/adcselect is read-only on real firmware — the PLL "
                                        "is steered via THIS dedicated demod's own adcselect/oscselect "
                                        "instead. Must differ from the demod index below."),
+                            select_field("automode", "PLL bandwidth adaptation",
+                                         AUTOMODE_OPTIONS, int(DEFAULTS["automode"]),
+                                         hint=AUTOMODE_HINT),
                             field("demod_index", "Demodulator index", DEFAULTS["demod_index"],
                                   kind="integer",
                                   hint="Default skips index 0 — that's the PLL phase-detector demod "
@@ -1158,6 +1184,7 @@ class SOTPulsedSwitching6221App(App):
         raw: dict = {fid: self.query_one(f"#{fid}", Input).value for fid in self._all_field_ids()}
         for sid in SWITCH_FIELD_IDS:
             raw[sid] = self.query_one(f"#{sid}", Switch).value
+        raw["automode"] = self.query_one("#automode", Select).value
         sample_value = self.query_one("#sample_select", Select).value
         if sample_value not in (None, Select.BLANK, NEW_SAMPLE_SENTINEL):
             raw["sample"] = sample_value
@@ -1177,6 +1204,11 @@ class SOTPulsedSwitching6221App(App):
         for sid in SWITCH_FIELD_IDS:
             if sid in saved:
                 self.query_one(f"#{sid}", Switch).value = bool(saved[sid])
+        if "automode" in saved:
+            try:
+                self.query_one("#automode", Select).value = int(saved["automode"])
+            except Exception:
+                pass
         self._sync_data_root()
         saved_sample = saved.get("sample")
         if saved_sample and saved_sample in [v for _, v in sample_options(self.data_root)]:
@@ -1213,6 +1245,7 @@ class SOTPulsedSwitching6221App(App):
                 state[fid] = None
         for sid in SWITCH_FIELD_IDS:
             state[sid] = self.query_one(f"#{sid}", Switch).value
+        state["automode"] = int(self.query_one("#automode", Select).value)
         sample_value = self.query_one("#sample_select", Select).value
         state["sample"] = sample_value if sample_value not in (None, Select.BLANK) else ""
 
@@ -1300,7 +1333,7 @@ class SOTPulsedSwitching6221App(App):
         extref_cfg = ExtRefConfig(
             device=state["mfli_device"], extref_index=state["extref_index"],
             aux_input_ch=state["aux_input_ch"], osc_index=state["osc_index"],
-            pll_demod_index=state["pll_demod_index"],
+            pll_demod_index=state["pll_demod_index"], automode=state["automode"],
         )
         shared_filter = FilterConfig(
             time_constant_s=state["filter_time_constant_s"], order=state["filter_order"],

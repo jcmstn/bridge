@@ -68,6 +68,12 @@ MFLI_DUAL_HARMONIC_6221_DESCRIPTION = (
     "sample geometry all match the pure-MFLI version."
 )
 
+# extrefs/N/automode options — see ExtRefConfig.automode's docstring in
+# mfli_dual_harmonic_6221.py for the full rationale.
+AUTOMODE_OPTIONS = {2: "2 — low bandwidth", 3: "3 — high bandwidth", 4: "4 — dynamic (auto)"}
+AUTOMODE_HINT = ("2=most forgiving acquisition (marginal/noisy signal), "
+                 "3=fastest tracking once locked, 4=auto-adapts (default).")
+
 
 def _load_settings() -> dict:
     try:
@@ -93,12 +99,12 @@ def build_plan(state: dict) -> MeasurementPlan:
     leader_extref_cfg = ExtRefConfig(
         device=state["leader_device"], extref_index=int(state["leader_extref_index"]),
         aux_input_ch=int(state["leader_aux_input_ch"]), osc_index=int(state["leader_osc_index"]),
-        pll_demod_index=int(state["leader_pll_demod_index"]),
+        pll_demod_index=int(state["leader_pll_demod_index"]), automode=int(state["leader_automode"]),
     )
     follower_extref_cfg = ExtRefConfig(
         device=state["follower_device"], extref_index=int(state["follower_extref_index"]),
         aux_input_ch=int(state["follower_aux_input_ch"]), osc_index=int(state["follower_osc_index"]),
-        pll_demod_index=int(state["follower_pll_demod_index"]),
+        pll_demod_index=int(state["follower_pll_demod_index"]), automode=int(state["follower_automode"]),
     )
     filt = FilterConfig(
         time_constant_s=state["time_constant_s"], order=int(state["order"]),
@@ -323,6 +329,10 @@ def page() -> None:
                             hint="Must differ from demod 0 (used for the real 1f signal) — "
                                  "extrefs/N/adcselect is read-only on real firmware, this demod's "
                                  "OWN adcselect is what actually selects Aux In.")
+                        leader_automode_select = ui.select(
+                            AUTOMODE_OPTIONS, value=int(d("leader_automode")),
+                            label="Leader PLL bandwidth adaptation").classes("w-full")
+                        ui.label(AUTOMODE_HINT).classes("text-xs text-grey-6 -mt-2 mb-2")
                         inputs["follower_extref_index"] = num_field(
                             "Follower ExtRef module index", float(d("follower_extref_index")), integer=True)
                         inputs["follower_aux_input_ch"] = num_field(
@@ -333,6 +343,10 @@ def page() -> None:
                             "Follower PLL phase-detector demod index", float(d("follower_pll_demod_index")),
                             integer=True,
                             hint="Must differ from demod 0 (used for the real 2f signal).")
+                        follower_automode_select = ui.select(
+                            AUTOMODE_OPTIONS, value=int(d("follower_automode")),
+                            label="Follower PLL bandwidth adaptation").classes("w-full")
+                        ui.label(AUTOMODE_HINT).classes("text-xs text-grey-6 -mt-2 mb-2")
 
                     with stable_card("Magnet & gaussmeter addresses"):
                         inputs["visa_resource"] = text_field("Magnet VISA resource", d("visa_resource"))
@@ -436,6 +450,8 @@ def page() -> None:
         for fid, sw in switches.items():
             state[fid] = sw.value
         state["order"] = int(order_select.value)
+        state["leader_automode"] = int(leader_automode_select.value)
+        state["follower_automode"] = int(follower_automode_select.value)
         sample_value = identity.sample_dropdown.value
         state["sample"] = sample_value if sample_value not in (None, NEW_SAMPLE_SENTINEL) else ""
         return state, errors
@@ -447,6 +463,8 @@ def page() -> None:
         for fid, sw in switches.items():
             raw[fid] = sw.value
         raw["order"] = order_select.value
+        raw["leader_automode"] = leader_automode_select.value
+        raw["follower_automode"] = follower_automode_select.value
         raw["data_dir"] = identity.data_dir_input.value
         raw["device"] = identity.device_input.value
         raw["cooldown"] = identity.cooldown_input.value
@@ -485,6 +503,8 @@ def page() -> None:
     for sw in switches.values():
         sw.on_value_change(refresh_summary.refresh)
     order_select.on_value_change(refresh_summary.refresh)
+    leader_automode_select.on_value_change(refresh_summary.refresh)
+    follower_automode_select.on_value_change(refresh_summary.refresh)
     refresh_summary()
     ui.timer(2.0, refresh_summary.refresh)
 

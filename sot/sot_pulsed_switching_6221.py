@@ -274,6 +274,13 @@ class ExtRefConfig:
     aux_input_ch: int      = 0     # which Aux Input carries the marker (0-based; 0 = Aux In 1)
     osc_index: int         = 0     # oscillator the PLL steers — the signal demod references this
     pll_demod_index: int   = 0     # demod DEDICATED as the PLL's phase detector (≠ DemodConfig.demod_index)
+    automode: int          = 4     # extrefs/N/automode — PID bandwidth adaptation for the lock loop:
+                                    #   2 = low_bandwidth (most forgiving acquisition, best for a
+                                    #       marginal/noisy signal), 3 = high_bandwidth (fastest
+                                    #       tracking once locked, least noise tolerance), 4 = all/
+                                    #       dynamic (auto-adapts — the default). Left at whatever the
+                                    #       device last had if never set, which could be a bandwidth
+                                    #       tuned for a different signal from a previous run.
 
 
 # ZI demods/n/adcselect enum (docs.zhinst.com/mfli_user_manual/nodedoc.html):
@@ -281,25 +288,22 @@ class ExtRefConfig:
 # (0-based channel index), so the two must be added, not used interchangeably.
 _ADCSELECT_AUX_IN_BASE = 8
 
-# extrefs/N/automode enum (same doc): "all"/dynamic PID adaptation for the
-# lock loop — left at whatever the device last had otherwise, which could be
-# a bandwidth tuned for a different signal from a previous run.
-_EXTREF_AUTOMODE_DYNAMIC = 4
-
 # demods/n/rate is "number of samples sent to the host / LabOne Data
 # Server per second" (node doc). MFLI's spec sheet lists 200 kSa/s as the
 # "maximum transfer rate over 1 GbE (all demodulators)" — but that's an
 # explicitly-labeled NETWORK/STORAGE limit, not the demodulator's native
-# rate (docs.zhinst.com/mfli_user_manual/specifications.html); the Aux
-# Input's own raw ADC is 16-bit/15 MSa/s with 5 MHz analog bandwidth (same
-# page) — comfortably fast enough to resolve the 6221's ~1 µs marker pulse.
-# Whether the on-device PLL's phase detection depends on this demod's own
-# decimated rate at all isn't documented either way. Rather than guess a
-# number, request something intentionally far above anything this device
-# could really support and let the firmware clamp it — the node doc says a
-# requested value "may be approximated to the nearest value supported by
-# the instrument" — then read back and log what was actually applied.
-_PLL_DETECTOR_RATE_REQUEST_HZ = 1e9
+# rate (docs.zhinst.com/mfli_user_manual/specifications.html). Requested
+# value here (15 MSa/s) matches the Aux Input's own raw ADC spec (16-bit,
+# 15 MSa/s, 5 MHz analog bandwidth, same page) — the fastest this input
+# could physically need resolving at, so asking for more wouldn't mean
+# anything. Whether the on-device PLL's phase detection depends on this
+# demod's own decimated rate at all still isn't documented either way, and
+# demods/n/rate's own true max isn't documented independent of the network
+# figure above — the node doc says a requested value "may be approximated
+# to the nearest value supported by the instrument", so this may still get
+# clamped down; read back and log what was actually applied rather than
+# assume.
+_PLL_DETECTOR_RATE_REQUEST_HZ = 15e6
 
 
 @dataclass
@@ -372,7 +376,7 @@ def configure_external_reference(daq: "zi.ziDAQServer", cfg: ExtRefConfig,
     daq.setDouble(f"/{d}/demods/{cfg.pll_demod_index}/rate", _PLL_DETECTOR_RATE_REQUEST_HZ)
     daq.setInt(f"/{d}/demods/{cfg.pll_demod_index}/enable", 1)
     daq.setInt(f"/{d}/extrefs/{cfg.extref_index}/demodselect", cfg.pll_demod_index)
-    daq.setInt(f"/{d}/extrefs/{cfg.extref_index}/automode", _EXTREF_AUTOMODE_DYNAMIC)
+    daq.setInt(f"/{d}/extrefs/{cfg.extref_index}/automode", cfg.automode)
     daq.setInt(f"/{d}/extrefs/{cfg.extref_index}/enable", 1)
     daq.sync()
     applied_rate = daq.getDouble(f"/{d}/demods/{cfg.pll_demod_index}/rate")

@@ -174,12 +174,24 @@ DEFAULTS: dict = {
     "leader_aux_input_ch": "0",
     "leader_osc_index": "0",
     "leader_pll_demod_index": "1",
+    "leader_automode": "4",
     "follower_extref_index": "0",
     "follower_aux_input_ch": "0",
     "follower_osc_index": "0",
     "follower_pll_demod_index": "1",
+    "follower_automode": "4",
     "extref_lock_timeout_s": "5.0",
 }
+
+# extrefs/N/automode options — see ExtRefConfig.automode's docstring in
+# mfli_dual_harmonic_6221.py for the full rationale.
+AUTOMODE_OPTIONS: list[tuple[str, int]] = [
+    ("2 — low bandwidth", 2),
+    ("3 — high bandwidth", 3),
+    ("4 — dynamic (auto)", 4),
+]
+AUTOMODE_HINT = ("2=most forgiving acquisition (marginal/noisy signal), "
+                 "3=fastest tracking once locked, 4=auto-adapts (default).")
 
 # id -> caster, for every free-text numeric field (Select/Switch handled separately)
 NUMERIC_FIELDS: dict = {
@@ -364,11 +376,16 @@ def switch_field(field_id: str, label_text: str, default: bool) -> Horizontal:
     return row
 
 
-def select_field(field_id: str, label_text: str, options: list[int], default: int) -> list:
+def select_field(field_id: str, label_text: str, options: list[tuple[str, int]] | list[int],
+                  default: int, *, hint: str = "") -> list:
     label = Label(label_text, classes="field-label")
-    sel = Select([(str(o), o) for o in options], id=field_id, value=default, allow_blank=False)
-    sel.styles.margin = (0, 0, 1, 0)
-    return [label, sel]
+    opts = [(str(o), o) for o in options] if options and not isinstance(options[0], tuple) else options
+    sel = Select(opts, id=field_id, value=default, allow_blank=False)
+    widgets = [label, sel]
+    if hint:
+        widgets.append(Label(hint, classes="hint"))
+    widgets[-1].styles.margin = (0, 0, 1, 0)
+    return widgets
 
 
 def card(title: str, *groups, muted: bool = False) -> Vertical:
@@ -1223,6 +1240,9 @@ class MFLIDualHarmonic6221App(App):
                                        "extrefs/N/adcselect is read-only on real firmware, this "
                                        "demod's OWN adcselect is what actually selects Aux In.",
                                   validators=[Number(minimum=0, failure_description="must be ≥ 0")]),
+                            select_field("leader_automode", "Leader PLL bandwidth adaptation",
+                                         AUTOMODE_OPTIONS, int(DEFAULTS["leader_automode"]),
+                                         hint=AUTOMODE_HINT),
                             field("follower_extref_index", "Follower ExtRef module index",
                                   DEFAULTS["follower_extref_index"], kind="integer"),
                             field("follower_aux_input_ch", "Follower Aux In channel (0 = Aux In 1)",
@@ -1233,6 +1253,9 @@ class MFLIDualHarmonic6221App(App):
                                   DEFAULTS["follower_pll_demod_index"], kind="integer",
                                   hint="Must differ from demod 0 (used for the real 2f signal).",
                                   validators=[Number(minimum=0, failure_description="must be ≥ 0")]),
+                            select_field("follower_automode", "Follower PLL bandwidth adaptation",
+                                         AUTOMODE_OPTIONS, int(DEFAULTS["follower_automode"]),
+                                         hint=AUTOMODE_HINT),
                             muted=True,
                         )
                         yield card(
@@ -1386,6 +1409,8 @@ class MFLIDualHarmonic6221App(App):
         raw["enable_temperature"] = self.query_one("#enable_temperature", Switch).value
         raw["enable_phase_cal"] = self.query_one("#enable_phase_cal", Switch).value
         raw["order"] = self.query_one("#order", Select).value
+        raw["leader_automode"] = self.query_one("#leader_automode", Select).value
+        raw["follower_automode"] = self.query_one("#follower_automode", Select).value
         sample_value = self.query_one("#sample_select", Select).value
         if sample_value not in (None, Select.BLANK, NEW_SAMPLE_SENTINEL):
             raw["sample"] = sample_value
@@ -1417,6 +1442,16 @@ class MFLIDualHarmonic6221App(App):
         if "order" in saved:
             try:
                 self.query_one("#order", Select).value = int(saved["order"])
+            except Exception:
+                pass
+        if "leader_automode" in saved:
+            try:
+                self.query_one("#leader_automode", Select).value = int(saved["leader_automode"])
+            except Exception:
+                pass
+        if "follower_automode" in saved:
+            try:
+                self.query_one("#follower_automode", Select).value = int(saved["follower_automode"])
             except Exception:
                 pass
         self._sync_data_root()
@@ -1460,6 +1495,8 @@ class MFLIDualHarmonic6221App(App):
         state["enable_temperature"] = self.query_one("#enable_temperature", Switch).value
         state["enable_phase_cal"] = self.query_one("#enable_phase_cal", Switch).value
         state["order"] = int(self.query_one("#order", Select).value)
+        state["leader_automode"] = int(self.query_one("#leader_automode", Select).value)
+        state["follower_automode"] = int(self.query_one("#follower_automode", Select).value)
         sample_value = self.query_one("#sample_select", Select).value
         state["sample"] = sample_value if sample_value not in (None, Select.BLANK) else ""
         return state, errors
@@ -1550,12 +1587,12 @@ class MFLIDualHarmonic6221App(App):
         leader_extref_cfg = ExtRefConfig(
             device=state["leader_device"], extref_index=state["leader_extref_index"],
             aux_input_ch=state["leader_aux_input_ch"], osc_index=state["leader_osc_index"],
-            pll_demod_index=state["leader_pll_demod_index"],
+            pll_demod_index=state["leader_pll_demod_index"], automode=state["leader_automode"],
         )
         follower_extref_cfg = ExtRefConfig(
             device=state["follower_device"], extref_index=state["follower_extref_index"],
             aux_input_ch=state["follower_aux_input_ch"], osc_index=state["follower_osc_index"],
-            pll_demod_index=state["follower_pll_demod_index"],
+            pll_demod_index=state["follower_pll_demod_index"], automode=state["follower_automode"],
         )
         filt = FilterConfig(
             time_constant_s=state["time_constant_s"],

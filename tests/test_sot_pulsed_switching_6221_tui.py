@@ -27,7 +27,7 @@ def _state(**overrides) -> dict:
         device="HB3", cooldown="3", temperature_setpoint_K=300.0,
         source_visa_resource="GPIB0::20::INSTR",
         mfli_host="localhost", mfli_port=8004, mfli_device="dev1234",
-        aux_input_ch=0, osc_index=0, extref_index=0, pll_demod_index=0, demod_index=1,
+        aux_input_ch=0, osc_index=0, extref_index=0, pll_demod_index=0, automode=4, demod_index=1,
         input_ch=0, input_range_V=1.0, sample_rate_Hz=857.0,
         filter_time_constant_s=0.3, filter_order=4,
         differential=True, ac_coupling=True, filter_sinc=True,
