@@ -71,8 +71,11 @@ Wiring
       the SAME two wires, sourced at different times, never simultaneously.
 
     Keithley 6221 TRIGGER LINK, phase marker on pin ``phasemarker_line``
-    (default 1 — NOT the 6221's factory-default Trigger Link pin; confirm
-    that default on your own unit) ──▶ Zurich Instruments MFLI AUX IN 1.
+    (default 1, matching this lab's cable — DIN pin N = Trigger Link line N.
+    The 6221's own factory default is line 3, same as Zurich Instruments'
+    own MFLI/6221 external-reference guide, but that pin isn't what this
+    rig's cable brings out; confirm against your own cabling) ──▶ Zurich
+    Instruments MFLI AUX IN 1.
       One marker edge per AC excitation cycle, during the read phase only
       (the marker is only live while WAVE mode is armed/running — see
       sot_pulsed_switching_2h.py's docstring for the ExtRef/PLL mechanism
@@ -196,7 +199,7 @@ class ReadConfig:
     sense_current_A: float        = 1e-4    # 6221 AC peak current amplitude for the read [A]
     compliance_V: float           = 2.0
     frequency_Hz: float           = 977.0   # AC excitation frequency [Hz] — avoid 50/60 Hz harmonics
-    phasemarker_line: int         = 1       # 6221 Trigger Link pin -> MFLI Aux In
+    phasemarker_line: int         = 1       # 6221 Trigger Link line -> MFLI Aux In (matches this lab's cable)
     harmonic: int                  = 2       # which harmonic the MFLI locks onto — 2f is the
                                               # standard harmonic-Hall SOT signal; 1 = resistive AHE/PHE
     n_averages: int                = 50      # independent MFLI demod samples averaged per read
@@ -283,6 +286,15 @@ _ADCSELECT_AUX_IN_BASE = 8
 # a bandwidth tuned for a different signal from a previous run.
 _EXTREF_AUTOMODE_DYNAMIC = 4
 
+# demods/n/rate ("number of samples sent to host per second" per the node
+# doc — this MFLI's actual max is in the ~460 kSa/s range, clamped to
+# whichever value the firmware actually supports) — like harmonic, this is
+# never set elsewhere and would otherwise inherit whatever this demod index
+# was last left at (e.g. the ~1 kSa/s a normal signal demod uses), which
+# under-samples the 6221's ~1 µs marker pulse the same way a too-slow LabOne
+# Scope trace visually smears it into a shallow dip instead of a real edge.
+_PLL_DETECTOR_RATE_HZ = 460.8e3
+
 
 @dataclass
 class DemodConfig:
@@ -351,6 +363,7 @@ def configure_external_reference(daq: "zi.ziDAQServer", cfg: ExtRefConfig,
     # run reusing the same index) — a stale harmonic here has the PLL
     # searching the wrong frequency entirely and never locking.
     daq.setInt(f"/{d}/demods/{cfg.pll_demod_index}/harmonic", 1)
+    daq.setDouble(f"/{d}/demods/{cfg.pll_demod_index}/rate", _PLL_DETECTOR_RATE_HZ)
     daq.setInt(f"/{d}/demods/{cfg.pll_demod_index}/enable", 1)
     daq.setInt(f"/{d}/extrefs/{cfg.extref_index}/demodselect", cfg.pll_demod_index)
     daq.setInt(f"/{d}/extrefs/{cfg.extref_index}/automode", _EXTREF_AUTOMODE_DYNAMIC)

@@ -23,9 +23,13 @@ Wiring
     Keithley 6221 (WAVE, sine, continuous)   HI ──▶ I+ pad ;  LO ──▶ I- pad
 
     Keithley 6221 TRIGGER LINK, phase marker on pin ``ACSourceConfig.
-    phasemarker_line`` (default 1 — confirm against your own unit's factory
-    default) ──▶ split (BNC T or power divider, EQUAL cable lengths) to
-    AUX IN 1 on **BOTH** MFLIs.
+    phasemarker_line`` (default 1, matching this lab's cable — DIN pin N =
+    Trigger Link line N, confirmed against the 622x Reference Manual; the
+    6221's own factory default is line 3, same as Zurich Instruments' own
+    MFLI/6221 external-reference guide, but that pin isn't what this rig's
+    cable brings out — confirm against your own cabling before assuming
+    either default) ──▶ split (BNC T or power divider, EQUAL cable lengths)
+    to AUX IN 1 on **BOTH** MFLIs.
 
     Leader MFLI  Signal Input 1 (differential) ──▶ demod 1f
     Follower MFLI  Signal Input 1 (differential) ──▶ demod 2f
@@ -214,6 +218,15 @@ _ADCSELECT_AUX_IN_BASE = 8
 # a bandwidth tuned for a different signal from a previous run.
 _EXTREF_AUTOMODE_DYNAMIC = 4
 
+# demods/n/rate ("number of samples sent to host per second" per the node
+# doc — this MFLI's actual max is in the ~460 kSa/s range, clamped to
+# whichever value the firmware actually supports) — like harmonic, this is
+# never set elsewhere and would otherwise inherit whatever this demod index
+# was last left at (e.g. the ~1 kSa/s a normal signal demod uses), which
+# under-samples the 6221's ~1 µs marker pulse the same way a too-slow LabOne
+# Scope trace visually smears it into a shallow dip instead of a real edge.
+_PLL_DETECTOR_RATE_HZ = 460.8e3
+
 
 def configure_external_reference(daq: "zi.ziDAQServer", cfg: ExtRefConfig,
                                   frequency_Hz: float) -> None:
@@ -243,6 +256,7 @@ def configure_external_reference(daq: "zi.ziDAQServer", cfg: ExtRefConfig,
     # run's demod2_cfg reusing the same index) — a stale harmonic here has
     # the PLL searching the wrong frequency entirely and never locking.
     daq.setInt(f"/{d}/demods/{cfg.pll_demod_index}/harmonic", 1)
+    daq.setDouble(f"/{d}/demods/{cfg.pll_demod_index}/rate", _PLL_DETECTOR_RATE_HZ)
     daq.setInt(f"/{d}/demods/{cfg.pll_demod_index}/enable", 1)
     daq.setInt(f"/{d}/extrefs/{cfg.extref_index}/demodselect", cfg.pll_demod_index)
     daq.setInt(f"/{d}/extrefs/{cfg.extref_index}/automode", _EXTREF_AUTOMODE_DYNAMIC)
@@ -518,7 +532,7 @@ def main() -> None:
         frequency_Hz     = 317.3,     # Hz — recommended ~300-1000 Hz band, away
                                        #   from 1/f noise and 50/60 Hz harmonics
         compliance_V     = 2.0,
-        phasemarker_line = 1,         # Trigger Link pin -> BOTH MFLIs' Aux In 1
+        phasemarker_line = 1,         # Trigger Link line -> BOTH MFLIs' Aux In 1 (matches this lab's cable)
     )
     _check_ac_safety(ac_cfg)
 

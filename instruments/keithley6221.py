@@ -50,18 +50,29 @@ class ACSourceConfig:
     (used by sot/sot_pulsed_switching_2h.py: an MFLI locks to this marker
     via its Aux Input, per the Zurich Instruments external-reference guide).
 
-    `phasemarker_line` is the Trigger Link output pin the marker square wave
-    (one edge per excitation cycle) appears on — wire that BNC to the
-    lock-in's Aux Input. Pass a line other than the 6221's factory default if
-    that pin is already claimed by something else on the rig; confirm the
-    factory default against your own 6221 (front panel CONFIG →
-    Trigger Link) before assuming which one that is."""
+    `phasemarker_line` is the Trigger Link output line (1-6) the marker
+    pulse (one edge per excitation cycle) appears on — set via SCPI
+    (`:SOUR:WAVE:PMAR:OLIN`, confirmed against the Model 6220/6221
+    Reference Manual, 622x-901-01 Rev. B) and read back by
+    connect_ac_source() to confirm it took; no front-panel step needed. The
+    Trigger Link's 8-pin DIN connector is a flat 1:1 map — DIN pin N =
+    Trigger Link line N (pins 7/8 are ground) — so "line N" and "pin N" are
+    the same thing. The 6221's own factory default is line 3 (same manual,
+    p.7-10), and that's also what Zurich Instruments' own MFLI ↔ 6221
+    external-reference guide wires (pin 3) — but default here is 1,
+    matching this lab's actual cable (which only brings out pin 1 to the
+    MFLI). Getting this wrong doesn't error — the 6221 happily outputs a
+    clean marker on whichever line you ask for — it just means the real
+    signal comes out on a different pin than whatever your cable taps, and
+    what you see on the pin you're actually wired to is crosstalk, not the
+    marker. Confirm against your own rig's cabling before trusting either
+    default."""
     visa_resource: str        = "GPIB0::20::INSTR"
     amplitude_A: float        = 1e-4     # AC current amplitude, peak [A]
     frequency_Hz: float       = 977.0    # Excitation frequency [Hz] — avoid 50/60 Hz harmonics
     compliance_V: float       = 2.0      # Voltage compliance [V]
     ranging: str              = "best"   # "best" or "fixed"
-    phasemarker_line: int     = 1        # Trigger Link pin (1-6) the phase marker appears on
+    phasemarker_line: int     = 1        # Trigger Link line (1-6) the phase marker appears on — this lab's cable taps pin 1
 
 
 def connect_ac_source(cfg: ACSourceConfig) -> Keithley6221:
