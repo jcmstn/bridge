@@ -64,6 +64,23 @@ docs/          Physics/theory background for specific measurements
 - [`docs/current-reversal.md`](docs/current-reversal.md) — the V_odd/V_even
   current-reversal decomposition used by every DC measurement program.
 
+## Running on macOS
+
+GPIB instruments need a **Prologix GPIB-USB Controller**, not an
+NI-branded adapter — NI's own NI-488.2 driver for macOS was last released
+for macOS 11/Big Sur and never got Apple Silicon support. Prologix is a
+USB-serial device (FTDI chip, driver already built into macOS), and
+`pymeasure` already ships a `PrologixAdapter` for it — the OS is detected
+automatically (`instruments/gpib_backend.py`), Windows/NI-488.2 stays the
+default.
+
+Set `BRIDGE_PROLOGIX_PORT` to the controller's serial device path before
+running anything:
+
+```
+export BRIDGE_PROLOGIX_PORT=/dev/cu.usbserial-XXXXXXXX   # see `ls /dev/cu.usbserial-*`
+```
+
 ## Troubleshooting
 
 **Windows: `web/app.py` fails to bind its port with `OSError WinError 10013`**

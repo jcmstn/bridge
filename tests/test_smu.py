@@ -84,6 +84,10 @@ def patched(monkeypatch):
     read what connect_smu() built."""
     monkeypatch.setattr(k2400, "Keithley2400", _FakeSMU)
     monkeypatch.setattr(k2450, "Keithley2450", _FakeSMU)
+    # Resource resolution (GPIB vs. Prologix) isn't what's under test here,
+    # and shouldn't depend on which OS happens to run the test suite.
+    monkeypatch.setattr(k2400, "resolve_visa_resource", lambda r: r)
+    monkeypatch.setattr(k2450, "resolve_visa_resource", lambda r: r)
     return _FakeSMU
 
 

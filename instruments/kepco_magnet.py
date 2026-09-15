@@ -47,6 +47,7 @@ from dataclasses import dataclass
 from pymeasure.instruments import Instrument, SCPIMixin
 from pymeasure.instruments.validators import strict_range
 
+from instruments.gpib_backend import resolve_visa_resource
 from instruments.lakeshore475 import field_to_mT
 
 log = logging.getLogger(__name__)
@@ -525,7 +526,7 @@ def connect_magnet(cfg: MagnetConfig) -> "KepkoBOPGL":
     in constant-current mode with the configured software compliance
     voltage and current limit.
     """
-    psu = KepkoBOPGL(cfg.visa_resource, timeout=5000)
+    psu = KepkoBOPGL(resolve_visa_resource(cfg.visa_resource), timeout=5000)
 
     psu.reset()
     psu.clear()

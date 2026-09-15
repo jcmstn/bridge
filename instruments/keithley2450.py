@@ -74,6 +74,8 @@ import numpy as np
 from pymeasure.instruments import Instrument, SCPIMixin
 from pymeasure.instruments.validators import truncated_range, strict_discrete_set
 
+from instruments.gpib_backend import resolve_visa_resource
+
 log = logging.getLogger(__name__)
 log.addHandler(logging.NullHandler())
 
@@ -753,7 +755,7 @@ def connect_smu(cfg: SMUConfig) -> Keithley2450:
     if cfg.output_off_state.lower() not in _OFF_STATES:
         raise ValueError(f"output_off_state must be one of {tuple(_OFF_STATES)}, got {cfg.output_off_state!r}")
 
-    smu = Keithley2450(cfg.visa_resource)
+    smu = Keithley2450(resolve_visa_resource(cfg.visa_resource))
     smu.reset()
 
     if cfg.source_function == "voltage":

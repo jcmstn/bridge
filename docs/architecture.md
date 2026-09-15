@@ -165,6 +165,12 @@ functions (not a class API — the class, if any, stays private):
 2. **`connect_{name}(cfg: {Name}Config) -> Handle`** — open the VISA
    session, `reset()`, apply `cfg`, return a live handle (a pymeasure
    instrument, or a hand-written driver instance). Log one line on success.
+   For a GPIB resource, pass `cfg.visa_resource` through
+   `instruments/gpib_backend.py`'s `resolve_visa_resource()` before handing
+   it to the driver constructor — Windows gets the string unchanged
+   (NI-488.2), macOS gets a `PrologixAdapter` for the same GPIB address
+   (no NI-488.2 driver exists for current macOS). Every existing GPIB
+   instrument already does this; a new one should too.
 
 3. **`shutdown_{name}(handle[, cfg]) -> None`** — put the instrument in a
    safe state and close. Take `cfg` too only if teardown needs it (e.g. the

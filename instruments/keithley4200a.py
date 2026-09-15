@@ -91,6 +91,8 @@ from typing import Optional
 import numpy as np
 from pymeasure.instruments import Instrument
 
+from instruments.gpib_backend import resolve_visa_resource
+
 log = logging.getLogger(__name__)
 log.addHandler(logging.NullHandler())
 
@@ -202,7 +204,7 @@ def connect_4200a(cfg: Keithley4200AConfig) -> _Keithley4200A_KXCI:
         raise ValueError(f"integration must be one of {sorted(set(_INTEGRATION))}, "
                          f"got {cfg.integration!r}")
 
-    dev = _Keithley4200A_KXCI(cfg.visa_resource, timeout=cfg.timeout_s * 1000)
+    dev = _Keithley4200A_KXCI(resolve_visa_resource(cfg.visa_resource), timeout=cfg.timeout_s * 1000)
     dev.command("US")                       # User Mode — immediate command execution
     dev.command("BC")                       # clear the KXCI reading buffer
     dev.command("DR0")                      # read synchronously, no data-ready SRQ

@@ -53,6 +53,8 @@ from typing import Optional
 import numpy as np
 from pymeasure.instruments.keithley import Keithley2400
 
+from instruments.gpib_backend import resolve_visa_resource
+
 log = logging.getLogger(__name__)
 
 
@@ -67,7 +69,7 @@ class GateConfig:
 
 def connect_gate(cfg: GateConfig) -> Keithley2400:
     """Open and configure the Keithley 2400 as the gate voltage source."""
-    gate = Keithley2400(cfg.visa_resource)
+    gate = Keithley2400(resolve_visa_resource(cfg.visa_resource))
     gate.reset()
     gate.apply_voltage(compliance_current=cfg.compliance_current_A)
     gate.source_voltage = 0.0
@@ -152,7 +154,7 @@ def connect_smu(cfg: SMUConfig) -> Keithley2400:
     if cfg.output_off_state.lower() not in _OFF_STATES:
         raise ValueError(f"output_off_state must be one of {tuple(_OFF_STATES)}, got {cfg.output_off_state!r}")
 
-    smu = Keithley2400(cfg.visa_resource)
+    smu = Keithley2400(resolve_visa_resource(cfg.visa_resource))
     smu.reset()
 
     if cfg.source_function == "voltage":

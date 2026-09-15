@@ -30,6 +30,8 @@ from typing import Optional
 import numpy as np
 from pymeasure.instruments.keithley import Keithley2182, Keithley6221
 
+from instruments.gpib_backend import resolve_visa_resource
+
 log = logging.getLogger(__name__)
 
 
@@ -89,7 +91,7 @@ def connect_ac_source(cfg: ACSourceConfig) -> Keithley6221:
     take — the usual cause is another Trigger Link function already owning
     that pin.
     """
-    source = Keithley6221(cfg.visa_resource)
+    source = Keithley6221(resolve_visa_resource(cfg.visa_resource))
     source.reset()
     source.source_compliance = cfg.compliance_V
     source.waveform_function = "sine"
@@ -236,7 +238,7 @@ def fire_wave_pulse(source: Keithley6221, cfg: PulseWaveConfig,
 def connect(visa_resource: str, compliance_V: float, source_delay_s: float,
             initial_current_A: float = 0.0) -> Keithley6221:
     """Open and configure a Keithley 6221 as a DC current source."""
-    source = Keithley6221(visa_resource)
+    source = Keithley6221(resolve_visa_resource(visa_resource))
     source.reset()
     source.source_auto_range = True
     source.source_compliance = compliance_V

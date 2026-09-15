@@ -24,6 +24,8 @@ from typing import Optional
 import numpy as np
 from pymeasure.instruments.keithley import Keithley2182
 
+from instruments.gpib_backend import resolve_visa_resource
+
 log = logging.getLogger(__name__)
 
 
@@ -42,7 +44,7 @@ def connect_voltmeter(cfg: VoltmeterConfig) -> Keithley2182:
     """Open and configure the Keithley 2182 for a differential voltage readout."""
     if cfg.channel not in (1, 2):
         raise ValueError(f"Keithley 2182 channel must be 1 or 2, got {cfg.channel}")
-    voltmeter = Keithley2182(cfg.visa_resource)
+    voltmeter = Keithley2182(resolve_visa_resource(cfg.visa_resource))
     voltmeter.reset()
     getattr(voltmeter, f"ch_{cfg.channel}").setup_voltage(auto_range=cfg.auto_range, nplc=cfg.nplc)
     log.info("Keithley 2182 connected: %s  ch=%d  NPLC=%.1f",

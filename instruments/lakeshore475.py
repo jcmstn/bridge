@@ -43,6 +43,8 @@ import numpy as np
 from pymeasure.instruments import Instrument
 from pymeasure.instruments.validators import strict_discrete_set, truncated_range
 
+from instruments.gpib_backend import resolve_visa_resource
+
 log = logging.getLogger(__name__)
 
 
@@ -197,7 +199,7 @@ def connect_gaussmeter(cfg: GaussmeterConfig) -> "LakeShore475":
     """Open a VISA session to the Lake Shore 475 and set its display unit."""
     if cfg.unit not in _FIELD_TO_MT:
         raise ValueError(f"Unsupported gaussmeter unit {cfg.unit!r}; use 'T' or 'G'.")
-    gm = LakeShore475(cfg.visa_resource)
+    gm = LakeShore475(resolve_visa_resource(cfg.visa_resource))
     gm.unit = cfg.unit
     # Steady-state (DC) field measurement mode. The 475 keeps whatever mode
     # it was last left in across a power cycle, so set it explicitly rather
