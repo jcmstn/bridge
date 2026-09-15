@@ -606,14 +606,17 @@ def page() -> None:
                     write_csv=write_csv,
                 )
             finally:
+                # Excitation output off first (immediate, no current into
+                # the DUT), so the magnet can start its ramp-down right
+                # away rather than waiting behind it.
+                if daq is not None:
+                    shutdown_output(daq, plan.out_cfg)
                 if magnet is not None:
                     shutdown_magnet(magnet, plan.magnet_cfg)
                 if gaussmeter is not None:
                     shutdown_gaussmeter(gaussmeter)
                 if temp_ctrl is not None:
                     shutdown_temperature_controller(temp_ctrl)
-                if daq is not None:
-                    shutdown_output(daq, plan.out_cfg)
         return run_fn
 
     def on_start() -> None:

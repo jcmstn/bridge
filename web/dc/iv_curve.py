@@ -529,13 +529,14 @@ def page() -> None:
                         raise iter_error
                 return None
             finally:
+                # 6221 output off first (immediate, no current into the DUT).
+                if source is not None:
+                    safe_shutdown("source (ramp)", lambda: ramp_current_to_zero(source))
+                    safe_shutdown("source", lambda: shutdown_source(source))
                 if gate is not None:
                     safe_shutdown("gate", lambda: shutdown_gate(gate))
                 if temp_ctrl is not None:
                     safe_shutdown("MercuryiTC", lambda: shutdown_temperature_controller(temp_ctrl))
-                if source is not None:
-                    safe_shutdown("source (ramp)", lambda: ramp_current_to_zero(source))
-                    safe_shutdown("source", lambda: shutdown_source(source))
         return run_fn
 
     def _finish_artifacts(records: list[dict], run_contexts: list[RunContext], data_root: str) -> list[str]:

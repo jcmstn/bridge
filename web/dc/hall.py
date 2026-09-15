@@ -599,14 +599,17 @@ def page() -> None:
                         raise iter_error
                 return None
             finally:
+                # 6221 output off first (immediate, no current into the DUT),
+                # so the magnet can start its ramp-down right away rather
+                # than waiting behind it.
+                if source is not None:
+                    safe_shutdown("source", lambda: shutdown_source(source))
                 if magnet is not None:
                     safe_shutdown("magnet", lambda: shutdown_magnet(magnet, plan.magnet_cfg))
                 if gaussmeter is not None:
                     safe_shutdown("gaussmeter", lambda: shutdown_gaussmeter(gaussmeter))
                 if temp_ctrl is not None:
                     safe_shutdown("MercuryiTC", lambda: shutdown_temperature_controller(temp_ctrl))
-                if source is not None:
-                    safe_shutdown("source", lambda: shutdown_source(source))
         return run_fn
 
     def _finish_artifacts(records: list[dict], run_contexts: list[RunContext], data_root: str) -> list[str]:

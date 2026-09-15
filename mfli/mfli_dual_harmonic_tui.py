@@ -967,6 +967,14 @@ class RunScreen(Screen):
             log.exception("Measurement failed")
             final = f"ERROR: {exc}"
         finally:
+            # Excitation output off first (immediate, no current into the
+            # DUT), so the magnet can start its ramp-down right away rather
+            # than waiting behind it.
+            if daq is not None:
+                try:
+                    shutdown_output(daq, plan.out_cfg)
+                except Exception:
+                    log.exception("Error while shutting down output")
             if magnet is not None:
                 try:
                     shutdown_magnet(magnet, plan.magnet_cfg)
@@ -982,11 +990,6 @@ class RunScreen(Screen):
                     shutdown_temperature_controller(temp_ctrl)
                 except Exception:
                     log.exception("Error while shutting down MercuryiTC")
-            if daq is not None:
-                try:
-                    shutdown_output(daq, plan.out_cfg)
-                except Exception:
-                    log.exception("Error while shutting down output")
             self.app.call_from_thread(self._on_finished, final)
 
     def _set_status_threadsafe(self, text: str) -> None:

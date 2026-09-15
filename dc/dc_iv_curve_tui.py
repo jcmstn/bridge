@@ -794,13 +794,14 @@ class RunScreen(Screen):
             log.exception("Measurement failed")
             final = f"ERROR: {exc}"
         finally:
+            # 6221 output off first (immediate, no current into the DUT).
+            if source is not None:
+                safe_shutdown("source (ramp)", lambda: ramp_current_to_zero(source))
+                safe_shutdown("source", lambda: shutdown_source(source))
             if gate is not None:
                 safe_shutdown("gate", lambda: shutdown_gate(gate))
             if temp_ctrl is not None:
                 safe_shutdown("MercuryiTC", lambda: shutdown_temperature_controller(temp_ctrl))
-            if source is not None:
-                safe_shutdown("source (ramp)", lambda: ramp_current_to_zero(source))
-                safe_shutdown("source", lambda: shutdown_source(source))
             self.app.call_from_thread(self._on_finished, final)
 
     def _set_status_threadsafe(self, text: str) -> None:

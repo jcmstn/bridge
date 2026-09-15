@@ -911,16 +911,19 @@ class RunScreen(Screen):
             log.exception("Measurement failed")
             final = f"ERROR: {exc}"
         finally:
+            # 6221 output off first (immediate, no current into the DUT),
+            # so the magnet can start its ramp-down right away rather than
+            # waiting behind it.
+            if source is not None:
+                safe_shutdown("source", lambda: shutdown_source(source))
+            if gate is not None:
+                safe_shutdown("gate", lambda: shutdown_gate(gate))
             if magnet is not None:
                 safe_shutdown("magnet", lambda: shutdown_magnet(magnet, plan.magnet_cfg))
             if gaussmeter is not None:
                 safe_shutdown("gaussmeter", lambda: shutdown_gaussmeter(gaussmeter))
             if temp_ctrl is not None:
                 safe_shutdown("MercuryiTC", lambda: shutdown_temperature_controller(temp_ctrl))
-            if gate is not None:
-                safe_shutdown("gate", lambda: shutdown_gate(gate))
-            if source is not None:
-                safe_shutdown("source", lambda: shutdown_source(source))
             self.app.call_from_thread(self._on_finished, final)
 
     def _set_status_threadsafe(self, text: str) -> None:
