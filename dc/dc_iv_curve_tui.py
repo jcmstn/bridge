@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import logging
 import multiprocessing as mp
+import textwrap
 import threading
 from dataclasses import dataclass
 from datetime import datetime
@@ -485,10 +486,16 @@ def _live_plot_worker(queue: "mp.Queue") -> None:
     plt.show()
 
 
-def _save_measurement_png(records: list[dict], png_path: Path) -> None:
+def _save_measurement_png(records: list[dict], png_path: Path,
+                           plan: Optional["MeasurementPlan"] = None, comment: str = "") -> None:
     """Save a combined I-V overlay PNG (one color per gate-voltage series, if
     any) from whatever points were actually collected (including an
-    aborted/partial run)."""
+    aborted/partial run).
+
+    `plan`/`comment` add a small "at a glance" text annotation (compliance
+    voltage, the operator's comment) for context not already in the
+    filename. Called once when the run ends (comment="") and again, to
+    overwrite the PNG in place, once the operator's comment is known."""
     if not records:
         return
 
@@ -513,6 +520,18 @@ def _save_measurement_png(records: list[dict], png_path: Path) -> None:
     if any(r.get("series_label") for r in records):
         ax.legend(loc="best", fontsize=8)
     fig.tight_layout()
+
+    lines: list[str] = []
+    if plan is not None:
+        compliance_V = plan.header_extra.get("compliance_V")
+        if compliance_V is not None:
+            lines.append(f"Compliance: {format_si(compliance_V, 'V')}")
+    if comment:
+        lines.append(f"Comment: {textwrap.shorten(comment, width=90, placeholder='…')}")
+    if lines:
+        fig.text(0.01, 0.01, "\n".join(lines), fontsize=7, color="0.4", va="bottom")
+        fig.subplots_adjust(bottom=0.08 + 0.045 * len(lines))
+
     fig.savefig(png_path, dpi=150)
     plt.close(fig)
     log.info("Saved plot to '%s'", png_path)
@@ -546,7 +565,9 @@ class _LogRelay(logging.Handler):
 class RunScreen(Screen):
     CSS = """
     #status_line { height: 1; padding: 0 1; text-style: bold; }
-    #progress { margin: 1 2; }
+    #progress_row { margin: 1 2; align: left middle; }
+    #run_label { width: auto; padding: 0 2 0 0; text-style: bold; }
+    #progress { margin: 0; }
     #results_table { height: 12; margin: 0 2 1 2; }
     #log { height: 1fr; margin: 0 2 1 2; border: solid $primary; }
     #runactionbar { height: 3; align: center middle; }
@@ -570,11 +591,16 @@ class RunScreen(Screen):
         # One RunContext per iteration of the gate-voltage series -- each
         # gets its own run number/file (see allocate_run() in do_run below).
         self._run_contexts: list[RunContext] = []
+        # Stashed by _on_finished so _on_status_comment can re-save the same
+        # PNG in place once the operator's comment is known.
+        self._png_path: Optional[Path] = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield Static("Starting …", id="status_line")
-        yield ProgressBar(id="progress", total=self.plan.total_points, show_eta=False)
+        with Horizontal(id="progress_row"):
+            yield Static("", id="run_label")
+            yield ProgressBar(id="progress", total=self.plan.total_points, show_eta=False)
         yield DataTable(id="results_table", zebra_stripes=True, cursor_type="row")
         yield RichLog(id="log", max_lines=5000, markup=False, wrap=True)
         with Horizontal(id="runactionbar"):
@@ -655,7 +681,8 @@ class RunScreen(Screen):
                 png_path = proc_path(self.plan.data_root, self.plan.sample, run_label,
                                       self.plan.device,
                                       MEASUREMENT_TYPE, "combined", combined=True)
-                _save_measurement_png(self._records, png_path)
+                self._png_path = png_path
+                _save_measurement_png(self._records, png_path, plan=self.plan)
         except Exception:
             log.exception("Could not save measurement plot PNG")
 
@@ -682,6 +709,12 @@ class RunScreen(Screen):
                 finalize_index_row(self.plan.data_root, ctx.sample, ctx.run_number, header_fields)
             except Exception:
                 log.exception("Could not save final status/comment for run %d", ctx.run_number)
+
+        if comment and self._png_path is not None:
+            try:
+                _save_measurement_png(self._records, self._png_path, plan=self.plan, comment=comment)
+            except Exception:
+                log.exception("Could not re-save measurement plot PNG with comment")
 
     def action_abort(self) -> None:
         if self._measurement_running and not self._stop_event.is_set():
@@ -747,6 +780,7 @@ class RunScreen(Screen):
                     key_axis=key_axis, series=plan.series,
                 )
                 self._run_contexts.append(ctx)
+                self._set_run_label_threadsafe(f"Run #{ctx.run_str}")
                 plan.acq_cfg.output_file = str(ctx.raw_path)
                 write_csv = make_incremental_writer(
                     ctx.raw_path,
@@ -806,6 +840,12 @@ class RunScreen(Screen):
 
     def _set_status_threadsafe(self, text: str) -> None:
         self.app.call_from_thread(self._set_status, text)
+
+    def _set_run_label(self, text: str) -> None:
+        self.query_one("#run_label", Static).update(text)
+
+    def _set_run_label_threadsafe(self, text: str) -> None:
+        self.app.call_from_thread(self._set_run_label, text)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -257,6 +257,7 @@ class RunCallbacks:
     """Passed into a page's run_fn(stop_event, cb) closure."""
     on_point: Callable[[dict], None]
     on_status: Callable[[str], None]
+    on_run_label: Callable[[str], None]
 
 
 @dataclass
@@ -314,6 +315,7 @@ class RunController:
                  parameters: dict, data_dir: str, planned_output_paths: list[str],
                  on_record: Callable[[dict], None],
                  on_status: Callable[[str], None],
+                 on_run_label: Callable[[str], None] = lambda text: None,
                  on_log: Callable[[str, int], None],
                  on_finished: Callable[["FinalStatus", Any], None],
                  sample: Optional[str] = None, device: Optional[str] = None,
@@ -330,6 +332,7 @@ class RunController:
         self.run_number = run_number
         self.on_record = on_record
         self.on_status = on_status
+        self.on_run_label = on_run_label
         self.on_log = on_log
         self.on_finished = on_finished
 
@@ -364,7 +367,8 @@ class RunController:
         self._log_handler = _QueueLogRelay(self._queue)
         logging.getLogger().addHandler(self._log_handler)
 
-        cb = RunCallbacks(on_point=self._worker_on_point, on_status=self._worker_on_status)
+        cb = RunCallbacks(on_point=self._worker_on_point, on_status=self._worker_on_status,
+                           on_run_label=self._worker_on_run_label)
         threading.Thread(target=self._worker, args=(cb,), daemon=True).start()
 
         self._timer = ui.timer(0.3, self._drain)
@@ -383,6 +387,9 @@ class RunController:
 
     def _worker_on_status(self, text: str) -> None:
         self._queue.put_nowait({"kind": "status", "text": text})
+
+    def _worker_on_run_label(self, text: str) -> None:
+        self._queue.put_nowait({"kind": "run_label", "text": text})
 
     def _worker(self, cb: RunCallbacks) -> None:
         assert self.handle is not None
@@ -428,6 +435,8 @@ class RunController:
                 if self.handle is not None:
                     self.handle.status_text = item["text"]
                 self.on_status(item["text"])
+            elif kind == "run_label":
+                self.on_run_label(item["text"])
             elif kind == "log":
                 if self.handle is not None:
                     self.handle.log_lines.append(item["text"])

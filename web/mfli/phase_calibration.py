@@ -19,6 +19,7 @@ dedicated Report panel in addition to the log.
 from __future__ import annotations
 
 import json
+import textwrap
 from pathlib import Path
 from typing import Optional
 
@@ -39,7 +40,7 @@ from mfli.mfli_phase_calibration import (
 from mfli.mfli_phase_calibration_tui import (
     DEFAULTS, NUMERIC_FIELDS, TEXT_FIELDS, LIST_FIELDS,
     MEASUREMENT_TYPE, CalibrationPlan, build_header_fields, build_summary, parse_sensor_uids,
-    compute_filename_preview,
+    compute_filename_preview, format_si,
 )
 from instruments.data_naming import (
     TEST_SAMPLE, allocate_run, finalize_index_row, make_incremental_writer,
@@ -163,7 +164,12 @@ def build_plan(state: dict) -> CalibrationPlan:
     )
 
 
-def _save_diagnostic_png(records: list[dict], png_path: Path) -> None:
+def _save_diagnostic_png(records: list[dict], png_path: Path,
+                          plan: Optional[CalibrationPlan] = None, comment: str = "") -> None:
+    """`plan`/`comment` add a small "at a glance" text annotation -- see
+    mfli_phase_calibration_tui.py's _save_diagnostic_png for the same
+    logic. Called once when the run ends (comment="") and again, to
+    overwrite the PNG in place, once the operator's comment is known."""
     if not records:
         return
     import matplotlib
@@ -189,6 +195,18 @@ def _save_diagnostic_png(records: list[dict], png_path: Path) -> None:
     for ax in (ax1, ax2):
         ax.grid(True, alpha=0.3)
     fig.tight_layout()
+
+    lines: list[str] = []
+    if plan is not None:
+        freq_Hz = plan.header_extra.get("excitation_frequency_Hz")
+        amp_V = plan.header_extra.get("excitation_amplitude_V")
+        if freq_Hz is not None and amp_V is not None:
+            lines.append(f"AC excitation: {format_si(amp_V, 'V')} @ {format_si(freq_Hz, 'Hz')}")
+    if comment:
+        lines.append(f"Comment: {textwrap.shorten(comment, width=90, placeholder='…')}")
+    if lines:
+        fig.text(0.01, 0.01, "\n".join(lines), fontsize=7, color="0.4", va="bottom")
+        fig.subplots_adjust(bottom=0.08 + 0.045 * len(lines))
 
     png_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(png_path, dpi=150)
@@ -355,7 +373,9 @@ def page() -> None:
             start_btn = ui.button("▶  Start calibration", color="primary").classes("w-full")
 
         with regions.output:
-            status_label = ui.label("Idle.").classes("text-sm font-bold")
+            with ui.row().classes("w-full items-center gap-3"):
+                run_label = ui.label("").classes("text-sm font-bold text-grey-6")
+                status_label = ui.label("Idle.").classes("text-sm font-bold")
             abort_btn = ui.button("Abort (safe ramp-down)", color="negative").props("outline")
             abort_btn.set_visibility(False)
 
@@ -504,6 +524,13 @@ def page() -> None:
             finalize_index_row(ctx.sample_dir.parent, ctx.sample, ctx.run_number, header_fields)
         except Exception:
             ui.notify("Could not save final status/comment.", type="negative")
+        if comment:
+            try:
+                png_path = proc_path(ctx.sample_dir.parent, ctx.sample, ctx.run_str, ctx.device,
+                                      MEASUREMENT_TYPE, "plot")
+                _save_diagnostic_png(records, png_path, plan=plan, comment=comment)
+            except Exception:
+                pass
 
     def make_on_finished(plan: CalibrationPlan):
         def on_finished(final: FinalStatus, result: Optional[PhaseCalibrationReport]) -> None:
@@ -533,7 +560,7 @@ def page() -> None:
         write_record(ctx.raw_path, records, header_fields)
         finalize_index_row(data_root, ctx.sample, ctx.run_number, header_fields)
         png_path = proc_path(data_root, ctx.sample, ctx.run_str, ctx.device, MEASUREMENT_TYPE, "plot")
-        _save_diagnostic_png(records, png_path)
+        _save_diagnostic_png(records, png_path, plan=plan)
         return [str(ctx.raw_path), str(png_path)]
 
     def make_run_fn(plan: CalibrationPlan):
@@ -608,6 +635,7 @@ def page() -> None:
         _save_settings(collect_raw())
 
         plan = build_plan(state)
+        run_label.set_text(f"Run #{plan.run_ctx.run_str}")
         Path(state["data_dir"]).mkdir(parents=True, exist_ok=True)
 
         rc = RunController(

@@ -14,6 +14,7 @@ Start click (field parked once per value, not swept).
 from __future__ import annotations
 
 import json
+import textwrap
 import time
 from datetime import datetime
 from pathlib import Path
@@ -34,7 +35,7 @@ from dc.dc_sweep_utils import linear_sweep, parse_value_list, safe_shutdown
 from dc.dc_gate_sweep_tui import (
     DEFAULTS, NUMERIC_FIELDS, TEXT_FIELDS, MEASUREMENT_TYPE,
     DC_GATE_SWEEP_DESCRIPTION, MeasurementPlan, build_header_fields, build_summary,
-    compute_filename_preview, parse_sensor_uids,
+    compute_filename_preview, format_si, parse_sensor_uids,
 )
 from instruments.data_naming import (
     TEST_SAMPLE, RunContext, allocate_run, finalize_index_row,
@@ -140,7 +141,13 @@ def series_label(current_A: Optional[float]) -> Optional[str]:
     return f"I_mag={current_A:g}A" if current_A is not None else None
 
 
-def _save_combined_png(records: list[dict], png_path: Path) -> None:
+def _save_combined_png(records: list[dict], png_path: Path,
+                        plan: Optional[MeasurementPlan] = None, comment: str = "") -> None:
+    """`plan`/`comment` add a small "at a glance" text annotation (the fixed
+    sense current, the operator's comment) -- see dc_gate_sweep_tui.py's
+    _save_measurement_png for the same logic. Called once when the run ends
+    (comment="") and again, to overwrite the PNG in place, once the
+    operator's comment is known."""
     if not records:
         return
     import matplotlib
@@ -160,6 +167,18 @@ def _save_combined_png(records: list[dict], png_path: Path) -> None:
     if any(r.get("series_label") for r in records):
         ax.legend(loc="best", fontsize=8)
     fig.tight_layout()
+
+    lines: list[str] = []
+    if plan is not None:
+        sense_current_A = plan.header_extra.get("sense_current_A")
+        if sense_current_A is not None:
+            lines.append(f"Sense current: {format_si(sense_current_A, 'A')}")
+    if comment:
+        lines.append(f"Comment: {textwrap.shorten(comment, width=90, placeholder='…')}")
+    if lines:
+        fig.text(0.01, 0.01, "\n".join(lines), fontsize=7, color="0.4", va="bottom")
+        fig.subplots_adjust(bottom=0.08 + 0.045 * len(lines))
+
     fig.savefig(png_path, dpi=150)
     plt.close(fig)
 
@@ -269,7 +288,9 @@ def page() -> None:
             start_btn = ui.button("▶  Start measurement", color="primary").classes("w-full")
 
         with regions.output:
-            status_label = ui.label("Idle.").classes("text-sm font-bold")
+            with ui.row().classes("w-full items-center gap-3"):
+                run_label = ui.label("").classes("text-sm font-bold text-grey-6")
+                status_label = ui.label("Idle.").classes("text-sm font-bold")
             abort_btn = ui.button("Abort (safe ramp-down)", color="negative").props("outline")
             abort_btn.set_visibility(False)
 
@@ -402,6 +423,9 @@ def page() -> None:
     def on_status(text: str) -> None:
         status_label.set_text(text)
 
+    def on_run_label(text: str) -> None:
+        run_label.set_text(text)
+
     def on_log(text: str, level: int) -> None:
         log_area.push(text)
 
@@ -428,6 +452,12 @@ def page() -> None:
                 finalize_index_row(Path(data_root), ctx.sample, ctx.run_number, header_fields)
             except Exception:
                 ui.notify("Could not save final status/comment.", type="negative")
+        if comment and run_contexts:
+            try:
+                _save_combined_png(records, _combined_png_path(run_contexts, data_root),
+                                    plan=plan, comment=comment)
+            except Exception:
+                pass
 
     def make_on_finished(plan: MeasurementPlan, run_contexts: list[RunContext], data_root: str):
         def on_finished(final: FinalStatus, result) -> None:
@@ -484,6 +514,7 @@ def page() -> None:
                         key_axis=key_axis, series=plan.series,
                     )
                     run_contexts.append(ctx)
+                    cb.on_run_label(f"Run #{ctx.run_str}")
                     plan.acq_cfg.output_file = str(ctx.raw_path)
                     write_csv = make_incremental_writer(
                         ctx.raw_path,
@@ -546,16 +577,20 @@ def page() -> None:
                     safe_shutdown("MercuryiTC", lambda: shutdown_temperature_controller(temp_ctrl))
         return run_fn
 
-    def _finish_artifacts(records: list[dict], run_contexts: list[RunContext], data_root: str) -> list[str]:
+    def _combined_png_path(run_contexts: list[RunContext], data_root: str) -> Path:
+        first, last = run_contexts[0], run_contexts[-1]
+        run_str_label = first.run_str if first is last else f"{first.run_str}-{last.run_str}"
+        return proc_path(Path(data_root), first.sample, run_str_label, first.device,
+                          MEASUREMENT_TYPE, "combined", combined=True)
+
+    def _finish_artifacts(records: list[dict], run_contexts: list[RunContext], data_root: str,
+                           plan: MeasurementPlan) -> list[str]:
         output_paths = [str(c.raw_path) for c in run_contexts]
         if not run_contexts:
             return output_paths
-        first, last = run_contexts[0], run_contexts[-1]
-        run_label = first.run_str if first is last else f"{first.run_str}-{last.run_str}"
-        png_path = proc_path(Path(data_root), first.sample, run_label, first.device,
-                              MEASUREMENT_TYPE, "combined", combined=True)
+        png_path = _combined_png_path(run_contexts, data_root)
         try:
-            _save_combined_png(records, png_path)
+            _save_combined_png(records, png_path, plan=plan)
             return output_paths + [str(png_path)]
         except Exception:
             return output_paths
@@ -583,9 +618,9 @@ def page() -> None:
             suite=SUITE, measurement=PAGE_TITLE,
             run_fn=make_run_fn(plan, state["data_dir"], run_contexts),
             save_artifacts=lambda records, result, status: _finish_artifacts(
-                records, run_contexts, state["data_dir"]),
+                records, run_contexts, state["data_dir"], plan),
             parameters=state, data_dir=state["data_dir"], planned_output_paths=[],
-            on_record=on_record, on_status=on_status, on_log=on_log,
+            on_record=on_record, on_status=on_status, on_run_label=on_run_label, on_log=on_log,
             on_finished=make_on_finished(plan, run_contexts, state["data_dir"]),
             sample=plan.sample, device=plan.device,
         )
