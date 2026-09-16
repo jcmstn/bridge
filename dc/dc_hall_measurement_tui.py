@@ -79,6 +79,7 @@ from dc.dc_hall_measurement import (
 )
 from dc.dc_sweep_utils import linear_sweep, parse_value_list, safe_shutdown
 from instruments.data_dir import DataDirPickerScreen, validate_directory
+from instruments.field_geometry import field_direction_summary_line, render_ascii_field_diagram
 from instruments.data_naming import (
     TEST_SAMPLE,
     RunContext,
@@ -140,7 +141,8 @@ DEFAULTS: dict = {
     "device": "",
     "cooldown": "",
     "temperature_setpoint_K": "300",
-    "field_angle_from_oop_deg": "",
+    "field_theta_deg": "",
+    "field_phi_deg": "",
     "enable_sweep": True,
     "magnet_visa_resource": "GPIB0::6::INSTR",
     "current_limit_A": "35",
@@ -184,7 +186,7 @@ TEXT_FIELDS = ["source_visa_resource", "voltmeter_visa_resource", "device",
 # Parsed separately from NUMERIC_FIELDS -- unlike every other numeric field,
 # this one may be BLANK (valid_empty=True), which means "no temperature
 # setpoint" -> the T### K filename token is simply omitted.
-OPTIONAL_NUMERIC_FIELDS = ["temperature_setpoint_K", "field_angle_from_oop_deg"]
+OPTIONAL_NUMERIC_FIELDS = ["temperature_setpoint_K", "field_theta_deg", "field_phi_deg"]
 MAGNET_FIELD_IDS = [
     "magnet_visa_resource", "current_limit_A", "voltage_compliance_V",
     "ramp_step_A", "ramp_delay_s", "i_min_A", "i_max_A", "step_A",
@@ -247,7 +249,8 @@ class MeasurementPlan:
     sample: str
     device: str
     temperature_setpoint_K: Optional[float]
-    field_angle_from_oop_deg: Optional[float]
+    field_theta_deg: Optional[float]
+    field_phi_deg: Optional[float]
     cooldown: str
     header_extra: dict
     series: str = ""
@@ -442,13 +445,9 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     else:
         info.append("Temperature logging off.")
 
-    # ── Sample geometry (optional) ─────────────────────────────────────────
-    angle = state.get("field_angle_from_oop_deg")
-    if angle is not None:
-        info.append(f"External field angle {angle:g}° from out-of-plane "
-                    f"({'out-of-plane' if angle == 0 else 'in-plane' if angle == 90 else 'tilted'}).")
-    else:
-        info.append("External field angle unset — field_angle_from_oop_deg column left blank.")
+    # ── Field direction (optional) ─────────────────────────────────────────
+    info.append(field_direction_summary_line(
+        state.get("field_theta_deg"), state.get("field_phi_deg")))
 
     return info, warnings, errors
 
@@ -838,7 +837,8 @@ class RunScreen(Screen):
                         on_point=self._make_on_point(series_idx, label),
                         gaussmeter=gaussmeter, gauss_cfg=plan.gauss_cfg,
                         temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg,
-                        field_angle_from_oop_deg=plan.field_angle_from_oop_deg,
+                        field_theta_deg=plan.field_theta_deg,
+                        field_phi_deg=plan.field_phi_deg,
                         write_csv=write_csv,
                     )
                 except Exception as exc:
@@ -929,6 +929,9 @@ class DCHallMeasurementApp(App):
     .hint { text-style: italic; color: $text-muted; }
     .switch-row { height: 3; }
     .switch-row Label { margin-left: 1; content-align: left middle; height: 3; }
+    .plane-btn-row { height: 3; margin-bottom: 1; }
+    .plane-btn-row Button { min-width: 5; margin-right: 1; }
+    .field-diagram { color: $text-muted; margin-top: 1; }
     .sidebar-title { text-style: bold underline; margin-bottom: 1; }
     .card-desc { color: $text-muted; margin-bottom: 1; }
     #actionbar { height: 3; align: center middle; }
@@ -994,14 +997,24 @@ class DCHallMeasurementApp(App):
                                      DEFAULTS["enable_temperature"]),
                     )
                     yield card(
-                        "Sample geometry",
-                        field("field_angle_from_oop_deg",
-                              "External field angle from out-of-plane (°)",
-                              DEFAULTS["field_angle_from_oop_deg"], kind="number",
-                              valid_empty=True,
-                              hint="0° = fully out-of-plane (film normal), 90° = in-plane. "
-                                   "Optional — stored in every row's "
-                                   "field_angle_from_oop_deg column."),
+                        "Field direction",
+                        field("field_theta_deg", "θ — tilt from out-of-plane (°)",
+                              DEFAULTS["field_theta_deg"], kind="number", valid_empty=True,
+                              validators=[Number(0, 180, failure_description="0-180°")],
+                              hint="0° = fully out-of-plane (film normal), 90° = in-plane."),
+                        field("field_phi_deg", "φ — azimuth from current axis (°)",
+                              DEFAULTS["field_phi_deg"], kind="number", valid_empty=True,
+                              validators=[Number(0, 360, failure_description="0-360°")],
+                              hint="0° = along sense current, 90° = transverse in-plane. "
+                                   "Meaningless when θ=0°."),
+                        Horizontal(
+                            Button("xy", id="plane_xy", classes="plane-btn"),
+                            Button("zx", id="plane_zx", classes="plane-btn"),
+                            Button("zy", id="plane_zy", classes="plane-btn"),
+                            classes="plane-btn-row",
+                        ),
+                        Static(render_ascii_field_diagram(None, None),
+                               id="field_diagram", classes="field-diagram"),
                     )
 
                 # ── Tier 2: precision / speed knobs — collapsed ─────────────
@@ -1284,6 +1297,10 @@ class DCHallMeasurementApp(App):
         self.query_one("#summary", Static).update("\n".join(lines))
         self.query_one("#start", Button).disabled = bool(errors)
 
+        theta = None if parse_errors else state.get("field_theta_deg")
+        phi = None if parse_errors else state.get("field_phi_deg")
+        self.query_one("#field_diagram", Static).update(render_ascii_field_diagram(theta, phi))
+
     # ── Start ────────────────────────────────────────────────────────────────
 
     def action_start(self) -> None:
@@ -1311,6 +1328,15 @@ class DCHallMeasurementApp(App):
             self.action_start()
         elif event.button.id == "browse_data_dir":
             self._browse_data_dir()
+        elif event.button.id == "plane_xy":
+            self.query_one("#field_theta_deg", Input).value = "90"
+            self.refresh_summary()
+        elif event.button.id == "plane_zx":
+            self.query_one("#field_phi_deg", Input).value = "0"
+            self.refresh_summary()
+        elif event.button.id == "plane_zy":
+            self.query_one("#field_phi_deg", Input).value = "90"
+            self.refresh_summary()
 
     def _build_plan(self, state: dict) -> MeasurementPlan:
         src_cfg = SourceConfig(
@@ -1383,7 +1409,8 @@ class DCHallMeasurementApp(App):
             temp_cfg=temp_cfg, data_root=self.data_root,
             sample=state["sample"], device=state["device"],
             temperature_setpoint_K=state["temperature_setpoint_K"],
-            field_angle_from_oop_deg=state["field_angle_from_oop_deg"],
+            field_theta_deg=state["field_theta_deg"],
+            field_phi_deg=state["field_phi_deg"],
             cooldown=state["cooldown"], header_extra=header_extra, series=series,
         )
 

@@ -134,7 +134,7 @@ def test_hall_run_measurement_forwards_source_delay(tmp_path, monkeypatch):
     assert len(df) == 1
 
 
-def test_hall_run_measurement_records_field_angle_from_oop(tmp_path, monkeypatch):
+def test_hall_run_measurement_records_field_direction(tmp_path, monkeypatch):
     import dc.dc_hall_measurement as hall
 
     monkeypatch.setattr(
@@ -148,8 +148,10 @@ def test_hall_run_measurement_records_field_angle_from_oop(tmp_path, monkeypatch
     acq_cfg = hall.AcquisitionConfig(settling_time_s=0.0, output_file=str(tmp_path / "h.csv"))
 
     df = hall.run_measurement(object(), object(), src_cfg, acq_cfg, [hall.FieldPoint()],
-                              field_angle_from_oop_deg=42.0)
-    assert df["field_angle_from_oop_deg"].tolist() == [42.0]
+                              field_theta_deg=42.0, field_phi_deg=10.0)
+    assert df["field_theta_deg"].tolist() == [42.0]
+    assert df["field_phi_deg"].tolist() == [10.0]
 
     df_none = hall.run_measurement(object(), object(), src_cfg, acq_cfg, [hall.FieldPoint()])
-    assert df_none["field_angle_from_oop_deg"].isna().all()
+    assert df_none["field_theta_deg"].isna().all()
+    assert df_none["field_phi_deg"].isna().all()

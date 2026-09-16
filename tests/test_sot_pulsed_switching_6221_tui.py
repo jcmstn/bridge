@@ -23,7 +23,7 @@ def _state(**overrides) -> dict:
         sense_current_A=1e-4, compliance_V=2.0, frequency_Hz=977.0, phasemarker_line=1,
         harmonic=2, n_averages=50, settle_after_enable_s=1.0, lock_timeout_s=5.0,
         delay_after_pulse_s=1.0,
-        magnet_current_A="1.5", field_angle_from_oop_deg=85.0, field_settle_tolerance_mT=0.05,
+        magnet_current_A="1.5", field_theta_deg=85.0, field_phi_deg=None, field_settle_tolerance_mT=0.05,
         device="HB3", cooldown="3", temperature_setpoint_K=300.0,
         source_visa_resource="GPIB0::20::INSTR",
         mfli_host="localhost", mfli_port=8004, mfli_device="dev1234",
@@ -169,7 +169,8 @@ def test_build_plan_shapes(tmp_path: Path):
     assert plan.read_cfg.sense_current_A == 1e-4
     assert plan.read_cfg.delay_after_pulse_s == 1.0
     assert plan.magnet_currents_A == [1.5]
-    assert plan.field_angle_from_oop_deg == 85.0
+    assert plan.field_theta_deg == 85.0
+    assert plan.field_phi_deg is None
     assert plan.ac_cfg.visa_resource == "GPIB0::20::INSTR"
     assert plan.ac_cfg.amplitude_A == 1e-4 and plan.ac_cfg.compliance_V == 2.0
     assert plan.ac_cfg.frequency_Hz == 977.0 and plan.ac_cfg.phasemarker_line == 1

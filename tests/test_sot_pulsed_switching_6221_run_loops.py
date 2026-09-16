@@ -153,7 +153,7 @@ def test_pulsed_one_row_per_amplitude():
     seen: list[dict] = []
 
     df = _run(pulse_cfg, read_cfg, demod_cfg, extref_cfg, points, on_point=seen.append,
-             magnet_current_A=1.5, field_angle_from_oop_deg=85.0)
+             magnet_current_A=1.5, field_theta_deg=85.0, field_phi_deg=10.0)
 
     assert len(df) == 5
     assert [r["amplitude_index"] for r in seen] == [0, 1, 2, 3, 4]
@@ -163,7 +163,8 @@ def test_pulsed_one_row_per_amplitude():
     assert all(not math.isnan(r["demod_R_V"]) for r in seen)
     assert all(r["reference_locked"] is True for r in seen)
     assert all(r["magnet_current_A"] == 1.5 for r in seen)
-    assert all(r["field_angle_from_oop_deg"] == 85.0 for r in seen)
+    assert all(r["field_theta_deg"] == 85.0 for r in seen)
+    assert all(r["field_phi_deg"] == 10.0 for r in seen)
 
 
 def test_pulsed_stop_event_breaks_early():

@@ -26,7 +26,7 @@ def _state(**overrides) -> dict:
         sense_current_A=1e-4, compliance_V=2.0, source_delay_s=0.05, nplc=5.0,
         auto_range=True, n_reversals=5, settle_after_enable_s=0.3,
         delay_after_pulse_s=1.0,
-        magnet_current_A="1.5", field_angle_from_oop_deg=85.0, field_settle_tolerance_mT=0.05,
+        magnet_current_A="1.5", field_theta_deg=85.0, field_phi_deg=None, field_settle_tolerance_mT=0.05,
         device="HB3", cooldown="3", temperature_setpoint_K=300.0,
         source_visa_resource="GPIB0::20::INSTR", voltmeter_visa_resource="GPIB0::7::INSTR",
         magnet_visa_resource="GPIB0::6::INSTR", current_limit_A=35.0,
@@ -174,7 +174,8 @@ def test_build_plan_shapes(tmp_path: Path):
     assert plan.read_cfg.sense_current_A == 1e-4
     assert plan.read_cfg.delay_after_pulse_s == 1.0
     assert plan.magnet_currents_A == [1.5]
-    assert plan.field_angle_from_oop_deg == 85.0
+    assert plan.field_theta_deg == 85.0
+    assert plan.field_phi_deg is None
     # 6221 forces the read current, 2182 reads V_xy
     assert plan.src_cfg.visa_resource == "GPIB0::20::INSTR"
     assert plan.src_cfg.sense_current_A == 1e-4 and plan.src_cfg.compliance_V == 2.0

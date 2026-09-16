@@ -374,7 +374,8 @@ def build_run_metadata(
         "hall_bar_length_um":       geometry_cfg.hall_bar_length_um,
         "hall_bar_width_um":        geometry_cfg.hall_bar_width_um,
         "hall_bar_thickness_nm":    geometry_cfg.hall_bar_thickness_nm,
-        "field_angle_from_oop_deg": geometry_cfg.field_angle_from_oop_deg,
+        "field_theta_deg":          geometry_cfg.field_theta_deg,
+        "field_phi_deg":            geometry_cfg.field_phi_deg,
     }
 
 

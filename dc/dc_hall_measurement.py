@@ -158,7 +158,8 @@ def run_measurement(
     gauss_cfg:  Optional[GaussmeterConfig] = None,
     temp_ctrl: Optional[MercuryITC] = None,
     temp_cfg:  Optional[TemperatureControllerConfig] = None,
-    field_angle_from_oop_deg: Optional[float] = None,
+    field_theta_deg: Optional[float] = None,
+    field_phi_deg: Optional[float] = None,
     write_csv: Optional[Callable[[List[dict]], None]] = None,
 ) -> pd.DataFrame:
     """
@@ -188,12 +189,14 @@ def run_measurement(
     (e.g. because the MercuryiTC isn't connected) simply leaves those
     columns empty — it's never a reason to stop the measurement.
 
-    `field_angle_from_oop_deg`, if given, is the external field's angle
-    from the out-of-plane (film-normal) axis — 0° = fully out-of-plane,
-    90° = in-plane. Not readable from any instrument; it's written
-    verbatim to every row's `field_angle_from_oop_deg` column (blank when
-    None) so a later analysis can resolve the ordinary/anomalous/planar
-    Hall geometry. Same column name as mfli_dual_harmonic's run metadata.
+    `field_theta_deg`/`field_phi_deg`, if given, are the external field's
+    direction — theta from the out-of-plane (film-normal) axis (0° = fully
+    out-of-plane, 90° = in-plane), phi the azimuth from the current/channel
+    axis in the film plane (0–360°, meaningless when theta==0). Neither is
+    readable from any instrument; both are written verbatim to every row
+    (blank when None) so a later analysis can resolve the
+    ordinary/anomalous/planar Hall geometry. See docs/data_convention.md
+    "Field direction convention".
 
     `write_csv`, if given, replaces the plain
     `pd.DataFrame(records).to_csv(acq_cfg.output_file, index=False)` write
@@ -254,7 +257,8 @@ def run_measurement(
             "timestamp":        time.strftime("%Y-%m-%dT%H:%M:%S"),
             "magnet_current_A": pt.magnet_current_A,
             "magnet_field_mT":  field_mT,
-            "field_angle_from_oop_deg": field_angle_from_oop_deg,
+            "field_theta_deg":  field_theta_deg,
+            "field_phi_deg":    field_phi_deg,
             "temperature_1_K":  temp_1_K,
             "temperature_2_K":  temp_2_K,
             "sense_current_A":  src_cfg.sense_current_A,
@@ -372,7 +376,7 @@ def main() -> None:
         df = run_measurement(source, voltmeter, src_cfg, acq_cfg, points,
                               gaussmeter=gaussmeter, gauss_cfg=gauss_cfg,
                               temp_ctrl=temp_ctrl, temp_cfg=temp_cfg,
-                              field_angle_from_oop_deg=None)  # deg from film normal: 0=OOP, 90=in-plane
+                              field_theta_deg=None, field_phi_deg=None)  # from film normal / current axis
         print("\n", df.to_string(index=False))
     finally:
         shutdown_source(source)

@@ -193,9 +193,10 @@ class SampleGeometryConfig:
     hall_bar_length_um:       Optional[float] = None  # Current-path length between voltage probes
     hall_bar_width_um:        Optional[float] = None  # Channel width
     hall_bar_thickness_nm:    Optional[float] = None  # Film/channel thickness
-    field_angle_from_oop_deg: Optional[float] = None  # External field angle from the out-of-plane
-                                                        # (film normal) axis; 0° = fully out-of-plane,
-                                                        # 90° = in-plane
+    field_theta_deg: Optional[float] = None  # Polar angle from the out-of-plane (film normal)
+                                              # axis; 0° = fully out-of-plane, 90° = in-plane
+    field_phi_deg:   Optional[float] = None  # Azimuth from the current axis, in the film plane;
+                                              # meaningless when field_theta_deg == 0
 
 
 @dataclass
@@ -419,7 +420,8 @@ def build_run_metadata(
         "hall_bar_length_um":       geometry_cfg.hall_bar_length_um,
         "hall_bar_width_um":        geometry_cfg.hall_bar_width_um,
         "hall_bar_thickness_nm":    geometry_cfg.hall_bar_thickness_nm,
-        "field_angle_from_oop_deg": geometry_cfg.field_angle_from_oop_deg,
+        "field_theta_deg":          geometry_cfg.field_theta_deg,
+        "field_phi_deg":            geometry_cfg.field_phi_deg,
     }
 
 
@@ -937,10 +939,11 @@ def main() -> None:
     # None of these are readable from any instrument, so they default to
     # None and are simply saved as blank metadata columns if left unset.
     geometry_cfg = SampleGeometryConfig(
-        hall_bar_length_um       = None,   # e.g. 20.0
-        hall_bar_width_um        = None,   # e.g. 5.0
-        hall_bar_thickness_nm    = None,   # e.g. 5.0
-        field_angle_from_oop_deg = None,   # e.g. 0.0 for a fully out-of-plane field
+        hall_bar_length_um    = None,   # e.g. 20.0
+        hall_bar_width_um     = None,   # e.g. 5.0
+        hall_bar_thickness_nm = None,   # e.g. 5.0
+        field_theta_deg       = None,   # e.g. 0.0 for a fully out-of-plane field
+        field_phi_deg         = None,   # e.g. 0.0 for along the current axis
     )
 
     # ── Measurement points ───────────────────────────────────────────────────

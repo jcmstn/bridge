@@ -91,6 +91,7 @@ from mfli.mfli_dual_harmonic_6221 import (
     _AC_COMPLIANCE_CEILING_V,
 )
 from instruments.data_dir import DataDirPickerScreen, validate_directory
+from instruments.field_geometry import field_direction_summary_line, render_ascii_field_diagram
 from instruments.data_naming import (
     TEST_SAMPLE,
     RunContext,
@@ -169,7 +170,8 @@ DEFAULTS: dict = {
     "hall_bar_length_um": "",
     "hall_bar_width_um": "",
     "hall_bar_thickness_nm": "",
-    "field_angle_from_oop_deg": "",
+    "field_theta_deg": "",
+    "field_phi_deg": "",
     "leader_extref_index": "0",
     "leader_aux_input_ch": "0",
     "leader_osc_index": "0",
@@ -237,7 +239,7 @@ OPTIONAL_NUMERIC_FIELDS = [
     "temperature_setpoint_K",
     "phase_cal_current_A",
     "hall_bar_length_um", "hall_bar_width_um", "hall_bar_thickness_nm",
-    "field_angle_from_oop_deg",
+    "field_theta_deg", "field_phi_deg",
 ]
 MAGNET_FIELD_IDS = [
     "visa_resource", "current_limit_A", "voltage_compliance_V",
@@ -584,15 +586,13 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         "Hall bar length": state["hall_bar_length_um"],
         "Hall bar width": state["hall_bar_width_um"],
         "Hall bar thickness": state["hall_bar_thickness_nm"],
-        "Field angle from out-of-plane": state["field_angle_from_oop_deg"],
     }
     set_geom = {k: v for k, v in geom_fields.items() if v is not None}
     if not set_geom:
         warnings.append(
-            "Sample geometry and field angle are unset — the run will still "
-            "record raw 1f/2f voltages, but converting them to a resistivity "
-            "or an absolute spin-Hall/damping-like field needs these (optional "
-            "fields below)."
+            "Sample geometry is unset — the run will still record raw 1f/2f "
+            "voltages, but converting them to a resistivity or an absolute "
+            "spin-Hall/damping-like field needs these (optional fields below)."
         )
     elif len(set_geom) < len(geom_fields):
         missing = ", ".join(k for k in geom_fields if geom_fields[k] is None)
@@ -600,6 +600,8 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         info.append("Sample geometry: " + ", ".join(f"{k}={v:g}" for k, v in set_geom.items()))
     else:
         info.append("Sample geometry: " + ", ".join(f"{k}={v:g}" for k, v in set_geom.items()))
+
+    info.append(field_direction_summary_line(state["field_theta_deg"], state.get("field_phi_deg")))
 
     return info, warnings, errors
 
@@ -1056,6 +1058,9 @@ class MFLIDualHarmonic6221App(App):
     .hint { text-style: italic; color: $text-muted; }
     .switch-row { height: 3; }
     .switch-row Label { margin-left: 1; content-align: left middle; height: 3; }
+    .plane-btn-row { height: 3; margin-bottom: 1; }
+    .plane-btn-row Button { min-width: 5; margin-right: 1; }
+    .field-diagram { color: $text-muted; margin-top: 1; }
     .sidebar-title { text-style: bold underline; margin-bottom: 1; }
     #actionbar { height: 3; align: center middle; }
 
@@ -1160,6 +1165,33 @@ class MFLIDualHarmonic6221App(App):
                                  "saturation (e.g. matching i_max). Only used if the field sweep "
                                  "above is enabled.",
                         ),
+                    )
+                    yield card(
+                        "Sample geometry & field direction (optional)",
+                        field("hall_bar_length_um", "Hall bar length (µm)",
+                              DEFAULTS["hall_bar_length_um"], kind="text", valid_empty=True,
+                              hint="Current-path length between voltage probes. Leave blank if "
+                                   "unknown — doesn't block the run."),
+                        field("hall_bar_width_um", "Hall bar width (µm)",
+                              DEFAULTS["hall_bar_width_um"], kind="text", valid_empty=True),
+                        field("hall_bar_thickness_nm", "Film/channel thickness (nm)",
+                              DEFAULTS["hall_bar_thickness_nm"], kind="text", valid_empty=True),
+                        field("field_theta_deg", "θ — tilt from out-of-plane (°)",
+                              DEFAULTS["field_theta_deg"], kind="number", valid_empty=True,
+                              validators=[Number(0, 180, failure_description="0-180°")],
+                              hint="0° = fully out-of-plane (film normal), 90° = in-plane."),
+                        field("field_phi_deg", "φ — azimuth from current axis (°)",
+                              DEFAULTS["field_phi_deg"], kind="number", valid_empty=True,
+                              validators=[Number(0, 360, failure_description="0-360°")],
+                              hint="Meaningless when θ=0°."),
+                        Horizontal(
+                            Button("xy", id="plane_xy", classes="plane-btn"),
+                            Button("zx", id="plane_zx", classes="plane-btn"),
+                            Button("zy", id="plane_zy", classes="plane-btn"),
+                            classes="plane-btn-row",
+                        ),
+                        Static(render_ascii_field_diagram(None, None),
+                               id="field_diagram", classes="field-diagram"),
                     )
 
                 # ── Tier 2: precision / speed knobs — collapsed ─────────────
@@ -1316,29 +1348,6 @@ class MFLIDualHarmonic6221App(App):
                                 "trusting it (V₂ω ∝ cos, not sin, so X₁f being right says nothing "
                                 "about X₂f).",
                                 classes="hint",
-                            ),
-                            muted=True,
-                        )
-                        yield card(
-                            "Sample geometry (optional)",
-                            field(
-                                "hall_bar_length_um", "Hall bar length (µm)",
-                                DEFAULTS["hall_bar_length_um"], kind="text", valid_empty=True,
-                                hint="Current-path length between voltage probes. Leave blank if "
-                                     "unknown — doesn't block the run.",
-                            ),
-                            field(
-                                "hall_bar_width_um", "Hall bar width (µm)",
-                                DEFAULTS["hall_bar_width_um"], kind="text", valid_empty=True,
-                            ),
-                            field(
-                                "hall_bar_thickness_nm", "Film/channel thickness (nm)",
-                                DEFAULTS["hall_bar_thickness_nm"], kind="text", valid_empty=True,
-                            ),
-                            field(
-                                "field_angle_from_oop_deg", "External field angle from out-of-plane (°)",
-                                DEFAULTS["field_angle_from_oop_deg"], kind="text", valid_empty=True,
-                                hint="0° = fully out-of-plane (film normal), 90° = in-plane.",
                             ),
                             muted=True,
                         )
@@ -1555,6 +1564,10 @@ class MFLIDualHarmonic6221App(App):
         self.query_one("#summary", Static).update("\n".join(lines))
         self.query_one("#start", Button).disabled = bool(errors)
 
+        theta = None if parse_errors else state.get("field_theta_deg")
+        phi = None if parse_errors else state.get("field_phi_deg")
+        self.query_one("#field_diagram", Static).update(render_ascii_field_diagram(theta, phi))
+
     # ── Start ────────────────────────────────────────────────────────────────
 
     def action_start(self) -> None:
@@ -1578,6 +1591,15 @@ class MFLIDualHarmonic6221App(App):
             self.action_start()
         elif event.button.id == "browse_data_dir":
             self._browse_data_dir()
+        elif event.button.id == "plane_xy":
+            self.query_one("#field_theta_deg", Input).value = "90"
+            self.refresh_summary()
+        elif event.button.id == "plane_zx":
+            self.query_one("#field_phi_deg", Input).value = "0"
+            self.refresh_summary()
+        elif event.button.id == "plane_zy":
+            self.query_one("#field_phi_deg", Input).value = "90"
+            self.refresh_summary()
 
     def _build_plan(self, state: dict) -> MeasurementPlan:
         ac_cfg = ACSourceConfig(
@@ -1660,7 +1682,8 @@ class MFLIDualHarmonic6221App(App):
             hall_bar_length_um=state["hall_bar_length_um"],
             hall_bar_width_um=state["hall_bar_width_um"],
             hall_bar_thickness_nm=state["hall_bar_thickness_nm"],
-            field_angle_from_oop_deg=state["field_angle_from_oop_deg"],
+            field_theta_deg=state["field_theta_deg"],
+            field_phi_deg=state["field_phi_deg"],
         )
 
         header_extra = {

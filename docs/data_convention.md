@@ -168,6 +168,33 @@ happens automatically in `index.csv`.
   per gate voltage) — how you group related `index.csv` rows back
   together after the fact.
 
+## Field direction convention
+
+Field direction is recorded as two hand-typed angles — `field_theta_deg` and
+`field_phi_deg` — describing how the sample/magnet were physically mounted
+for the run (there is no motorized rotator; nothing in this codebase sets
+field direction in software, only field magnitude). Coordinate frame:
+
+- **z** — film normal (out-of-plane).
+- **x** — the current/channel direction (a Hall bar's long axis).
+- **y** — transverse in-plane, completing a right-handed frame.
+
+`field_theta_deg` is the polar angle from `+z`: 0° = fully out-of-plane,
+90° = fully in-plane. `field_phi_deg` is the azimuth from `+x` in the
+xy-plane, 0–360°, and is only physically meaningful once theta > 0 — at
+theta=0 the field points straight along the normal and any phi describes
+the same direction.
+
+There is no separate "which plane" column. A fixed-phi, theta-swept series
+(or vice versa) is just a sequence of runs sharing a `series` tag — the
+existing `series` column already reconstructs that grouping; a redundant
+plane label would be ambiguous at the boundaries anyway (theta=90,phi=0 is
+simultaneously an xy-plane point and a zx-plane point).
+
+`instruments/field_geometry.py` — `field_unit_vector(theta_deg, phi_deg)`
+converts to a Cartesian unit vector in this frame; `render_ascii_field_diagram`
+draws the small live diagram both front ends show next to these fields.
+
 ## `index.csv`
 
 One row per run, the same union-of-columns as the header, kept as a small

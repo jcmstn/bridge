@@ -77,6 +77,7 @@ from sot.sot_pulsed_switching_6221 import (
 from sot.sot_pulsed_switching_6221 import _six221_ac_output_off
 from dc.dc_sweep_utils import linear_sweep, parse_value_list, safe_shutdown
 from instruments.data_dir import DataDirPickerScreen, validate_directory
+from instruments.field_geometry import field_direction_summary_line, render_ascii_field_diagram
 from instruments.data_naming import (
     TEST_SAMPLE,
     RunContext,
@@ -141,7 +142,8 @@ DEFAULTS: dict = {
     "delay_after_pulse_s": "1.0",
     # static field
     "magnet_current_A": "1.5",
-    "field_angle_from_oop_deg": "85",
+    "field_theta_deg": "85",
+    "field_phi_deg": "",
     "field_settle_tolerance_mT": "0.05",
     # identity
     "device": "",
@@ -204,7 +206,7 @@ NUMERIC_FIELDS: dict = {
     "settle_after_enable_s": float,
     "lock_timeout_s": float,
     "delay_after_pulse_s": float,
-    "field_angle_from_oop_deg": float,
+    "field_theta_deg": float,
     "field_settle_tolerance_mT": float,
     "mfli_port": int,
     "aux_input_ch": int,
@@ -229,7 +231,7 @@ TEXT_FIELDS = ["device", "cooldown",
                "magnet_visa_resource",
                "gaussmeter_visa_resource", "temperature_visa_resource",
                "temperature_sensor_uids", "magnet_current_A", "data_dir"]
-OPTIONAL_NUMERIC_FIELDS = ["temperature_setpoint_K"]
+OPTIONAL_NUMERIC_FIELDS = ["temperature_setpoint_K", "field_phi_deg"]
 TEMPERATURE_FIELD_IDS = ["temperature_visa_resource", "temperature_sensor_uids"]
 
 # Every Switch id on the form. Hardcoded in collect_raw / _load_settings /
@@ -307,7 +309,8 @@ class MeasurementPlan:
     gauss_cfg: GaussmeterConfig
     pulse_currents_A: List[float]
     magnet_currents_A: List[float]
-    field_angle_from_oop_deg: Optional[float]
+    field_theta_deg: Optional[float]
+    field_phi_deg: Optional[float]
     field_settle_tolerance_mT: float
     sample: str
     device: str
@@ -523,8 +526,7 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         info.append(f"Static field via magnet current {currents[0]:g} A "
                     "(measured live by the 475). Comma-separate more values to scan the "
                     "assist field, or add the opposite sign for the ±H_z control.")
-    info.append(f"Field mount tilt recorded as field_angle_from_oop_deg = "
-                f"{state['field_angle_from_oop_deg']:g}° (set to your real mount angle).")
+    info.append(field_direction_summary_line(state["field_theta_deg"], state.get("field_phi_deg")))
 
     if state["enable_temperature"]:
         uids = parse_sensor_uids(state["temperature_sensor_uids"])
@@ -865,7 +867,7 @@ class RunScreen(Screen):
                         gaussmeter=gaussmeter, gauss_cfg=plan.gauss_cfg,
                         temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg,
                         magnet_current_A=I_mag,
-                        field_angle_from_oop_deg=plan.field_angle_from_oop_deg,
+                        field_theta_deg=plan.field_theta_deg, field_phi_deg=plan.field_phi_deg,
                         write_csv=write_csv, output_file=str(ctx.raw_path))
                 except Exception as exc:
                     iter_error = exc
@@ -931,6 +933,9 @@ class SOTPulsedSwitching6221App(App):
     .hint { text-style: italic; color: $text-muted; }
     .switch-row { height: 3; }
     .switch-row Label { margin-left: 1; content-align: left middle; height: 3; }
+    .plane-btn-row { height: 3; margin-bottom: 1; }
+    .plane-btn-row Button { min-width: 5; margin-right: 1; }
+    .field-diagram { color: $text-muted; margin-top: 1; }
     .sidebar-title { text-style: bold underline; margin-bottom: 1; }
     .card-desc { color: $text-muted; margin-bottom: 1; }
     #actionbar { height: 3; align: center middle; }
@@ -1029,9 +1034,24 @@ class SOTPulsedSwitching6221App(App):
                               DEFAULTS["magnet_current_A"], kind="text",
                               hint="One value, or comma-separated for several — each gets its "
                                    "own complete sweep and file. Add the opposite sign for ±H_z."),
-                        field("field_angle_from_oop_deg", "Field mount tilt from OOP (deg)",
-                              DEFAULTS["field_angle_from_oop_deg"],
-                              hint="0 = out-of-plane, 90 = in-plane. Recorded, not set."),
+                        field("field_theta_deg", "θ — mount tilt from OOP (°)",
+                              DEFAULTS["field_theta_deg"],
+                              validators=[Number(0, 180, failure_description="0-180°")],
+                              hint="0° = out-of-plane, 90° = in-plane. Recorded, not set."),
+                        field("field_phi_deg", "φ — azimuth from current axis (°)",
+                              DEFAULTS["field_phi_deg"], kind="number", valid_empty=True,
+                              validators=[Number(0, 360, failure_description="0-360°")],
+                              hint="Optional. Meaningless when θ=0°."),
+                        Horizontal(
+                            Button("xy", id="plane_xy", classes="plane-btn"),
+                            Button("zx", id="plane_zx", classes="plane-btn"),
+                            Button("zy", id="plane_zy", classes="plane-btn"),
+                            classes="plane-btn-row",
+                        ),
+                        Static(render_ascii_field_diagram(
+                                   float(DEFAULTS["field_theta_deg"]) if DEFAULTS["field_theta_deg"] else None,
+                                   None),
+                               id="field_diagram", classes="field-diagram"),
                         field("field_settle_tolerance_mT", "Field settle tolerance (mT)",
                               DEFAULTS["field_settle_tolerance_mT"]),
                     )
@@ -1293,6 +1313,10 @@ class SOTPulsedSwitching6221App(App):
         self.query_one("#summary", Static).update("\n".join(lines))
         self.query_one("#start", Button).disabled = bool(errors)
 
+        theta = None if parse_errors else state.get("field_theta_deg")
+        phi = None if parse_errors else state.get("field_phi_deg")
+        self.query_one("#field_diagram", Static).update(render_ascii_field_diagram(theta, phi))
+
     def action_start(self) -> None:
         state, parse_errors = self.parse_state()
         if parse_errors:
@@ -1312,6 +1336,15 @@ class SOTPulsedSwitching6221App(App):
             self.action_start()
         elif event.button.id == "browse_data_dir":
             self._browse_data_dir()
+        elif event.button.id == "plane_xy":
+            self.query_one("#field_theta_deg", Input).value = "90"
+            self.refresh_summary()
+        elif event.button.id == "plane_zx":
+            self.query_one("#field_phi_deg", Input).value = "0"
+            self.refresh_summary()
+        elif event.button.id == "plane_zy":
+            self.query_one("#field_phi_deg", Input).value = "90"
+            self.refresh_summary()
 
     def _build_plan(self, state: dict) -> MeasurementPlan:
         pulse_cfg = WritePulseConfig(
@@ -1371,7 +1404,8 @@ class SOTPulsedSwitching6221App(App):
             "frequency_Hz": state["frequency_Hz"],
             "phasemarker_line": state["phasemarker_line"],
             "harmonic": state["harmonic"],
-            "field_angle_from_oop_deg": state["field_angle_from_oop_deg"],
+            "field_theta_deg": state["field_theta_deg"],
+            "field_phi_deg": state["field_phi_deg"],
             "pulse_current_start_A": state["pulse_current_start_A"],
             "pulse_current_stop_A": state["pulse_current_stop_A"],
             "pulse_current_step_A": state["pulse_current_step_A"],
@@ -1383,7 +1417,7 @@ class SOTPulsedSwitching6221App(App):
             mfli_host=state["mfli_host"], mfli_port=state["mfli_port"],
             read_cfg=read_cfg, magnet_cfg=magnet_cfg, gauss_cfg=gauss_cfg,
             pulse_currents_A=state["pulse_current_list"], magnet_currents_A=state["magnet_currents_A"],
-            field_angle_from_oop_deg=state["field_angle_from_oop_deg"],
+            field_theta_deg=state["field_theta_deg"], field_phi_deg=state["field_phi_deg"],
             field_settle_tolerance_mT=state["field_settle_tolerance_mT"],
             data_root=self.data_root,
             sample=state["sample"], device=state["device"],

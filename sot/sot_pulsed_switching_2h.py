@@ -491,7 +491,8 @@ def run_measurement(
     temp_ctrl: Optional[MercuryITC] = None,
     temp_cfg: Optional[TemperatureControllerConfig] = None,
     magnet_current_A: Optional[float] = None,
-    field_angle_from_oop_deg: Optional[float] = None,
+    field_theta_deg: Optional[float] = None,
+    field_phi_deg: Optional[float] = None,
     write_csv: Optional[Callable[[List[dict]], None]] = None,
     output_file: str = "sot_pulsed_switching_2h.csv",
 ) -> pd.DataFrame:
@@ -610,7 +611,8 @@ def run_measurement(
             "2f_overload":  d2["overload"],
             "magnet_current_A":  magnet_current_A,
             "assist_field_measured_mT": field_measured_mT,
-            "field_angle_from_oop_deg": field_angle_from_oop_deg,
+            "field_theta_deg":   field_theta_deg,
+            "field_phi_deg":     field_phi_deg,
             "temperature_1_K":   t1_K,
             "temperature_2_K":   t2_K,
         }
@@ -667,7 +669,8 @@ def main() -> None:
                              osc_index=0, filter=shared_filter)
     _check_extref_demod_conflict(demod1_cfg, demod2_cfg, extref_cfg)
 
-    FIELD_ANGLE_FROM_OOP_DEG = 85.0
+    FIELD_THETA_DEG = 85.0
+    FIELD_PHI_DEG = 0.0
     STATIC_MAGNET_CURRENT_A = 1.5
     AMPLITUDES_V = list(linear_sweep(0.2, 2.0, 0.1, bidirectional=True))
     OUTPUT_FILE = str(_DATA_DIR / f"sot_pulsed_2h_{datetime.now():%Y%m%d_%H%M%S}.csv")
@@ -698,7 +701,7 @@ def main() -> None:
                              gaussmeter=gaussmeter, gauss_cfg=gauss_cfg,
                              temp_ctrl=temp_ctrl, temp_cfg=temp_cfg,
                              magnet_current_A=STATIC_MAGNET_CURRENT_A,
-                             field_angle_from_oop_deg=FIELD_ANGLE_FROM_OOP_DEG,
+                             field_theta_deg=FIELD_THETA_DEG, field_phi_deg=FIELD_PHI_DEG,
                              output_file=OUTPUT_FILE)
         print("\n", df.to_string(index=False))
     finally:

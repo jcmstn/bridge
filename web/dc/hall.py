@@ -50,6 +50,7 @@ from web.run_controller import (
     param_card, stable_card, param_grid, stable_grid, advanced_section, measurement_layout,
 )
 from web.directory_picker import validate_directory
+from web.field_diagram import build_field_diagram_figure
 from web.identity_bar import identity_bar
 from web.sample_picker import NEW_SAMPLE_SENTINEL, status_comment_dialog
 
@@ -152,7 +153,7 @@ def build_plan(state: dict) -> MeasurementPlan:
         sense_currents_A=state["sense_current_list"],
         temp_cfg=temp_cfg, sample=state["sample"], device=state["device"],
         temperature_setpoint_K=state["temperature_setpoint_K"],
-        field_angle_from_oop_deg=state["field_angle_from_oop_deg"],
+        field_theta_deg=state["field_theta_deg"], field_phi_deg=state["field_phi_deg"],
         cooldown=state["cooldown"], header_extra=header_extra, series=series,
     )
 
@@ -222,7 +223,8 @@ def page() -> None:
     controller: dict[str, Optional[RunController]] = {"c": None}
 
     _t_default = d("temperature_setpoint_K")
-    _angle_default = d("field_angle_from_oop_deg")
+    _theta_default = d("field_theta_deg")
+    _phi_default = d("field_phi_deg")
 
     with measurement_layout() as regions:
         with regions.identity:
@@ -255,12 +257,29 @@ def page() -> None:
                     switches["enable_temperature"] = bool_switch(
                         "Log temperature (Oxford Instruments MercuryiTC)", d("enable_temperature"))
 
-                with param_card("Sample geometry"):
-                    inputs["field_angle_from_oop_deg"] = optional_num_field(
-                        "External field angle from out-of-plane (°)",
-                        float(_angle_default) if str(_angle_default).strip() not in ("", "None") else None,
-                        hint="0° = fully out-of-plane (film normal), 90° = in-plane. "
-                             "Optional — stored in every row's field_angle_from_oop_deg column.")
+                with param_card("Field direction"):
+                    inputs["field_theta_deg"] = optional_num_field(
+                        "θ — tilt from out-of-plane (°)",
+                        float(_theta_default) if str(_theta_default).strip() not in ("", "None") else None,
+                        hint="0° = fully out-of-plane (film normal), 90° = in-plane.",
+                        min=0, max=180)
+                    inputs["field_phi_deg"] = optional_num_field(
+                        "φ — azimuth from current axis (°)",
+                        float(_phi_default) if str(_phi_default).strip() not in ("", "None") else None,
+                        hint="0° = along sense current, 90° = transverse in-plane. "
+                             "Meaningless when θ=0°.",
+                        min=0, max=360)
+                    with ui.row().classes("gap-2 mb-1"):
+                        ui.button("xy", on_click=lambda: (inputs["field_theta_deg"].set_value(90),
+                                                            refresh_summary.refresh())).props("dense outline")
+                        ui.button("zx", on_click=lambda: (inputs["field_phi_deg"].set_value(0),
+                                                            refresh_summary.refresh())).props("dense outline")
+                        ui.button("zy", on_click=lambda: (inputs["field_phi_deg"].set_value(90),
+                                                            refresh_summary.refresh())).props("dense outline")
+                    field_diagram_plot = ui.plotly(build_field_diagram_figure(
+                        _theta_default if str(_theta_default).strip() not in ("", "None") else None,
+                        _phi_default if str(_phi_default).strip() not in ("", "None") else None,
+                    )).classes("w-full").style("height: 220px")
 
             # ── Tier 2: precision / speed knobs — collapsed ─────────────────
             with advanced_section("Acquisition & filter settings"):
@@ -429,6 +448,10 @@ def page() -> None:
             render_summary(info, warnings, errors)
         start_btn.set_enabled(not errors and not is_busy())
 
+        theta = None if parse_errors else state.get("field_theta_deg")
+        phi = None if parse_errors else state.get("field_phi_deg")
+        field_diagram_plot.update_figure(build_field_diagram_figure(theta, phi))
+
     for inp in list(inputs.values()):
         inp.on_value_change(refresh_summary.refresh)
     for sw in switches.values():
@@ -580,7 +603,7 @@ def page() -> None:
                             stop_event=stop_event, on_point=tagged_on_point,
                             gaussmeter=gaussmeter, gauss_cfg=plan.gauss_cfg,
                             temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg,
-                            field_angle_from_oop_deg=plan.field_angle_from_oop_deg,
+                            field_theta_deg=plan.field_theta_deg, field_phi_deg=plan.field_phi_deg,
                             write_csv=write_csv,
                         )
                     except Exception as exc:

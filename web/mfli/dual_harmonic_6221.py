@@ -48,6 +48,7 @@ from web.run_controller import (
     param_card, param_grid, stable_card, stable_grid, advanced_section, measurement_layout,
 )
 from web.directory_picker import validate_directory
+from web.field_diagram import build_field_diagram_figure
 from web.identity_bar import identity_bar
 from web.sample_picker import NEW_SAMPLE_SENTINEL, status_comment_dialog
 
@@ -156,7 +157,7 @@ def build_plan(state: dict) -> MeasurementPlan:
     geometry_cfg = SampleGeometryConfig(
         hall_bar_length_um=state["hall_bar_length_um"], hall_bar_width_um=state["hall_bar_width_um"],
         hall_bar_thickness_nm=state["hall_bar_thickness_nm"],
-        field_angle_from_oop_deg=state["field_angle_from_oop_deg"],
+        field_theta_deg=state["field_theta_deg"], field_phi_deg=state["field_phi_deg"],
     )
 
     header_extra = {
@@ -276,6 +277,31 @@ def page() -> None:
                              "near saturation — e.g. matching i_max. Only used if the field sweep "
                              "above is enabled.")
 
+                with param_card("Sample geometry & field direction (optional)"):
+                    optional_inputs["hall_bar_length_um"] = optional_num_field(
+                        "Hall bar length (µm)", opt("hall_bar_length_um"),
+                        hint="Current-path length between voltage probes. Leave blank if unknown.")
+                    optional_inputs["hall_bar_width_um"] = optional_num_field(
+                        "Hall bar width (µm)", opt("hall_bar_width_um"))
+                    optional_inputs["hall_bar_thickness_nm"] = optional_num_field(
+                        "Film/channel thickness (nm)", opt("hall_bar_thickness_nm"))
+                    optional_inputs["field_theta_deg"] = optional_num_field(
+                        "θ — tilt from out-of-plane (°)", opt("field_theta_deg"),
+                        hint="0° = fully out-of-plane (film normal), 90° = in-plane.",
+                        min=0, max=180)
+                    optional_inputs["field_phi_deg"] = optional_num_field(
+                        "φ — azimuth from current axis (°)", opt("field_phi_deg"),
+                        hint="Meaningless when θ=0°.", min=0, max=360)
+                    with ui.row().classes("gap-2 mb-1"):
+                        ui.button("xy", on_click=lambda: (optional_inputs["field_theta_deg"].set_value(90),
+                                                            refresh_summary.refresh())).props("dense outline")
+                        ui.button("zx", on_click=lambda: (optional_inputs["field_phi_deg"].set_value(0),
+                                                            refresh_summary.refresh())).props("dense outline")
+                        ui.button("zy", on_click=lambda: (optional_inputs["field_phi_deg"].set_value(90),
+                                                            refresh_summary.refresh())).props("dense outline")
+                    field_diagram_plot = ui.plotly(build_field_diagram_figure(
+                        opt("field_theta_deg"), opt("field_phi_deg"))).classes("w-full").style("height: 220px")
+
             # ── Tier 2: precision / speed knobs — collapsed ─────────────────
             with advanced_section("Acquisition & filter settings"):
                 with stable_grid():
@@ -382,16 +408,6 @@ def page() -> None:
                             "there before trusting it."
                         ).classes("text-xs text-grey-6")
 
-                    with stable_card("Sample geometry (optional)"):
-                        optional_inputs["hall_bar_length_um"] = optional_num_field(
-                            "Hall bar length (µm)", opt("hall_bar_length_um"),
-                            hint="Current-path length between voltage probes. Leave blank if unknown.")
-                        optional_inputs["hall_bar_width_um"] = optional_num_field("Hall bar width (µm)", opt("hall_bar_width_um"))
-                        optional_inputs["hall_bar_thickness_nm"] = optional_num_field("Film/channel thickness (nm)", opt("hall_bar_thickness_nm"))
-                        optional_inputs["field_angle_from_oop_deg"] = optional_num_field(
-                            "External field angle from out-of-plane (°)", opt("field_angle_from_oop_deg"),
-                            hint="0° = fully out-of-plane (film normal), 90° = in-plane.")
-
         with regions.summary:
             summary_box = ui.column().classes("w-full")
             start_btn = ui.button("▶  Start measurement", color="primary").classes("w-full")
@@ -494,6 +510,10 @@ def page() -> None:
             summary_box.clear()
             render_summary(info, warnings, errors)
         start_btn.set_enabled(not errors and not is_busy())
+
+        theta = None if parse_errors else state.get("field_theta_deg")
+        phi = None if parse_errors else state.get("field_phi_deg")
+        field_diagram_plot.update_figure(build_field_diagram_figure(theta, phi))
 
     for inp in list(inputs.values()) + list(optional_inputs.values()) + [
         identity.data_dir_input, identity.sample_dropdown, identity.device_input,

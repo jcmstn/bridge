@@ -120,7 +120,7 @@ def test_pulsed_one_row_per_amplitude_blank_pulse_columns():
     seen: list[dict] = []
 
     df = _run_pulsed(dev, pmu_cfg, read_cfg, points, on_point=seen.append,
-                     magnet_current_A=1.5, field_angle_from_oop_deg=85.0)
+                     magnet_current_A=1.5, field_theta_deg=85.0, field_phi_deg=10.0)
 
     assert len(df) == 5
     assert [r["amplitude_index"] for r in seen] == [0, 1, 2, 3, 4]
@@ -132,7 +132,8 @@ def test_pulsed_one_row_per_amplitude_blank_pulse_columns():
     assert all(r["pulse_base_voltage_V"] is None for r in seen)
     assert all(r["sense_current_A"] == 1e-4 for r in seen)
     assert all(r["magnet_current_A"] == 1.5 for r in seen)
-    assert all(r["field_angle_from_oop_deg"] == 85.0 for r in seen)
+    assert all(r["field_theta_deg"] == 85.0 for r in seen)
+    assert all(r["field_phi_deg"] == 10.0 for r in seen)
     assert all(not math.isnan(r["hall_resistance_ohm"]) for r in seen)
     # the 6221/2182 read is always reversal-averaged → even columns populated
     assert all(r["hall_voltage_even_V"] is not None for r in seen)

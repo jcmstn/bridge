@@ -86,7 +86,8 @@ def bool_switch(label: str, default: bool) -> ui.switch:
     return ui.switch(label, value=bool(default))
 
 
-def optional_num_field(label: str, default: Optional[float], *, hint: str = "") -> ui.number:
+def optional_num_field(label: str, default: Optional[float], *, hint: str = "",
+                        min: Optional[float] = None, max: Optional[float] = None) -> ui.number:
     """
     A numeric field that may be left blank -> None (ui.number natively
     supports a None value), matching the TUI's OPTIONAL_NUMERIC_FIELDS
@@ -94,7 +95,8 @@ def optional_num_field(label: str, default: Optional[float], *, hint: str = "") 
     that pattern's manual string-parse-or-None dance -- .value is already
     Optional[float].
     """
-    inp = ui.number(label, value=default).classes("w-full").props("outlined dense clearable")
+    inp = ui.number(label, value=default, min=min, max=max).classes("w-full").props(
+        "outlined dense clearable")
     if hint:
         ui.label(hint).classes("text-xs text-grey-6 -mt-1 mb-1")
     return inp

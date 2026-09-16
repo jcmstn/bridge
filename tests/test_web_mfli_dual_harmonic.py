@@ -34,7 +34,7 @@ def _state(data_dir: Path, **overrides) -> dict:
         enable_phase_cal=False, phase_cal_current_A=None,
         phase_cal_n_averages=20, phase_cal_max_iterations=5,
         hall_bar_length_um=None, hall_bar_width_um=None,
-        hall_bar_thickness_nm=None, field_angle_from_oop_deg=None,
+        hall_bar_thickness_nm=None, field_theta_deg=None, field_phi_deg=None,
         sample="A", data_dir=str(data_dir),
     )
     base.update(overrides)

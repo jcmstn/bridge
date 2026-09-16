@@ -158,10 +158,11 @@ Field
 A single STATIC external field (Kepco magnet, measured by the Lake Shore 475),
 set once by the caller before the run — held at a slight angle out of the film
 plane so the AHE sees a bistable m_z and the two in-plane remanent states read
-as different R_xy. ``field_angle_from_oop_deg`` (0° = OOP, 90° = in-plane) is
-the mount tilt, recorded on every row, same convention as
-``dc/dc_hall_measurement.py``. To check the ±H_z control, re-run at the
-opposite field sign — the field is not an axis here.
+as different R_xy. ``field_theta_deg`` (0° = OOP, 90° = in-plane) and
+``field_phi_deg`` (azimuth from the current axis) are the mount tilt,
+recorded on every row, same convention as ``dc/dc_hall_measurement.py``. To
+check the ±H_z control, re-run at the opposite field sign — the field is not
+an axis here.
 
 The RPM pathway trap
 --------------------
@@ -363,7 +364,8 @@ def run_measurement(
     temp_ctrl: Optional[MercuryITC] = None,
     temp_cfg: Optional[TemperatureControllerConfig] = None,
     magnet_current_A: Optional[float] = None,
-    field_angle_from_oop_deg: Optional[float] = None,
+    field_theta_deg: Optional[float] = None,
+    field_phi_deg: Optional[float] = None,
     write_csv: Optional[Callable[[List[dict]], None]] = None,
     output_file: str = "sot_pulsed_switching.csv",
 ) -> pd.DataFrame:
@@ -457,7 +459,8 @@ def run_measurement(
             "n_reversals":       rv["n_reversals"],
             "magnet_current_A":  magnet_current_A,
             "assist_field_measured_mT": field_measured_mT,
-            "field_angle_from_oop_deg": field_angle_from_oop_deg,
+            "field_theta_deg":   field_theta_deg,
+            "field_phi_deg":     field_phi_deg,
             "temperature_1_K":   t1_K,
             "temperature_2_K":   t2_K,
         }
@@ -508,7 +511,8 @@ def main() -> None:
     temp_cfg = TemperatureControllerConfig(
         visa_resource="TCPIP0::192.168.1.5::7020::SOCKET", sensor_uids=("MB1.T1",))
 
-    FIELD_ANGLE_FROM_OOP_DEG = 85.0     # ← SET TO YOUR REAL MOUNT ANGLE (recorded, not measured)
+    FIELD_THETA_DEG = 85.0              # ← SET TO YOUR REAL MOUNT TILT (recorded, not measured)
+    FIELD_PHI_DEG = 0.0                 # ← azimuth from the current axis (recorded, not measured)
     STATIC_MAGNET_CURRENT_A = 1.5       # ← the static read field; re-run at -1.5 for the ±Hz check
     # Full loop: up then down. The sweep itself sets each pulse's starting state.
     AMPLITUDES_V = list(linear_sweep(0.2, 2.0, 0.1, bidirectional=True))
@@ -533,7 +537,7 @@ def main() -> None:
                              gaussmeter=gaussmeter, gauss_cfg=gauss_cfg,
                              temp_ctrl=temp_ctrl, temp_cfg=temp_cfg,
                              magnet_current_A=STATIC_MAGNET_CURRENT_A,
-                             field_angle_from_oop_deg=FIELD_ANGLE_FROM_OOP_DEG,
+                             field_theta_deg=FIELD_THETA_DEG, field_phi_deg=FIELD_PHI_DEG,
                              output_file=OUTPUT_FILE)
         print("\n", df.to_string(index=False))
     finally:
