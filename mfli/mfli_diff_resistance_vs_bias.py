@@ -479,9 +479,11 @@ def run_measurement(
             "X_reactive_ohm": X_react,
             "Z_mag_ohm":      Z_mag,
             "Z_phase_deg":    Z_phase,
-            "I_r_std_A":      i_raw["r_std"] if current_cfg.use_current_input
-                              else i_raw["r_std"] / out_cfg.series_R_ohm,
-            "V_r_std_V":      v_raw["r_std"],
+            "I_r_sem_A":      i_raw["r_sem"] if current_cfg.use_current_input
+                              else i_raw["r_sem"] / out_cfg.series_R_ohm,
+            "I_n_samples":    i_raw["n_samples"],
+            "V_r_sem_V":      v_raw["r_sem"],
+            "V_n_samples":    v_raw["n_samples"],
         }
         records.append(record)
         if on_point is not None:

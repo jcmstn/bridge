@@ -200,10 +200,29 @@ def _read_overload(daq: zi.ziDAQServer, device: str, input_ch: int) -> Optional[
 def acquire_averaged(daq: zi.ziDAQServer, cfg, n_averages: int) -> dict:
     """
     Collect at least `n_averages` samples from `cfg`'s demodulator and
-    return their mean +/- std. Poll duration is chosen to guarantee enough
-    samples at the configured rate AND to span at least 3x the demod time
-    constant (below that the samples are correlated, so the mean barely
-    improves on one reading and the reported std is optimistic).
+    return their mean, TWO different uncertainty flavors, and the sample
+    count behind them. Poll duration is chosen to guarantee enough samples
+    at the configured rate AND to span at least 3x the demod time constant
+    (below that the samples are correlated, so the mean barely improves on
+    one reading and the reported spread is optimistic).
+
+    Two uncertainty flavors, for two different jobs — don't swap them:
+      - `x_std`/`y_std`/`r_std`: population stdev (ddof=0) of the raw
+        per-sample X/Y/magnitude — the point-to-point scatter, useful as a
+        signal-to-noise-style diagnostic (see
+        mfli_phase_calibration.identify_2f_channel()). `r_std` in
+        particular is the spread of the per-sample RECTIFIED magnitude
+        `hypot(x_i, y_i)` — a different, positively-biased quantity from
+        `r_mean` (see r_mean's own docstring note below) — so it must never
+        be reported as "the" uncertainty on `r_mean`.
+      - `x_sem`/`y_sem`/`r_sem`: standard error of the MEAN (sample stdev,
+        ddof=1, / sqrt(n); `nan` if n<2, matching the SEM convention used
+        everywhere else in this codebase, e.g. keithley2182.
+        acquire_averaged_voltage). `r_sem` is `x_sem`/`y_sem` propagated
+        onto `r_mean = hypot(x_mean, y_mean)` via first-order error
+        propagation (dR/dX = X/R, dR/dY = Y/R) — this is the uncertainty
+        that actually belongs on `r_mean`, and what a caller should save
+        and plot as R's error bar.
 
     `cfg` only needs `.device`, `.demod_index` and `.sample_rate_Hz`
     attributes — every program's own DemodConfig shape already has these,
@@ -256,14 +275,31 @@ def acquire_averaged(daq: zi.ziDAQServer, cfg, n_averages: int) -> dict:
     r_mean = float(np.hypot(x_mean, y_mean))
     theta_mean = float(np.degrees(np.arctan2(y_mean, x_mean)))
 
+    n = len(raw["x"])
+    if n >= 2:
+        x_sem = float(np.std(raw["x"], ddof=1) / np.sqrt(n))
+        y_sem = float(np.std(raw["y"], ddof=1) / np.sqrt(n))
+    else:
+        x_sem = y_sem = float("nan")
+    # Propagate x_sem/y_sem onto r_mean = hypot(x_mean, y_mean), NOT the std
+    # of the per-sample magnitudes (see docstring) -- first-order error
+    # propagation: dR/dX = X/R, dR/dY = Y/R.
+    if n >= 2 and r_mean > 0:
+        r_sem = float(np.hypot(x_mean * x_sem, y_mean * y_sem) / r_mean)
+    else:
+        r_sem = float("nan")
+
     return {
         "x_mean":     x_mean,
         "y_mean":     y_mean,
         "r_mean":     r_mean,
         "theta_mean": theta_mean,
+        "x_sem":      x_sem,
+        "y_sem":      y_sem,
+        "r_sem":      r_sem,
         "r_std":      float(np.std(raw["r"])),
         "x_std":      float(np.std(raw["x"])),
         "y_std":      float(np.std(raw["y"])),
-        "n_samples":  len(raw["r"]),
+        "n_samples":  n,
         "overload":   overload,
     }

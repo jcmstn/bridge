@@ -458,15 +458,15 @@ def run_measurement(
 
         # ── 3. Acquire 1f ──────────────────────────────────────────────────
         d1 = acquire_averaged(daq, demod1_cfg, acq_cfg.n_averages)
-        log.info("   1f  R=%.4e V  θ=%.2f°  σ_R=%.2e V  (n=%d)",
-                 d1["r_mean"], d1["theta_mean"], d1["r_std"], d1["n_samples"])
+        log.info("   1f  R=%.4e V  θ=%.2f°  SEM_R=%.2e V  (n=%d)",
+                 d1["r_mean"], d1["theta_mean"], d1["r_sem"], d1["n_samples"])
         if d1["overload"]:
             log.warning("   1f input is OVERLOADED — this reading is not trustworthy.")
 
         # ── 4. Acquire 2f ──────────────────────────────────────────────────
         d2 = acquire_averaged(daq, demod2_cfg, acq_cfg.n_averages)
-        log.info("   2f  R=%.4e V  θ=%.2f°  σ_R=%.2e V  (n=%d)",
-                 d2["r_mean"], d2["theta_mean"], d2["r_std"], d2["n_samples"])
+        log.info("   2f  R=%.4e V  θ=%.2f°  SEM_R=%.2e V  (n=%d)",
+                 d2["r_mean"], d2["theta_mean"], d2["r_sem"], d2["n_samples"])
         if d2["overload"]:
             log.warning("   2f input is OVERLOADED — this reading is not trustworthy.")
 
@@ -502,14 +502,16 @@ def run_measurement(
             "1f_Y_V":      d1["y_mean"],
             "1f_R_V":      d1["r_mean"],
             "1f_theta_deg":d1["theta_mean"],
-            "1f_R_std_V":  d1["r_std"],
+            "1f_R_sem_V":  d1["r_sem"],
+            "1f_n_samples":d1["n_samples"],
             "1f_overload": d1["overload"],
             # ── 2f ─────────────────────────────────────────────────────────
             "2f_X_V":      d2["x_mean"],
             "2f_Y_V":      d2["y_mean"],
             "2f_R_V":      d2["r_mean"],
             "2f_theta_deg":d2["theta_mean"],
-            "2f_R_std_V":  d2["r_std"],
+            "2f_R_sem_V":  d2["r_sem"],
+            "2f_n_samples":d2["n_samples"],
             "2f_overload": d2["overload"],
             # ── Run metadata (excitation/demod/geometry — see build_run_metadata) ──
             **run_meta,

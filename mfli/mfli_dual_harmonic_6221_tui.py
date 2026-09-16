@@ -499,7 +499,7 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
                 f"Averaging window ≈ {acq_window_s:g} s holds only ~{max(1, round(n_indep))} "
                 f"independent filter outputs at TC={tc:g} s — far fewer than the "
                 f"{state['n_averages']} samples requested, so per-point noise averages "
-                f"down much less than √n and the reported R_std understates it. Use a "
+                f"down much less than √n and the reported R_sem understates it. Use a "
                 f"shorter time constant, or raise the sample count into the thousands."
             )
     else:

@@ -86,3 +86,33 @@ def test_poll_window_without_a_filter_attr_uses_sample_count():
     daq = _FakeDAQ(np.zeros(4000), np.zeros(4000))
     acquire_averaged(daq, _FakeCfg(), n_averages=2000)
     assert daq.last_duration_s == (2000 * 1.5) / 1000.0
+
+
+def test_r_sem_is_propagated_from_xy_sem_not_the_std_of_magnitudes():
+    # x=[1,2,3], y=[4,5,6]: sample stdev (ddof=1) of each is 1, so
+    # x_sem = y_sem = 1/sqrt(3). r_sem must be that propagated onto
+    # r_mean = hypot(x_mean, y_mean) via dR/dX=X/R, dR/dY=Y/R — a different
+    # number from std(hypot(x_i, y_i)), which is what the old (wrong) column
+    # reported.
+    x = np.array([1.0, 2.0, 3.0])
+    y = np.array([4.0, 5.0, 6.0])
+    out = acquire_averaged(_FakeDAQ(x, y), _FakeCfg(), n_averages=3)
+
+    assert out["x_mean"] == pytest.approx(2.0)
+    assert out["y_mean"] == pytest.approx(5.0)
+    assert out["x_sem"] == pytest.approx(1.0 / math.sqrt(3))
+    assert out["y_sem"] == pytest.approx(1.0 / math.sqrt(3))
+    assert out["r_sem"] == pytest.approx(1.0 / math.sqrt(3))
+    assert out["n_samples"] == 3
+    # The old, wrong estimator this replaces — kept only as x_std/y_std/r_std
+    # for mfli_phase_calibration.py's signal-to-noise diagnostic, never as
+    # the uncertainty on r_mean.
+    assert out["r_std"] != pytest.approx(out["r_sem"])
+
+
+def test_sem_fields_are_nan_for_a_single_sample():
+    out = acquire_averaged(_FakeDAQ(np.array([5.0]), np.array([5.0])), _FakeCfg(), n_averages=1)
+    assert math.isnan(out["x_sem"])
+    assert math.isnan(out["y_sem"])
+    assert math.isnan(out["r_sem"])
+    assert out["n_samples"] == 1

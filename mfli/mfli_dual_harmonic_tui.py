@@ -450,7 +450,7 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         # max(0.1, 3xTC, n*1.5/rate) s, but consecutive demod outputs are
         # correlated over ~TC, so the window only holds ~window/(pi*TC)
         # independent samples. If that's well below n_averages, the mean
-        # barely beats one reading and the reported 1f/2f R_std is optimistic.
+        # barely beats one reading and the reported 1f/2f R_sem is optimistic.
         acq_window_s = _acquire_duration_s(
             state["n_averages"], state["sample_rate_Hz"], tc
         )
@@ -460,7 +460,7 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
                 f"Averaging window ≈ {acq_window_s:g} s holds only ~{max(1, round(n_indep))} "
                 f"independent filter outputs at TC={tc:g} s — far fewer than the "
                 f"{state['n_averages']} samples requested, so per-point noise averages "
-                f"down much less than √n and the reported R_std understates it. Use a "
+                f"down much less than √n and the reported R_sem understates it. Use a "
                 f"shorter time constant, or raise the sample count into the thousands."
             )
     else:
