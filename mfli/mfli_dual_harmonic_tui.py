@@ -666,8 +666,9 @@ def _save_measurement_png(records: list[dict], png_path: Path,
     were actually collected (including an aborted/partial run).
 
     `plan`/`comment` add a small "at a glance" text annotation (field
-    direction, the AC excitation, the operator's comment) for context not
-    already in the filename. Called once when the run ends (comment="")
+    direction, the AC excitation, the 1f/2f filter TC/order, the
+    operator's comment) for context not already in the filename. Called
+    once when the run ends (comment="")
     and again, to overwrite the PNG in place, once the operator's comment
     is known."""
     if not records:
@@ -702,6 +703,9 @@ def _save_measurement_png(records: list[dict], png_path: Path,
         amp_V = plan.header_extra.get("excitation_amplitude_V")
         if freq_Hz is not None and amp_V is not None:
             lines.append(f"AC excitation: {format_si(amp_V, 'V')} @ {format_si(freq_Hz, 'Hz')}")
+        tc1, order1 = plan.demod1_cfg.filter.time_constant_s, plan.demod1_cfg.filter.order
+        tc2, order2 = plan.demod2_cfg.filter.time_constant_s, plan.demod2_cfg.filter.order
+        lines.append(f"Filter: 1f TC={tc1:g} s order={order1}, 2f TC={tc2:g} s order={order2}")
     if comment:
         lines.append(f"Comment: {textwrap.shorten(comment, width=90, placeholder='…')}")
     if lines:
