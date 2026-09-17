@@ -27,7 +27,7 @@ def _state(data_dir: Path, **overrides) -> dict:
         enable_sweep=False,
         magnet_visa_resource="GPIB0::6::INSTR", current_limit_A=35.0,
         voltage_compliance_V=15.0, ramp_step_A=0.1, ramp_delay_s=0.05,
-        i_min_A=-20.0, i_max_A=20.0, step_A=2.0, bidirectional_sweep=True,
+        sweep_rows_parsed=[(-20.0, 20.0, 21)], bidirectional_sweep=True,
         gaussmeter_visa_resource="GPIB0::12::INSTR", gaussmeter_n_averages=10,
         gaussmeter_read_delay_s=0.05, field_settle_tolerance_mT=0.02, enable_temperature=False,
         temperature_visa_resource="", temperature_sensor_uids="",
@@ -64,3 +64,13 @@ def test_multi_file_session_allocates_one_run_per_sense_current(tmp_path: Path) 
     assert [c.run_number for c in contexts] == [1, 2]
     assert contexts[0].raw_path.name.startswith("A_0001_HB3_HALL_T300K_I0p001A_")
     assert contexts[1].raw_path.name.startswith("A_0002_HB3_HALL_T300K_Im0p002A_")
+
+
+def test_build_plan_multi_row_sweep(tmp_path: Path) -> None:
+    plan = build_plan(_state(
+        tmp_path, enable_sweep=True,
+        sweep_rows_parsed=[(-1.0, 1.0, 10), (1.0, 10.0, 10)],
+        bidirectional_sweep=True,
+    ))
+    assert len(plan.currents_A) == 37
+    assert plan.header_extra["field_sweep_rows_A"] == [(-1.0, 1.0, 10), (1.0, 10.0, 10)]

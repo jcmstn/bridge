@@ -57,6 +57,7 @@ from textual.widgets import (
     Select,
     Static,
     Switch,
+    TextArea,
 )
 
 from dc.dc_spin_valve import (
@@ -83,7 +84,7 @@ from dc.dc_spin_valve import (
     shutdown_source,
     shutdown_temperature_controller,
 )
-from dc.dc_sweep_utils import linear_sweep, parse_value_list, safe_shutdown
+from dc.dc_sweep_utils import build_segmented_sweep, parse_sweep_rows, parse_value_list, safe_shutdown
 from instruments.data_dir import DataDirPickerScreen, validate_directory
 from instruments.data_naming import (
     TEST_SAMPLE,
@@ -161,9 +162,7 @@ DEFAULTS: dict = {
     "voltage_compliance_V": "15.0",
     "ramp_step_A": "0.1",
     "ramp_delay_s": "0.05",
-    "i_min_A": "-20",
-    "i_max_A": "20",
-    "step_A": "2.0",
+    "sweep_rows": "-20, 20, 21",
     "bidirectional_sweep": True,
     "gaussmeter_visa_resource": "GPIB0::12::INSTR",
     "gaussmeter_n_averages": "10",
@@ -186,9 +185,6 @@ NUMERIC_FIELDS: dict = {
     "voltage_compliance_V": float,
     "ramp_step_A": float,
     "ramp_delay_s": float,
-    "i_min_A": float,
-    "i_max_A": float,
-    "step_A": float,
     "gaussmeter_n_averages": int,
     "gaussmeter_read_delay_s": float,
 }
@@ -346,6 +342,15 @@ def switch_field(field_id: str, label_text: str, default: bool) -> Horizontal:
     return row
 
 
+def sweep_rows_field(field_id: str, default: str) -> list:
+    """One row per line, "start, stop, points" -- see parse_sweep_rows()."""
+    label = Label("Sweep rows: start, stop, points (one per line)", classes="field-label")
+    area = TextArea(default, id=field_id, classes="sweep-rows")
+    hint = Label("Adjacent rows sharing a boundary value are merged, not duplicated.",
+                 classes="hint")
+    return [label, area, hint]
+
+
 def card(title: str, *groups, muted: bool = False) -> Vertical:
     """A bordered grid cell: a title plus its fields (each a flat list from
     field(), or a single widget like switch_field()'s Horizontal -- see
@@ -443,25 +448,28 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         info.append("Gate off — Keithley 2400 not used, single field sweep run.")
 
     # ── Field sweep ──────────────────────────────────────────────────────────
-    max_abs_I = max(abs(state["i_min_A"]), abs(state["i_max_A"]))
-    if max_abs_I > state["current_limit_A"]:
-        errors.append(
-            f"Sweep range (±{max_abs_I:g} A) exceeds the current limit "
-            f"({state['current_limit_A']:g} A)."
-        )
-    if state["i_min_A"] == state["i_max_A"]:
-        warnings.append("i_min equals i_max — sweep will repeat a single point.")
-
-    n_one_way = 0
-    if state["step_A"] <= 0:
-        errors.append("Sweep step size must be > 0 A.")
+    n_sweep_points = 0
+    if state.get("sweep_rows_parse_error"):
+        errors.append(f"Sweep rows: {state['sweep_rows_parse_error']}")
     else:
-        n_one_way = max(2, round(abs(state["i_max_A"] - state["i_min_A"]) / state["step_A"]) + 1)
-    n_sweep_points = n_one_way if not state["bidirectional_sweep"] else max(0, 2 * n_one_way - 1)
-    direction = (f"{state['i_min_A']:g} A → {state['i_max_A']:g} A → {state['i_min_A']:g} A"
-                 if state["bidirectional_sweep"]
-                 else f"{state['i_min_A']:g} A → {state['i_max_A']:g} A")
-    info.append(f"Field sweep: {direction}, step={state['step_A']:g} A, {n_sweep_points} points")
+        rows = state.get("sweep_rows_parsed", [])
+        max_abs_I = max((max(abs(s), abs(e)) for s, e, _ in rows), default=0.0)
+        if max_abs_I > state["current_limit_A"]:
+            errors.append(
+                f"Sweep range (±{max_abs_I:g} A) exceeds the current limit "
+                f"({state['current_limit_A']:g} A)."
+            )
+        for s, e, n in rows:
+            if s == e and n > 1:
+                warnings.append(f"Row ({s:g}, {e:g}, {n}) repeats a single point {n} times.")
+        resolved = build_segmented_sweep(rows, state["bidirectional_sweep"])
+        n_sweep_points = len(resolved)
+        n_raw = sum(n for _, _, n in rows)
+        n_merged = (2 * n_raw if state["bidirectional_sweep"] else n_raw) - n_sweep_points
+        merged_note = f", {n_merged} shared boundary point(s) merged" if n_merged else ""
+        info.append(f"Field sweep: {len(rows)} row(s), {n_sweep_points} points"
+                     f"{' (bidirectional)' if state['bidirectional_sweep'] else ''}"
+                     f"{merged_note}")
     info.append("Field measured live at each point via Lake Shore 475 Gaussmeter "
                  f"({state['gaussmeter_visa_resource']})")
     tol_mT = state["field_settle_tolerance_mT"]
@@ -1015,6 +1023,7 @@ class DCSpinValveApp(App):
     .field { margin-bottom: 1; }
     .field-label { text-style: bold; }
     .hint { text-style: italic; color: $text-muted; }
+    .sweep-rows { height: 5; margin-bottom: 1; }
     .switch-row { height: 3; }
     .switch-row Label { margin-left: 1; content-align: left middle; height: 3; }
     .sidebar-title { text-style: bold underline; margin-bottom: 1; }
@@ -1058,11 +1067,8 @@ class DCSpinValveApp(App):
                 with Vertical(classes="param-grid"):
                     yield card(
                         "Field sweep (Kepco magnet)",
-                        field("i_min_A", "Sweep current min (A)", DEFAULTS["i_min_A"]),
-                        field("i_max_A", "Sweep current max (A)", DEFAULTS["i_max_A"]),
-                        field("step_A", "Sweep step size (A)", DEFAULTS["step_A"],
-                              validators=[Number(minimum=1e-9, failure_description="must be > 0")]),
-                        switch_field("bidirectional_sweep", "Bidirectional (min → max → min)",
+                        sweep_rows_field("sweep_rows", DEFAULTS["sweep_rows"]),
+                        switch_field("bidirectional_sweep", "Bidirectional (retrace the merged rows)",
                                      DEFAULTS["bidirectional_sweep"]),
                     )
                     yield card(
@@ -1258,6 +1264,7 @@ class DCSpinValveApp(App):
 
     def collect_raw(self) -> dict:
         raw: dict = {fid: self.query_one(f"#{fid}", Input).value for fid in self._all_field_ids()}
+        raw["sweep_rows"] = self.query_one("#sweep_rows", TextArea).text
         raw["auto_range"] = self.query_one("#auto_range", Switch).value
         raw["bidirectional_sweep"] = self.query_one("#bidirectional_sweep", Switch).value
         raw["reversal_enabled"] = self.query_one("#reversal_enabled", Switch).value
@@ -1279,6 +1286,8 @@ class DCSpinValveApp(App):
                     self.query_one(f"#{fid}", Input).value = str(saved[fid])
                 except Exception:
                     pass
+        if "sweep_rows" in saved:
+            self.query_one("#sweep_rows", TextArea).text = str(saved["sweep_rows"])
         if "auto_range" in saved:
             self.query_one("#auto_range", Switch).value = bool(saved["auto_range"])
         if "bidirectional_sweep" in saved:
@@ -1348,6 +1357,14 @@ class DCSpinValveApp(App):
         except ValueError as exc:
             state["sense_current_parse_error"] = str(exc)
 
+        state["sweep_rows"] = self.query_one("#sweep_rows", TextArea).text
+        state["sweep_rows_parsed"] = []
+        state["sweep_rows_parse_error"] = None
+        try:
+            state["sweep_rows_parsed"] = parse_sweep_rows(state["sweep_rows"])
+        except ValueError as exc:
+            state["sweep_rows_parse_error"] = str(exc)
+
         return state, errors
 
     # ── Reactivity ───────────────────────────────────────────────────────────
@@ -1355,6 +1372,9 @@ class DCSpinValveApp(App):
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "data_dir":
             self._sync_data_root()
+        self.refresh_summary()
+
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
         self.refresh_summary()
 
     def on_switch_changed(self, event: Switch.Changed) -> None:
@@ -1459,9 +1479,8 @@ class DCSpinValveApp(App):
             output_file=str(self.data_root / "dc_spin_valve.csv"),  # placeholder — overwritten per series
         )
 
-        currents_A = linear_sweep(
-            start=state["i_min_A"], stop=state["i_max_A"], step=state["step_A"],
-            bidirectional=state["bidirectional_sweep"],
+        currents_A = build_segmented_sweep(
+            state["sweep_rows_parsed"], state["bidirectional_sweep"],
         )
 
         gate_cfg = None
@@ -1488,7 +1507,7 @@ class DCSpinValveApp(App):
             "reversal_enabled": state["reversal_enabled"],
             "n_averages": state["n_averages"],
             "settling_time_s": state["settling_time_s"],
-            "field_sweep_A": [state["i_min_A"], state["i_max_A"], state["step_A"]],
+            "field_sweep_rows_A": state["sweep_rows_parsed"],
         }
         # A "series" tag only means something for an actual family of runs
         # (>1 sense current and/or >1 gate voltage) -- a single-run session

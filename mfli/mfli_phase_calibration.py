@@ -48,7 +48,7 @@ import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Tuple
 import threading
 
 import numpy as np
@@ -70,7 +70,6 @@ from mfli.mfli_dual_harmonic import (
     _DATA_DIR,
     acquire_averaged,
     auto_null_phase,
-    bidirectional_current_sweep,
     configure_demodulator,
     configure_output,
     connect,
@@ -89,6 +88,7 @@ from mfli.mfli_dual_harmonic import (
     shutdown_temperature_controller,
     sync_follower_oscillator,
 )
+from dc.dc_sweep_utils import build_segmented_sweep
 
 logging.basicConfig(
     level=logging.INFO,
@@ -109,9 +109,8 @@ class SweepConfig:
     across the field range and to identify the real 2f channel — the same
     swept data answers both questions (see run_field_sweep_diagnostic).
     """
-    i_min_A: float         = -20.0
-    i_max_A: float         = 20.0
-    n_points: int          = 11     # points per sweep direction (see bidirectional_current_sweep)
+    rows: List[Tuple[float, float, int]] = field(
+        default_factory=lambda: [(-20.0, 20.0, 11)])  # (start, stop, points) per row
     settling_time_s: float = 1.5    # dead time after each magnet step
     n_averages: int        = 20     # demod samples averaged per point
     field_settle_tolerance_mT: float = 0.02  # passed to set_magnet_current(): field counts
@@ -229,7 +228,7 @@ def run_field_sweep_diagnostic(
     temp_cfg: Optional[TemperatureControllerConfig] = None,
 ) -> pd.DataFrame:
     """
-    Sweep the magnet current bidirectionally (see bidirectional_current_sweep)
+    Sweep the magnet current bidirectionally (see build_segmented_sweep)
     and record 1f + 2f X/Y/R at every point, with the field measured live if
     a gaussmeter is given.
 
@@ -239,7 +238,7 @@ def run_field_sweep_diagnostic(
     (e.g. because the MercuryiTC isn't connected) simply leaves those
     columns empty — it's never a reason to stop the measurement.
     """
-    currents_A = bidirectional_current_sweep(sweep_cfg.i_min_A, sweep_cfg.i_max_A, sweep_cfg.n_points)
+    currents_A = build_segmented_sweep(sweep_cfg.rows, bidirectional=True)
     records: List[dict] = []
 
     for idx, I in enumerate(currents_A):
@@ -711,9 +710,7 @@ def main() -> None:
     # Sweep used to verify the null holds and identify the 2f channel — pick
     # the same range you'd actually use for a Hall-effect measurement.
     sweep_cfg = SweepConfig(
-        i_min_A         = -20.0,
-        i_max_A         = 20.0,
-        n_points        = 11,
+        rows            = [(-20.0, 20.0, 11)],
         settling_time_s = 1.5,
         n_averages      = 20,
     )
@@ -738,7 +735,7 @@ def main() -> None:
         report = run_phase_calibration(
             daq, LEADER, FOLLOWER, out_cfg, demod1_cfg, demod2_cfg, sweep_cfg,
             magnet, magnet_cfg,
-            calibration_current_A = 20.0,   # ← pick a point near saturation (e.g. i_max_A)
+            calibration_current_A = 20.0,   # ← pick a point near saturation (e.g. the row's stop)
             null_n_averages       = 20,
             null_max_iterations   = 5,
             null_tol_deg          = 0.02,

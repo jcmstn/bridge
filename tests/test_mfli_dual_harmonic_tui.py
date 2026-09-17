@@ -27,7 +27,7 @@ def _state(**overrides) -> dict:
         enable_sweep=False,
         visa_resource="GPIB0::6::INSTR", current_limit_A=35.0,
         voltage_compliance_V=15.0, ramp_step_A=0.1, ramp_delay_s=0.05,
-        i_min_A=-20.0, i_max_A=20.0, n_points=21,
+        sweep_rows_parsed=[(-20.0, 20.0, 21)],
         gaussmeter_visa_resource="GPIB0::12::INSTR", gaussmeter_n_averages=10,
         gaussmeter_read_delay_s=0.05, field_settle_tolerance_mT=0.02, enable_temperature=False,
         temperature_visa_resource="", temperature_sensor_uids="",
@@ -54,3 +54,17 @@ def test_build_plan_allocates_run_and_matches_filename_convention(tmp_path, monk
 
     plan2 = app._build_plan(_state())
     assert plan2.run_ctx.run_number == 2
+
+
+def test_build_plan_multi_row_sweep(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(tui, "_DEFAULT_DATA_DIR", tmp_path)
+    ensure_sample(tmp_path, "A", create=True)
+    app = tui.MFLIDualHarmonicApp()
+    app.data_root = tmp_path
+
+    plan = app._build_plan(_state(
+        enable_sweep=True,
+        sweep_rows_parsed=[(-1.0, 1.0, 10), (1.0, 10.0, 10)],
+    ))
+    assert len(plan.currents_A) == 37
+    assert plan.header_extra["field_sweep_rows_A"] == [(-1.0, 1.0, 10), (1.0, 10.0, 10)]

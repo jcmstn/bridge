@@ -35,7 +35,7 @@ from dc.dc_hall_measurement import (
     connect_voltmeter, run_measurement, set_magnet_current, shutdown_gaussmeter,
     shutdown_magnet, shutdown_source, shutdown_temperature_controller,
 )
-from dc.dc_sweep_utils import linear_sweep, parse_value_list, safe_shutdown
+from dc.dc_sweep_utils import build_segmented_sweep, parse_sweep_rows, parse_value_list, safe_shutdown
 from dc.dc_hall_measurement_tui import (
     DEFAULTS, NUMERIC_FIELDS, TEXT_FIELDS, OPTIONAL_NUMERIC_FIELDS, DC_HALL_DESCRIPTION,
     MEASUREMENT_TYPE, MeasurementPlan, build_header_fields, build_summary,
@@ -47,7 +47,7 @@ from instruments.data_naming import (
 )
 from web.run_controller import (
     RunController, RunCallbacks, FinalStatus, num_field, optional_num_field, text_field,
-    bool_switch, render_summary, busy_banner, is_busy,
+    textarea_field, bool_switch, render_summary, busy_banner, is_busy,
     param_card, stable_card, param_grid, stable_grid, advanced_section, measurement_layout,
 )
 from instruments.field_geometry import field_direction_summary_line
@@ -122,9 +122,8 @@ def build_plan(state: dict) -> MeasurementPlan:
             n_averages=int(state["gaussmeter_n_averages"]),
             read_delay_s=state["gaussmeter_read_delay_s"],
         )
-        currents_A = linear_sweep(
-            start=state["i_min_A"], stop=state["i_max_A"], step=state["step_A"],
-            bidirectional=state["bidirectional_sweep"],
+        currents_A = build_segmented_sweep(
+            state["sweep_rows_parsed"], state["bidirectional_sweep"],
         )
 
     temp_cfg = None
@@ -142,7 +141,7 @@ def build_plan(state: dict) -> MeasurementPlan:
         "settling_time_s": state["settling_time_s"],
     }
     if state["enable_sweep"]:
-        header_extra["field_sweep_A"] = [state["i_min_A"], state["i_max_A"], state["step_A"]]
+        header_extra["field_sweep_rows_A"] = state["sweep_rows_parsed"]
 
     series = ""
     if len(state["sense_current_list"]) > 1:
@@ -239,7 +238,7 @@ def page() -> None:
             return saved[key]
         return DEFAULTS.get(key, "")
 
-    inputs: dict[str, ui.number | ui.input] = {}
+    inputs: dict[str, ui.number | ui.input | ui.textarea] = {}
     switches: dict[str, ui.switch] = {}
     controller: dict[str, Optional[RunController]] = {"c": None}
 
@@ -268,11 +267,12 @@ def page() -> None:
                 with param_card("Field sweep (Kepco magnet)"):
                     switches["enable_sweep"] = bool_switch(
                         "Sweep magnetic field (Kepco magnet)", d("enable_sweep"))
-                    inputs["i_min_A"] = num_field("Sweep current min (A)", float(d("i_min_A")))
-                    inputs["i_max_A"] = num_field("Sweep current max (A)", float(d("i_max_A")))
-                    inputs["step_A"] = num_field("Sweep step size (A)", float(d("step_A")))
+                    inputs["sweep_rows"] = textarea_field(
+                        "Sweep rows: start, stop, points (one per line)",
+                        d("sweep_rows"),
+                        hint="Adjacent rows sharing a boundary value are merged, not duplicated.")
                     switches["bidirectional_sweep"] = bool_switch(
-                        "Bidirectional sweep (min → max → min)", d("bidirectional_sweep"))
+                        "Bidirectional (retrace the merged rows)", d("bidirectional_sweep"))
 
                 with param_card("Temperature logging"):
                     switches["enable_temperature"] = bool_switch(
@@ -447,6 +447,14 @@ def page() -> None:
             state["sense_current_list"] = parse_value_list(state["sense_current_values"])
         except ValueError as exc:
             state["sense_current_parse_error"] = str(exc)
+
+        state["sweep_rows"] = inputs["sweep_rows"].value or ""
+        state["sweep_rows_parsed"] = []
+        state["sweep_rows_parse_error"] = None
+        try:
+            state["sweep_rows_parsed"] = parse_sweep_rows(state["sweep_rows"])
+        except ValueError as exc:
+            state["sweep_rows_parse_error"] = str(exc)
 
         return state, errors
 

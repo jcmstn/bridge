@@ -22,11 +22,12 @@ from typing import Optional
 from plotly.subplots import make_subplots
 from nicegui import background_tasks, ui
 
+from dc.dc_sweep_utils import build_segmented_sweep, parse_sweep_rows
 from mfli.mfli_dual_harmonic_6221 import (
     ACSourceConfig, AcquisitionConfig, DemodConfig, ExtRefConfig, FilterConfig,
     GaussmeterConfig, MagnetConfig, MeasurementPoint, SampleGeometryConfig,
     TemperatureControllerConfig,
-    acquire_averaged, auto_null_phase, bidirectional_current_sweep,
+    acquire_averaged, auto_null_phase,
     configure_demodulator, configure_external_reference, connect, connect_ac_source,
     connect_device, connect_gaussmeter, connect_magnet, connect_temperature_controller,
     disable_sigout, null_follower_reference_via_1f, run_measurement,
@@ -45,7 +46,7 @@ from instruments.data_naming import (
 )
 from instruments.field_geometry import field_direction_summary_line
 from web.run_controller import (
-    RunController, RunCallbacks, FinalStatus, num_field, text_field, bool_switch,
+    RunController, RunCallbacks, FinalStatus, num_field, text_field, textarea_field, bool_switch,
     optional_num_field, render_summary, busy_banner, is_busy,
     param_card, param_grid, stable_card, stable_grid, advanced_section, measurement_layout,
 )
@@ -146,8 +147,7 @@ def build_plan(state: dict) -> MeasurementPlan:
             visa_resource=state["gaussmeter_visa_resource"], n_averages=int(state["gaussmeter_n_averages"]),
             read_delay_s=state["gaussmeter_read_delay_s"],
         )
-        currents_A = bidirectional_current_sweep(
-            i_min=state["i_min_A"], i_max=state["i_max_A"], n_points=int(state["n_points"]))
+        currents_A = build_segmented_sweep(state["sweep_rows_parsed"], bidirectional=True)
 
     temp_cfg = None
     if state["enable_temperature"]:
@@ -171,7 +171,7 @@ def build_plan(state: dict) -> MeasurementPlan:
         "settling_time_s": state["settling_time_s"],
     }
     if state["enable_sweep"]:
-        header_extra["field_sweep_A"] = [state["i_min_A"], state["i_max_A"], int(state["n_points"])]
+        header_extra["field_sweep_rows_A"] = state["sweep_rows_parsed"]
 
     return MeasurementPlan(
         daq_host=state["daq_host"], daq_port=int(state["daq_port"]),
@@ -282,9 +282,10 @@ def page() -> None:
 
                 with param_card("Magnet & field sweep"):
                     switches["enable_sweep"] = bool_switch("Sweep magnetic field (Kepco magnet)", d("enable_sweep"))
-                    inputs["i_min_A"] = num_field("Sweep current min (A)", float(d("i_min_A")))
-                    inputs["i_max_A"] = num_field("Sweep current max (A)", float(d("i_max_A")))
-                    inputs["n_points"] = num_field("Points per sweep direction", float(d("n_points")), integer=True)
+                    inputs["sweep_rows"] = textarea_field(
+                        "Sweep rows: start, stop, points (one per line)",
+                        d("sweep_rows"),
+                        hint="Adjacent rows sharing a boundary value are merged, not duplicated.")
 
                 with param_card("Temperature logging"):
                     switches["enable_temperature"] = bool_switch(
@@ -494,6 +495,15 @@ def page() -> None:
         state["follower_automode"] = int(follower_automode_select.value)
         sample_value = identity.sample_dropdown.value
         state["sample"] = sample_value if sample_value not in (None, NEW_SAMPLE_SENTINEL) else ""
+
+        state["sweep_rows"] = inputs["sweep_rows"].value or ""
+        state["sweep_rows_parsed"] = []
+        state["sweep_rows_parse_error"] = None
+        try:
+            state["sweep_rows_parsed"] = parse_sweep_rows(state["sweep_rows"])
+        except ValueError as exc:
+            state["sweep_rows_parse_error"] = str(exc)
+
         return state, errors
 
     def collect_raw() -> dict:

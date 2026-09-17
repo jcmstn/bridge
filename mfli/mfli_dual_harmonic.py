@@ -92,6 +92,7 @@ from instruments.lakeshore475 import (
     read_field_mT,
     shutdown_gaussmeter,
 )
+from dc.dc_sweep_utils import build_segmented_sweep
 from instruments.mercury_itc import (
     MercuryITC,
     TemperatureControllerConfig,
@@ -599,11 +600,10 @@ def bidirectional_current_sweep(i_min: float, i_max: float, n_points: int) -> np
     the sample response — useful for a Hall-effect measurement where the
     1f signal (longitudinal/MR) and 2f signal (transverse/Hall) are each
     expected to behave differently under field reversal. The turn-around
-    point (i_max) is not duplicated.
+    point (i_max) is not duplicated. Thin wrapper over
+    dc.dc_sweep_utils.build_segmented_sweep for the single-row case.
     """
-    up   = np.linspace(i_min, i_max, n_points)
-    down = np.linspace(i_max, i_min, n_points)[1:]
-    return np.concatenate([up, down])
+    return build_segmented_sweep([(i_min, i_max, n_points)], bidirectional=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -81,6 +81,16 @@ def text_field(label: str, default: str, *, hint: str = "") -> ui.input:
     return inp
 
 
+def textarea_field(label: str, default: str, *, hint: str = "") -> ui.textarea:
+    """NiceGUI analog of the TUI's sweep_rows_field() helper -- a multi-line
+    text box (one row per line), for the field-sweep programs' "start, stop,
+    points" sweep-row input."""
+    inp = ui.textarea(label, value=default).classes("w-full").props("outlined dense rows=5")
+    if hint:
+        ui.label(hint).classes("text-xs text-grey-6 -mt-1 mb-1")
+    return inp
+
+
 def bool_switch(label: str, default: bool) -> ui.switch:
     """NiceGUI analog of the TUI's switch_field() helper."""
     return ui.switch(label, value=bool(default))

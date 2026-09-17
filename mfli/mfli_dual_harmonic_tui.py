@@ -59,8 +59,10 @@ from textual.widgets import (
     Select,
     Static,
     Switch,
+    TextArea,
 )
 
+from dc.dc_sweep_utils import build_segmented_sweep, parse_sweep_rows
 from mfli.mfli_dual_harmonic import (
     AcquisitionConfig,
     DemodConfig,
@@ -73,7 +75,6 @@ from mfli.mfli_dual_harmonic import (
     TemperatureControllerConfig,
     acquire_averaged,
     auto_null_phase,
-    bidirectional_current_sweep,
     configure_demodulator,
     configure_output,
     connect,
@@ -158,9 +159,7 @@ DEFAULTS: dict = {
     "voltage_compliance_V": "15.0",
     "ramp_step_A": "0.1",
     "ramp_delay_s": "0.05",
-    "i_min_A": "-20",
-    "i_max_A": "20",
-    "n_points": "21",
+    "sweep_rows": "-20, 20, 21",
     "gaussmeter_visa_resource": "GPIB0::12::INSTR",
     "gaussmeter_n_averages": "10",
     "gaussmeter_read_delay_s": "0.05",
@@ -195,9 +194,6 @@ NUMERIC_FIELDS: dict = {
     "voltage_compliance_V": float,
     "ramp_step_A": float,
     "ramp_delay_s": float,
-    "i_min_A": float,
-    "i_max_A": float,
-    "n_points": int,
     "gaussmeter_n_averages": int,
     "gaussmeter_read_delay_s": float,
     "phase_cal_n_averages": int,
@@ -216,7 +212,7 @@ OPTIONAL_NUMERIC_FIELDS = [
 ]
 MAGNET_FIELD_IDS = [
     "visa_resource", "current_limit_A", "voltage_compliance_V",
-    "ramp_step_A", "ramp_delay_s", "i_min_A", "i_max_A", "n_points",
+    "ramp_step_A", "ramp_delay_s",
     "gaussmeter_visa_resource", "gaussmeter_n_averages", "gaussmeter_read_delay_s",
     "field_settle_tolerance_mT",
 ]
@@ -364,6 +360,15 @@ def switch_field(field_id: str, label_text: str, default: bool) -> Horizontal:
     return row
 
 
+def sweep_rows_field(field_id: str, default: str) -> list:
+    """One row per line, "start, stop, points" -- see parse_sweep_rows()."""
+    label = Label("Sweep rows: start, stop, points (one per line)", classes="field-label")
+    area = TextArea(default, id=field_id, classes="sweep-rows")
+    hint = Label("Adjacent rows sharing a boundary value are merged, not duplicated.",
+                 classes="hint")
+    return [label, area, hint]
+
+
 def select_field(field_id: str, label_text: str, options: list[int], default: int) -> list:
     label = Label(label_text, classes="field-label")
     sel = Select([(str(o), o) for o in options], id=field_id, value=default, allow_blank=False)
@@ -472,23 +477,28 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     )
 
     # ── Sweep ────────────────────────────────────────────────────────────────
+    total_points = 0
     if state["enable_sweep"]:
-        if state["n_points"] < 2:
-            errors.append("Points per sweep direction must be ≥ 2.")
-        max_abs_I = max(abs(state["i_min_A"]), abs(state["i_max_A"]))
-        if max_abs_I > state["current_limit_A"]:
-            errors.append(
-                f"Sweep range (±{max_abs_I:g} A) exceeds the current limit "
-                f"({state['current_limit_A']:g} A)."
-            )
-        if state["i_min_A"] == state["i_max_A"]:
-            warnings.append("i_min equals i_max — sweep will repeat a single point.")
-
-        total_points = max(0, 2 * state["n_points"] - 1)
-        info.append(
-            f"Sweep: {state['i_min_A']:g} A → {state['i_max_A']:g} A → "
-            f"{state['i_min_A']:g} A, {total_points} points"
-        )
+        if state.get("sweep_rows_parse_error"):
+            errors.append(f"Sweep rows: {state['sweep_rows_parse_error']}")
+        else:
+            rows = state.get("sweep_rows_parsed", [])
+            max_abs_I = max((max(abs(s), abs(e)) for s, e, _ in rows), default=0.0)
+            if max_abs_I > state["current_limit_A"]:
+                errors.append(
+                    f"Sweep range (±{max_abs_I:g} A) exceeds the current limit "
+                    f"({state['current_limit_A']:g} A)."
+                )
+            for s, e, n in rows:
+                if s == e and n > 1:
+                    warnings.append(f"Row ({s:g}, {e:g}, {n}) repeats a single point {n} times.")
+            resolved = build_segmented_sweep(rows, bidirectional=True)
+            total_points = len(resolved)
+            n_raw = sum(n for _, _, n in rows)
+            n_merged = 2 * n_raw - total_points
+            merged_note = f", {n_merged} shared boundary point(s) merged" if n_merged else ""
+            info.append(f"Sweep: {len(rows)} row(s), {total_points} points (bidirectional)"
+                         f"{merged_note}")
         info.append("Field measured live at each point via Lake Shore 475 Gaussmeter "
                      f"({state['gaussmeter_visa_resource']})")
         tol_mT = state["field_settle_tolerance_mT"]
@@ -524,7 +534,8 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
                     "it will be ignored; calibration runs at the present field."
                 )
             else:
-                max_abs_I = max(abs(state["i_min_A"]), abs(state["i_max_A"]))
+                rows = state.get("sweep_rows_parsed", [])
+                max_abs_I = max((max(abs(s), abs(e)) for s, e, _ in rows), default=0.0)
                 if abs(state["phase_cal_current_A"]) > state["current_limit_A"]:
                     errors.append(
                         f"Phase-cal current ({state['phase_cal_current_A']:g} A) exceeds "
@@ -1053,6 +1064,7 @@ class MFLIDualHarmonicApp(App):
     #sidebar { width: 48; border-left: solid $primary; padding: 1 2; overflow-y: auto; }
     .field-label { text-style: bold; }
     .hint { text-style: italic; color: $text-muted; }
+    .sweep-rows { height: 5; margin-bottom: 1; }
     .switch-row { height: 3; }
     .switch-row Label { margin-left: 1; content-align: left middle; height: 3; }
     .plane-btn-row { height: 3; margin-bottom: 1; }
@@ -1137,11 +1149,7 @@ class MFLIDualHarmonicApp(App):
                         "Magnet & field sweep",
                         switch_field("enable_sweep", "Sweep magnetic field (Kepco magnet)",
                                      DEFAULTS["enable_sweep"]),
-                        field("i_min_A", "Sweep current min (A)", DEFAULTS["i_min_A"]),
-                        field("i_max_A", "Sweep current max (A)", DEFAULTS["i_max_A"]),
-                        field("n_points", "Points per sweep direction",
-                              DEFAULTS["n_points"], kind="integer",
-                              validators=[Number(minimum=2, failure_description="must be ≥ 2")]),
+                        sweep_rows_field("sweep_rows", DEFAULTS["sweep_rows"]),
                     )
                     yield card(
                         "Temperature logging",
@@ -1379,6 +1387,7 @@ class MFLIDualHarmonicApp(App):
 
     def collect_raw(self) -> dict:
         raw: dict = {fid: self.query_one(f"#{fid}", Input).value for fid in self._all_field_ids()}
+        raw["sweep_rows"] = self.query_one("#sweep_rows", TextArea).text
         raw["sinc_filter"] = self.query_one("#sinc_filter", Switch).value
         raw["differential"] = self.query_one("#differential", Switch).value
         raw["ac_coupling"] = self.query_one("#ac_coupling", Switch).value
@@ -1402,6 +1411,8 @@ class MFLIDualHarmonicApp(App):
                     self.query_one(f"#{fid}", Input).value = str(saved[fid])
                 except Exception:
                     pass
+        if "sweep_rows" in saved:
+            self.query_one("#sweep_rows", TextArea).text = str(saved["sweep_rows"])
         if "sinc_filter" in saved:
             self.query_one("#sinc_filter", Switch).value = bool(saved["sinc_filter"])
         if "differential" in saved:
@@ -1462,6 +1473,15 @@ class MFLIDualHarmonicApp(App):
         state["order"] = int(self.query_one("#order", Select).value)
         sample_value = self.query_one("#sample_select", Select).value
         state["sample"] = sample_value if sample_value not in (None, Select.BLANK) else ""
+
+        state["sweep_rows"] = self.query_one("#sweep_rows", TextArea).text
+        state["sweep_rows_parsed"] = []
+        state["sweep_rows_parse_error"] = None
+        try:
+            state["sweep_rows_parsed"] = parse_sweep_rows(state["sweep_rows"])
+        except ValueError as exc:
+            state["sweep_rows_parse_error"] = str(exc)
+
         return state, errors
 
     # ── Reactivity ───────────────────────────────────────────────────────────
@@ -1469,6 +1489,9 @@ class MFLIDualHarmonicApp(App):
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "data_dir":
             self._sync_data_root()
+        self.refresh_summary()
+
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
         self.refresh_summary()
 
     def on_switch_changed(self, event: Switch.Changed) -> None:
@@ -1484,6 +1507,7 @@ class MFLIDualHarmonicApp(App):
     def _set_magnet_fields_enabled(self, enabled: bool) -> None:
         for fid in MAGNET_FIELD_IDS:
             self.query_one(f"#{fid}", Input).disabled = not enabled
+        self.query_one("#sweep_rows", TextArea).disabled = not enabled
 
     def _set_temperature_fields_enabled(self, enabled: bool) -> None:
         for fid in TEMPERATURE_FIELD_IDS:
@@ -1605,9 +1629,7 @@ class MFLIDualHarmonicApp(App):
                 n_averages=state["gaussmeter_n_averages"],
                 read_delay_s=state["gaussmeter_read_delay_s"],
             )
-            currents_A = bidirectional_current_sweep(
-                i_min=state["i_min_A"], i_max=state["i_max_A"], n_points=state["n_points"],
-            )
+            currents_A = build_segmented_sweep(state["sweep_rows_parsed"], bidirectional=True)
 
         temp_cfg = None
         if state["enable_temperature"]:
@@ -1639,7 +1661,7 @@ class MFLIDualHarmonicApp(App):
             "settling_time_s": state["settling_time_s"],
         }
         if state["enable_sweep"]:
-            header_extra["field_sweep_A"] = [state["i_min_A"], state["i_max_A"], state["n_points"]]
+            header_extra["field_sweep_rows_A"] = state["sweep_rows_parsed"]
 
         return MeasurementPlan(
             daq_host=state["daq_host"], daq_port=state["daq_port"],

@@ -33,6 +33,7 @@ from mfli.mfli_dual_harmonic import (
     setup_mds, shutdown_gaussmeter, shutdown_magnet, shutdown_output,
     shutdown_temperature_controller, sync_follower_oscillator,
 )
+from dc.dc_sweep_utils import parse_sweep_rows
 from mfli.mfli_phase_calibration import (
     AmplitudeCheckConfig, FrequencyCheckConfig, PhaseCalibrationReport, SweepConfig,
     format_report, run_phase_calibration,
@@ -47,7 +48,7 @@ from instruments.data_naming import (
     preview_raw_filename, proc_path, write_record,
 )
 from web.run_controller import (
-    RunController, RunCallbacks, FinalStatus, num_field, text_field, bool_switch,
+    RunController, RunCallbacks, FinalStatus, num_field, text_field, textarea_field, bool_switch,
     render_summary, busy_banner, is_busy,
     param_card, stable_card, param_grid, stable_grid, advanced_section, measurement_layout,
 )
@@ -114,7 +115,7 @@ def build_plan(state: dict) -> CalibrationPlan:
         read_delay_s=state["gaussmeter_read_delay_s"],
     )
     sweep_cfg = SweepConfig(
-        i_min_A=state["i_min_A"], i_max_A=state["i_max_A"], n_points=int(state["n_points"]),
+        rows=state["sweep_rows_parsed"],
         settling_time_s=state["sweep_settling_time_s"], n_averages=int(state["sweep_n_averages"]),
         field_settle_tolerance_mT=state["field_settle_tolerance_mT"],
     )
@@ -145,7 +146,7 @@ def build_plan(state: dict) -> CalibrationPlan:
         "excitation_amplitude_V": state["amplitude_V"],
         "series_R_ohm": state["series_R_ohm"],
         "calibration_current_A": state["calibration_current_A"],
-        "field_sweep_A": [state["i_min_A"], state["i_max_A"], int(state["n_points"])],
+        "field_sweep_rows_A": state["sweep_rows_parsed"],
         "demod_time_constant_s": state["time_constant_s"],
         "demod_order": int(state["order"]),
     }
@@ -267,9 +268,10 @@ def page() -> None:
                         "Calibration magnet current (A)", float(d("calibration_current_A")),
                         hint="Where the 1f Y-null is performed — pick a point near saturation "
                              "(e.g. matching the sweep max).")
-                    inputs["i_min_A"] = num_field("Sweep current min (A)", float(d("i_min_A")))
-                    inputs["i_max_A"] = num_field("Sweep current max (A)", float(d("i_max_A")))
-                    inputs["n_points"] = num_field("Points per sweep direction", float(d("n_points")), integer=True)
+                    inputs["sweep_rows"] = textarea_field(
+                        "Sweep rows: start, stop, points (one per line)",
+                        d("sweep_rows"),
+                        hint="Adjacent rows sharing a boundary value are merged, not duplicated.")
 
                 with param_card("Excitation"):
                     inputs["frequency_Hz"] = num_field(
@@ -435,6 +437,15 @@ def page() -> None:
         state["order"] = int(order_select.value)
         sample_value = identity.sample_dropdown.value
         state["sample"] = sample_value if sample_value not in (None, NEW_SAMPLE_SENTINEL) else ""
+
+        state["sweep_rows"] = inputs["sweep_rows"].value or ""
+        state["sweep_rows_parsed"] = []
+        state["sweep_rows_parse_error"] = None
+        try:
+            state["sweep_rows_parsed"] = parse_sweep_rows(state["sweep_rows"])
+        except ValueError as exc:
+            state["sweep_rows_parse_error"] = str(exc)
+
         return state, errors
 
     def collect_raw() -> dict:

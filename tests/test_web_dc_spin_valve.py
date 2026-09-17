@@ -23,7 +23,7 @@ def _state(data_dir: Path, **overrides) -> dict:
         gate_voltage_values="0, 5", gate_voltage_list=[0.0, 5.0],
         magnet_visa_resource="GPIB0::6::INSTR", current_limit_A=35.0,
         voltage_compliance_V=15.0, ramp_step_A=0.1, ramp_delay_s=0.05,
-        i_min_A=-20.0, i_max_A=20.0, step_A=2.0, bidirectional_sweep=True,
+        sweep_rows_parsed=[(-20.0, 20.0, 21)], bidirectional_sweep=True,
         gaussmeter_visa_resource="GPIB0::12::INSTR", gaussmeter_n_averages=10,
         gaussmeter_read_delay_s=0.05, field_settle_tolerance_mT=0.02, enable_temperature=False,
         temperature_visa_resource="", temperature_sensor_uids="",
@@ -65,3 +65,13 @@ def test_sense_current_series_cross_product(tmp_path: Path) -> None:
         for _, gv in plan.series_values
     ]
     assert [c.run_number for c in contexts] == [1, 2, 3, 4]
+
+
+def test_build_plan_multi_row_sweep(tmp_path: Path) -> None:
+    plan = build_plan(_state(
+        tmp_path,
+        sweep_rows_parsed=[(-1.0, 1.0, 10), (1.0, 10.0, 10)],
+        bidirectional_sweep=True,
+    ))
+    assert len(plan.currents_A) == 37
+    assert plan.header_extra["field_sweep_rows_A"] == [(-1.0, 1.0, 10), (1.0, 10.0, 10)]

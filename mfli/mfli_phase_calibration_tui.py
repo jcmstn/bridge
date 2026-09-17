@@ -51,8 +51,10 @@ from textual.widgets import (
     Select,
     Static,
     Switch,
+    TextArea,
 )
 
+from dc.dc_sweep_utils import build_segmented_sweep, parse_sweep_rows
 from mfli.mfli_dual_harmonic import (
     DemodConfig,
     FilterConfig,
@@ -82,6 +84,7 @@ from mfli.mfli_dual_harmonic_tui import (
     format_duration,
     format_si,
     select_field,
+    sweep_rows_field,
     switch_field,
 )
 from mfli.mfli_phase_calibration import (
@@ -151,9 +154,7 @@ DEFAULTS: dict = {
     "gaussmeter_n_averages": "10",
     "gaussmeter_read_delay_s": "0.05",
     "calibration_current_A": "20",
-    "i_min_A": "-20",
-    "i_max_A": "20",
-    "n_points": "11",
+    "sweep_rows": "-20, 20, 11",
     "sweep_settling_time_s": "1.5",
     "field_settle_tolerance_mT": "0.02",
     "sweep_n_averages": "20",
@@ -194,9 +195,6 @@ NUMERIC_FIELDS: dict = {
     "gaussmeter_n_averages": int,
     "gaussmeter_read_delay_s": float,
     "calibration_current_A": float,
-    "i_min_A": float,
-    "i_max_A": float,
-    "n_points": int,
     "sweep_settling_time_s": float,
     "field_settle_tolerance_mT": float,
     "sweep_n_averages": int,
@@ -281,7 +279,7 @@ class CalibrationPlan:
 
     @property
     def total_points(self) -> int:
-        return max(0, 2 * self.sweep_cfg.n_points - 1)
+        return len(build_segmented_sweep(self.sweep_cfg.rows, bidirectional=True))
 
 
 def build_header_fields(plan: "CalibrationPlan", records: list[dict], *,
@@ -373,37 +371,45 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         errors.append("Time constant must be > 0 s.")
 
     # ── Field sweep & calibration point ─────────────────────────────────────
-    if state["n_points"] < 2:
-        errors.append("Points per sweep direction must be ≥ 2.")
-    max_abs_I = max(abs(state["i_min_A"]), abs(state["i_max_A"]))
-    if max_abs_I > state["current_limit_A"]:
-        errors.append(
-            f"Sweep range (±{max_abs_I:g} A) exceeds the current limit "
-            f"({state['current_limit_A']:g} A)."
-        )
-    if abs(state["calibration_current_A"]) > state["current_limit_A"]:
-        errors.append(
-            f"Calibration current ({state['calibration_current_A']:g} A) exceeds "
-            f"the current limit ({state['current_limit_A']:g} A)."
-        )
-    elif abs(state["calibration_current_A"]) < max_abs_I:
-        warnings.append(
-            f"Calibration current ({state['calibration_current_A']:g} A) is smaller "
-            f"than the sweep extremes (±{max_abs_I:g} A) — pick a point near "
-            "saturation so the PHE/AHE 1f signal is large and well-behaved."
-        )
+    total_points = 0
+    if state.get("sweep_rows_parse_error"):
+        errors.append(f"Sweep rows: {state['sweep_rows_parse_error']}")
+    else:
+        rows = state.get("sweep_rows_parsed", [])
+        max_abs_I = max((max(abs(s), abs(e)) for s, e, _ in rows), default=0.0)
+        if max_abs_I > state["current_limit_A"]:
+            errors.append(
+                f"Sweep range (±{max_abs_I:g} A) exceeds the current limit "
+                f"({state['current_limit_A']:g} A)."
+            )
+        for s, e, n in rows:
+            if s == e and n > 1:
+                warnings.append(f"Row ({s:g}, {e:g}, {n}) repeats a single point {n} times.")
+        if abs(state["calibration_current_A"]) > state["current_limit_A"]:
+            errors.append(
+                f"Calibration current ({state['calibration_current_A']:g} A) exceeds "
+                f"the current limit ({state['current_limit_A']:g} A)."
+            )
+        elif abs(state["calibration_current_A"]) < max_abs_I:
+            warnings.append(
+                f"Calibration current ({state['calibration_current_A']:g} A) is smaller "
+                f"than the sweep extremes (±{max_abs_I:g} A) — pick a point near "
+                "saturation so the PHE/AHE 1f signal is large and well-behaved."
+            )
 
-    total_points = max(0, 2 * state["n_points"] - 1)
-    per_point_s = state["sweep_settling_time_s"] + _acquire_duration_s(
-        state["sweep_n_averages"], state["sample_rate_Hz"]
-    )
-    info.append(
-        f"Sweep: {state['i_min_A']:g} A → {state['i_max_A']:g} A → "
-        f"{state['i_min_A']:g} A, {total_points} points"
-    )
-    info.append("Field measured live at each point via Lake Shore 475 Gaussmeter "
-                 f"({state['gaussmeter_visa_resource']})")
-    info.append(f"Estimated sweep run time ≈ {format_duration(total_points * per_point_s)}")
+        resolved = build_segmented_sweep(rows, bidirectional=True)
+        total_points = len(resolved)
+        n_raw = sum(n for _, _, n in rows)
+        n_merged = 2 * n_raw - total_points
+        merged_note = f", {n_merged} shared boundary point(s) merged" if n_merged else ""
+        per_point_s = state["sweep_settling_time_s"] + _acquire_duration_s(
+            state["sweep_n_averages"], state["sample_rate_Hz"]
+        )
+        info.append(f"Sweep: {len(rows)} row(s), {total_points} points (bidirectional)"
+                     f"{merged_note}")
+        info.append("Field measured live at each point via Lake Shore 475 Gaussmeter "
+                     f"({state['gaussmeter_visa_resource']})")
+        info.append(f"Estimated sweep run time ≈ {format_duration(total_points * per_point_s)}")
 
     # ── Optional checks ─────────────────────────────────────────────────────
     if state["enable_amplitude_check"]:
@@ -840,6 +846,7 @@ class MFLIPhaseCalibrationApp(App):
     #sidebar { width: 48; border-left: solid $primary; padding: 1 2; overflow-y: auto; }
     .field-label { text-style: bold; }
     .hint { text-style: italic; color: $text-muted; }
+    .sweep-rows { height: 5; margin-bottom: 1; }
     .switch-row { height: 3; }
     .switch-row Label { margin-left: 1; content-align: left middle; height: 3; }
     .sidebar-title { text-style: bold underline; margin-bottom: 1; }
@@ -908,11 +915,7 @@ class MFLIPhaseCalibrationApp(App):
                               hint="Where the 1f Y-null is performed — pick a point near "
                                    "saturation (e.g. matching the sweep max) so the PHE/AHE "
                                    "1f signal is large and well-behaved."),
-                        field("i_min_A", "Sweep current min (A)", DEFAULTS["i_min_A"]),
-                        field("i_max_A", "Sweep current max (A)", DEFAULTS["i_max_A"]),
-                        field("n_points", "Points per sweep direction",
-                              DEFAULTS["n_points"], kind="integer",
-                              validators=[Number(minimum=2, failure_description="must be ≥ 2")]),
+                        sweep_rows_field("sweep_rows", DEFAULTS["sweep_rows"]),
                     )
                     yield card(
                         "Excitation",
@@ -1159,6 +1162,7 @@ class MFLIPhaseCalibrationApp(App):
 
     def collect_raw(self) -> dict:
         raw: dict = {fid: self.query_one(f"#{fid}", Input).value for fid in self._all_field_ids()}
+        raw["sweep_rows"] = self.query_one("#sweep_rows", TextArea).text
         raw["sinc_filter"] = self.query_one("#sinc_filter", Switch).value
         raw["enable_amplitude_check"] = self.query_one("#enable_amplitude_check", Switch).value
         raw["enable_frequency_check"] = self.query_one("#enable_frequency_check", Switch).value
@@ -1180,6 +1184,8 @@ class MFLIPhaseCalibrationApp(App):
                     self.query_one(f"#{fid}", Input).value = str(saved[fid])
                 except Exception:
                     pass
+        if "sweep_rows" in saved:
+            self.query_one("#sweep_rows", TextArea).text = str(saved["sweep_rows"])
         if "sinc_filter" in saved:
             self.query_one("#sinc_filter", Switch).value = bool(saved["sinc_filter"])
         if "enable_amplitude_check" in saved:
@@ -1246,6 +1252,15 @@ class MFLIPhaseCalibrationApp(App):
         state["order"] = int(self.query_one("#order", Select).value)
         sample_value = self.query_one("#sample_select", Select).value
         state["sample"] = sample_value if sample_value not in (None, Select.BLANK) else ""
+
+        state["sweep_rows"] = self.query_one("#sweep_rows", TextArea).text
+        state["sweep_rows_parsed"] = []
+        state["sweep_rows_parse_error"] = None
+        try:
+            state["sweep_rows_parsed"] = parse_sweep_rows(state["sweep_rows"])
+        except ValueError as exc:
+            state["sweep_rows_parse_error"] = str(exc)
+
         return state, errors
 
     # ── Reactivity ───────────────────────────────────────────────────────────
@@ -1253,6 +1268,9 @@ class MFLIPhaseCalibrationApp(App):
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "data_dir":
             self._sync_data_root()
+        self.refresh_summary()
+
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
         self.refresh_summary()
 
     def on_switch_changed(self, event: Switch.Changed) -> None:
@@ -1348,7 +1366,7 @@ class MFLIPhaseCalibrationApp(App):
             read_delay_s=state["gaussmeter_read_delay_s"],
         )
         sweep_cfg = SweepConfig(
-            i_min_A=state["i_min_A"], i_max_A=state["i_max_A"], n_points=state["n_points"],
+            rows=state["sweep_rows_parsed"],
             settling_time_s=state["sweep_settling_time_s"], n_averages=state["sweep_n_averages"],
             field_settle_tolerance_mT=state["field_settle_tolerance_mT"],
         )
@@ -1384,7 +1402,7 @@ class MFLIPhaseCalibrationApp(App):
             "excitation_amplitude_V": state["amplitude_V"],
             "series_R_ohm": state["series_R_ohm"],
             "calibration_current_A": state["calibration_current_A"],
-            "field_sweep_A": [state["i_min_A"], state["i_max_A"], state["n_points"]],
+            "field_sweep_rows_A": state["sweep_rows_parsed"],
             "demod_time_constant_s": state["time_constant_s"],
             "demod_order": state["order"],
         }

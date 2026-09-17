@@ -32,7 +32,7 @@ from dc.dc_spin_valve import (
     set_gate_voltage, set_magnet_current, shutdown_gate, shutdown_gaussmeter,
     shutdown_magnet, shutdown_source, shutdown_temperature_controller,
 )
-from dc.dc_sweep_utils import linear_sweep, parse_value_list, safe_shutdown
+from dc.dc_sweep_utils import build_segmented_sweep, parse_sweep_rows, parse_value_list, safe_shutdown
 from dc.dc_spin_valve_tui import (
     DEFAULTS, NUMERIC_FIELDS, TEXT_FIELDS, MEASUREMENT_TYPE,
     DC_SPIN_VALVE_DESCRIPTION, MeasurementPlan, build_header_fields, build_summary,
@@ -44,7 +44,7 @@ from instruments.data_naming import (
 )
 from web.identity_bar import identity_bar
 from web.run_controller import (
-    RunController, RunCallbacks, FinalStatus, num_field, text_field,
+    RunController, RunCallbacks, FinalStatus, num_field, text_field, textarea_field,
     bool_switch, render_summary, busy_banner, is_busy,
     param_card, stable_card, param_grid, stable_grid, advanced_section, measurement_layout,
 )
@@ -95,9 +95,8 @@ def build_plan(state: dict) -> MeasurementPlan:
         field_settle_tolerance_mT=state["field_settle_tolerance_mT"],
         n_averages=int(state["n_averages"]), output_file="")  # overwritten per series iteration
 
-    currents_A = linear_sweep(
-        start=state["i_min_A"], stop=state["i_max_A"], step=state["step_A"],
-        bidirectional=state["bidirectional_sweep"],
+    currents_A = build_segmented_sweep(
+        state["sweep_rows_parsed"], state["bidirectional_sweep"],
     )
 
     gate_cfg = None
@@ -121,7 +120,7 @@ def build_plan(state: dict) -> MeasurementPlan:
         "reversal_enabled": state["reversal_enabled"],
         "n_averages": int(state["n_averages"]),
         "settling_time_s": state["settling_time_s"],
-        "field_sweep_A": [state["i_min_A"], state["i_max_A"], state["step_A"]],
+        "field_sweep_rows_A": state["sweep_rows_parsed"],
     }
     series = ""
     if len(state["sense_current_list"]) > 1 or len(gate_voltages_V or []) > 1:
@@ -224,11 +223,12 @@ def page() -> None:
             # ── Tier 1: what defines this run — always visible ───────────────
             with param_grid():
                 with param_card("Field sweep (Kepco magnet)"):
-                    inputs["i_min_A"] = num_field("Sweep current min (A)", float(d("i_min_A")))
-                    inputs["i_max_A"] = num_field("Sweep current max (A)", float(d("i_max_A")))
-                    inputs["step_A"] = num_field("Sweep step size (A)", float(d("step_A")))
+                    inputs["sweep_rows"] = textarea_field(
+                        "Sweep rows: start, stop, points (one per line)",
+                        d("sweep_rows"),
+                        hint="Adjacent rows sharing a boundary value are merged, not duplicated.")
                     switches["bidirectional_sweep"] = bool_switch(
-                        "Bidirectional sweep (min → max → min)", d("bidirectional_sweep"))
+                        "Bidirectional (retrace the merged rows)", d("bidirectional_sweep"))
 
                 with param_card("Sense current (Keithley 6221)"):
                     inputs["sense_current_values"] = text_field(
@@ -393,6 +393,14 @@ def page() -> None:
             state["sense_current_list"] = parse_value_list(state["sense_current_values"])
         except ValueError as exc:
             state["sense_current_parse_error"] = str(exc)
+
+        state["sweep_rows"] = inputs["sweep_rows"].value or ""
+        state["sweep_rows_parsed"] = []
+        state["sweep_rows_parse_error"] = None
+        try:
+            state["sweep_rows_parsed"] = parse_sweep_rows(state["sweep_rows"])
+        except ValueError as exc:
+            state["sweep_rows_parse_error"] = str(exc)
 
         return state, errors
 
