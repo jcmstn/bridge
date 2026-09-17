@@ -86,12 +86,13 @@ def _line(p0: tuple[int, int], p1: tuple[int, int]):
 
 def render_ascii_field_diagram(theta_deg: Optional[float], phi_deg: Optional[float]) -> str:
     """A small isometric diagram: the film as a diamond, its normal as a
-    vertical line, and (if theta is set) the field direction as an arrow --
-    one panel, not separate top-down/side views, so reading it needs no
-    mental composition. phi defaults to 0 deg for the drawing when left
-    blank (theta alone still pins a real direction whenever theta is 0 or
-    90 -- only a genuinely tilted, phi-unset field is ambiguous, and this
-    picks the current-axis convention rather than drawing nothing)."""
+    vertical line, its x (current) and y axes as labelled ticks from the
+    origin, and (if theta is set) the field direction as an arrow -- one
+    panel, not separate top-down/side views, so reading it needs no mental
+    composition. phi defaults to 0 deg for the drawing when left blank
+    (theta alone still pins a real direction whenever theta is 0 or 90 --
+    only a genuinely tilted, phi-unset field is ambiguous, and this picks
+    the current-axis convention rather than drawing nothing)."""
     grid = [[" "] * _WIDTH for _ in range(_HEIGHT)]
 
     def put(col: int, row: int, ch: str) -> None:
@@ -114,6 +115,15 @@ def render_ascii_field_diagram(theta_deg: Optional[float], phi_deg: Optional[flo
     normal_tip = _iso(0, 0, 1.3)
     draw_line(origin, normal_tip, "│")  # │
     put(*normal_tip, "z")
+
+    # In-plane x (current) / y axes, so phi's reference direction is visible.
+    x_tip = _iso(1.3, 0, 0)
+    draw_line(origin, x_tip, "-")
+    put(*x_tip, "x")
+
+    y_tip = _iso(0, 1.3, 0)
+    draw_line(origin, y_tip, "-")
+    put(*y_tip, "y")
 
     if theta_deg is not None:
         fx, fy, fz = field_unit_vector(theta_deg, phi_deg if phi_deg is not None else 0.0)
