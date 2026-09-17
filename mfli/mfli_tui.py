@@ -29,6 +29,7 @@ from mfli.mfli_dual_harmonic_tui import MFLIDualHarmonicApp
 from mfli.mfli_dual_harmonic_6221_tui import MFLIDualHarmonic6221App
 from mfli.mfli_diff_resistance_tui import MFLIDiffResistanceApp
 from mfli.mfli_phase_calibration_tui import MFLIPhaseCalibrationApp
+from mfli.mfli_noise_spectrum_tui import MFLINoiseSpectrumApp
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -149,6 +150,27 @@ PHASE_CALIBRATION_SCHEMATIC = """\
     Lake Shore 475    ──GPIB──▶ Gaussmeter probe at the sample
 """
 
+NOISE_SPECTRUM_DESC = (
+    "A quick nV/√Hz noise-floor estimate for the 6221-sourced dual-harmonic "
+    "program — plug the sample in exactly as for a real measurement, run "
+    "this, and read the white-noise floor off the plot to size a lock-in "
+    "filter's time constant/order. Records an Excitation-ON pass (the real "
+    "operating-point floor) and, optionally, an Excitation-OFF baseline — "
+    "no manual rewiring. Not a full noise-metrology characterization."
+)
+
+NOISE_SPECTRUM_SCHEMATIC = """\
+  Same wiring as option 2 (Dual-Harmonic, 6221 AC source) — nothing
+  separate to cable for this tool.
+
+  Keithley 6221  (WAVE, sine — the excitation to toggle ON/OFF)
+    HI/LO ──▶ sample/DUT ── common ground
+    Trigger Link phase marker ──▶ Aux In 1 on BOTH the leader AND follower
+
+  LEADER MFLI  (ExtRef-locked, noise-survey demod on 1f)
+  FOLLOWER MFLI  (ExtRef-locked, noise-survey demod on 2f)
+"""
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Picker screen
@@ -215,6 +237,12 @@ class LauncherApp(App):
                     PHASE_CALIBRATION_SCHEMATIC,
                     "launch_phase_cal", "▶  Launch phase-calibration TUI",
                 )
+                yield _card(
+                    "5) Noise Floor Estimate (2 MFLI + 6221)",
+                    NOISE_SPECTRUM_DESC,
+                    NOISE_SPECTRUM_SCHEMATIC,
+                    "launch_noise", "▶  Launch noise-floor-estimate TUI",
+                )
         yield Footer()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -226,6 +254,8 @@ class LauncherApp(App):
             self.exit(result="diff")
         elif event.button.id == "launch_phase_cal":
             self.exit(result="phase_cal")
+        elif event.button.id == "launch_noise":
+            self.exit(result="noise")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -243,6 +273,8 @@ def main() -> None:
             MFLIDiffResistanceApp().run()
         elif mode == "phase_cal":
             MFLIPhaseCalibrationApp().run()
+        elif mode == "noise":
+            MFLINoiseSpectrumApp().run()
         else:
             break  # user quit the picker
 

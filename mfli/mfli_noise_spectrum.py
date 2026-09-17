@@ -1,84 +1,71 @@
 #!/usr/bin/env python3
 """
-Dual MFLI Voltage-Noise Spectrum Characterization
-==================================================
+Dual MFLI Voltage-Noise Floor Estimate — 6221-sourced AC current
+==================================================================
 Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
-Created: 2026-07-30
+Created: 2026-09-17
 
-Records long raw demodulator time series on both MFLIs and turns them into
-voltage-noise amplitude spectral densities (ASD, V/√Hz). Use it to find
-noise floors, 1/f corners, and mains pickup, and to check whether a
-wiring/shielding/grounding change actually helped.
+A quick nV/√Hz estimate for the mfli_dual_harmonic_6221 program (leader 1f /
+follower 2f, Keithley 6221 WAVE excitation, both MFLIs ExtRef-locked to the
+6221's phase marker) — NOT a full noise-metrology characterization. Plug the
+sample/DUT in exactly as you would for the real measurement, run this, read
+the white-noise floor off the plot/console, and use it to size a lock-in
+filter's time constant/order.
 
-Method (deliberately low-tech):
-  These MFLIs don't have the LabOne DAQ Module's spectrum/FFT options
-  enabled, so this script does NOT use daq.dataAcquisitionModule() or any
-  other paid-option tool. It only uses the demodulator sample *stream*
-  (daq.subscribe/poll on "/dev.../demods/N/sample"), which is standard
-  base-instrument functionality — the same node mfli_dual_harmonic.py
-  already reads. The spectrum itself is computed on the host with
-  scipy.signal.welch().
+Wiring — identical to mfli_dual_harmonic_6221.py, nothing extra to cable:
+    Keithley 6221 (WAVE, sine, continuous)   HI ──▶ I+ pad ;  LO ──▶ I- pad
+    Keithley 6221 TRIGGER LINK phase marker  ──▶ split (BNC T, equal
+      lengths) to AUX IN 1 on BOTH MFLIs (leader locks demod-index-1's
+      oscillator to it for 1f, follower likewise for 2f — see ExtRefConfig).
+    Leader MFLI Signal Input 1 (differential)   ──▶ noise-survey demod
+    Follower MFLI Signal Input 1 (differential) ──▶ noise-survey demod
 
-What it measures, per demodulator channel:
-  - Excitation ON  : noise with the sample bias applied (real operating
-                      condition — includes any excitation-coupled noise).
-  - Excitation OFF : baseline instrument + environment noise.
-  - (optional)      Any further condition you add to `conditions` in main()
-                      — e.g. "inputs shorted" — the script pauses with an
-                      on-screen prompt so you can rewire between runs.
+Method (unchanged from the retired plain-MFLI-output version of this
+script): stream the raw demodulator sample record (daq.subscribe/poll on
+"/dev.../demods/N/sample" — standard base-instrument functionality, no
+paid-option DAQ/Sweeper/FFT module) and turn it into a voltage-noise ASD on
+the host with scipy.signal.welch().
 
-For each condition/channel it reports:
-  - Voltage noise ASD (X, Y and an averaged X/Y trace) vs. frequency.
-  - A white-noise floor estimate and the 1/f corner frequency.
-  - RMS noise integrated over the measured band.
-  - Mains-pickup peaks (50/100/150 Hz ... by default) flagged automatically.
-  - A comparison to the Johnson-Nyquist thermal noise floor of a reference
-    resistance (e.g. your series resistor), if you provide one.
-  - An approximate input-referred current noise (V_floor / R_ref), if a
-    reference resistance is provided.
+Two passes, both software-controlled — no manual rewiring:
+  Excitation ON  : 6221 armed at the real f_ref/amplitude, both MFLIs
+                   ExtRef-locked exactly as the production measurement does
+                   — the real operating-point floor.
+  Excitation OFF : 6221 output disabled, sample/DUT still connected —
+                   baseline with everything else unchanged.
+
+A single reference resistance (the DUT's approximate R, typed in — no
+physical resistor swap) draws a Johnson-Nyquist comparison line on the plot,
+purely as a sanity anchor; the number you actually act on is the measured
+white-noise floor itself.
 
 Results are saved as CSV (one file per condition/channel) plus a summary
-plot, and everything of interest is also printed to the console.
-
-IMPORTANT — oscillator frequency is NOT shared automatically by MDS:
-MDS synchronizes the sample clock and start trigger across devices, not
-the per-device oscillator frequency *value*. Each device's local
-oscillator still free-runs at whatever frequency you set it to. If the
-follower's demodulator frequency doesn't exactly match the leader's
-excitation frequency, its 2f channel will show a slow beat instead of a
-stable signal, corrupting the noise spectrum. sync_follower_oscillator()
-below sets this explicitly — don't skip it when USE_MDS is True.
+plot. See mfli_noise_spectrum_tui.py for a friendlier front end over this
+same module — every parameter here matches a field there.
 
 Requirements:
-    pip install zhinst-core zhinst-utils numpy pandas scipy matplotlib
+    pip install zhinst-core zhinst-utils numpy pandas scipy matplotlib pyvisa pymeasure
 """
 
-import time
 import logging
-import numpy as np
-import pandas as pd
-from dataclasses import dataclass, field
+import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, List, Dict, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
+import numpy as np
+import pandas as pd
 import zhinst.core as zi
 from scipy import signal
-import matplotlib.pyplot as plt
 
-from instruments.mfli_daq import (
-    connect,
-    connect_device,
-    setup_mds,
-    check_mds_status,
-    sync_follower_oscillator,
-)
-from instruments.mercury_itc import (
-    MercuryITC,
-    TemperatureControllerConfig,
-    connect_temperature_controller,
-    read_temperature,
-    shutdown_temperature_controller,
+from instruments.keithley6221 import ACSourceConfig, connect_ac_source, shutdown_ac_source
+from instruments.mfli_daq import connect, connect_device, setup_mds, check_mds_status
+from mfli.mfli_dual_harmonic_6221 import (
+    ExtRefConfig,
+    configure_external_reference,
+    wait_for_reference_lock,
+    disable_sigout,
+    _check_ac_safety,
 )
 from instruments.data_naming import (
     RunContext,
@@ -95,12 +82,10 @@ from instruments.data_naming import (
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 
 # Locked type code for this measurement (see instruments/data_naming.py) —
-# never deviates.
+# unchanged from the retired plain-MFLI-output version; nothing else needs
+# to know the excitation mechanism behind it.
 MEASUREMENT_TYPE = "NOISE"
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Logging
-# ─────────────────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(message)s",
@@ -114,43 +99,29 @@ log = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────────────────
 
 @dataclass
-class OutputConfig:
-    """Voltage source → current source configuration (the excitation to toggle on/off)."""
-    device: str         = "dev1234"   # MFLI acting as leader + current source
-    out_ch: int         = 0           # Signal Output index (0-based)
-    demod_out: int      = 0           # Demodulator that drives the output
-    osc_index: int      = 0           # Oscillator index
-    frequency_Hz: float = 317.3       # Excitation frequency  [Hz]
-                                      #   Track mfli_dual_harmonic.py's real
-                                      #   operating point (recommended
-                                      #   ~300-1000 Hz band, above 1/f noise).
-    amplitude_V: float  = 0.1         # Output amplitude      [V, peak]
-    series_R_ohm: float = 1e6         # Series resistor       [Ω]
-
-
-@dataclass
 class NoiseDemodConfig:
     """
     One demodulator channel to characterize.
 
     Unlike a normal measurement (long time constant, low sample rate — see
-    mfli_dual_harmonic.py), a noise-spectrum measurement wants the OPPOSITE:
+    mfli_dual_harmonic_6221.py), a noise-floor estimate wants the OPPOSITE:
     a short time constant and a fast sample rate, so the demodulator passes
-    as much bandwidth as possible for the host-side FFT/Welch estimate to
-    work with. order=1 and sinc off are used deliberately here — higher
-    order / sinc rejection narrow the usable bandwidth, which is exactly
-    what you don't want while surveying the noise floor.
+    as much bandwidth as possible for the host-side Welch estimate to work
+    with. order=1 and sinc off are used deliberately here — higher order /
+    sinc rejection narrow the usable bandwidth, which is exactly what you
+    don't want while surveying the noise floor.
     """
     device: str                        # Device ID
     label: str                         # Human-readable name, used in logs/plots/filenames
-    demod_index: int    = 0            # Demodulator index on that device (0-based)
+    demod_index: int    = 0            # Demodulator index on that device (0-based) — the
+                                        #   REAL signal demod, distinct from the ExtRef
+                                        #   PLL's own dedicated detector demod (see
+                                        #   ExtRefConfig.pll_demod_index in mfli_dual_harmonic_6221.py)
     harmonic: int        = 1           # Match whatever harmonic this channel uses in real use
-    osc_index: int      = 0            # Oscillator to lock to
     input_ch: int       = 0            # Signal Input index (0-based)
     differential: bool  = True         # Enable differential (IN+ / IN−) mode
     ac_coupling: bool   = True         # AC-couple the input
-    input_range_V: float = 1.0         # Input range [V]  — try smaller (e.g. 0.01) with the
-                                        #   inputs shorted to see how much range affects ADC noise
+    input_range_V: float = 1.0         # Input range [V] — match the real measurement
     sample_rate_Hz: float = 13389.0    # Demod data rate [Sa/s] → Nyquist = rate/2.
                                         #   Raise this (device will clamp to its nearest allowed
                                         #   value) for a wider spectrum, if your device supports it.
@@ -162,74 +133,35 @@ class NoiseDemodConfig:
 @dataclass
 class AcquisitionConfig:
     """Timing and spectral-estimation parameters."""
-    duration_s: float        = 60.0    # Raw time series length per condition/channel [s]
+    duration_s: float        = 30.0    # Raw time series length per condition/channel [s]
                                         #   Sets the lowest usable frequency (~1/duration_s).
+                                        #   Kept short by default — this is a quick estimate,
+                                        #   not a metrology-grade survey.
     poll_chunk_s: float       = 5.0    # Poll in chunks of this length, purely so progress can
                                         #   be reported while a long recording is running.
     welch_seg_s: float        = 10.0   # Welch segment length [s] → frequency resolution ~1/this
     welch_overlap_frac: float = 0.5    # Fractional overlap between Welch segments
-    n_repeats: int             = 1     # Re-record and average this many full `duration_s` runs
-                                        #   (reduces variance, mainly at low frequency)
-    output_dir: str           = "noise_spectrum_results"
 
 
 @dataclass
 class ReferenceConfig:
-    """Reference lines / peak-detection parameters used to interpret the spectrum."""
-    mains_freq_Hz: float          = 50.0   # Mains frequency (50 Hz EU / 60 Hz US)
-    mains_harmonics: int          = 6      # How many harmonics to check/annotate
-    mains_flag_ratio: float       = 2.5    # Flag a bin as pickup if it exceeds this × local median
-    thermal_R_ohm: Optional[float] = None  # Reference resistance for Johnson-noise comparison
-                                            #   and current-noise conversion (e.g. series_R_ohm)
-    thermal_T_K: float            = 293.15 # Temperature for the Johnson-noise line [K]
-
-
-@dataclass
-class Condition:
-    """One measurement condition (e.g. excitation on/off, or a manual rewiring step)."""
-    label: str
-    excitation_on: bool
-    prompt: Optional[str] = None   # If set, printed and paused on (input()) before this run —
-                                    # use it for steps that need you to physically change wiring.
+    """Reference values used to interpret the spectrum."""
+    thermal_R_ohm: Optional[float] = None    # DUT's approximate resistance — Johnson-noise
+                                              # comparison line only, no physical resistor swap
+    thermal_T_K: float            = 293.0    # Temperature for the Johnson-noise line [K]
+    mains_freq_Hz: float          = 50.0     # Mains frequency (50 Hz EU / 60 Hz US)
+    mains_harmonics: int          = 6        # How many harmonics to check/annotate
+    mains_flag_ratio: float       = 2.5      # Flag a bin as pickup if it exceeds this × local median
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Instrument setup helpers
+# Demodulator setup
 # ─────────────────────────────────────────────────────────────────────────────
-# connect, connect_device, setup_mds and sync_follower_oscillator are
-# imported from instruments/mfli_daq.py above unchanged. configure_output
-# (this program's excitation on/off topology) stays local.
-
-def configure_output(daq: zi.ziDAQServer, cfg: OutputConfig) -> None:
-    """Set up the voltage output that drives the current through the sample."""
-    d = cfg.device
-    daq.setDouble(f"/{d}/oscs/{cfg.osc_index}/freq",               cfg.frequency_Hz)
-    daq.setDouble(f"/{d}/sigouts/{cfg.out_ch}/amplitudes/{cfg.demod_out}", cfg.amplitude_V)
-    daq.setDouble(f"/{d}/sigouts/{cfg.out_ch}/range",              max(0.01, cfg.amplitude_V * 2))
-    daq.setInt(   f"/{d}/sigouts/{cfg.out_ch}/enables/{cfg.demod_out}", 1)
-    daq.setInt(   f"/{d}/sigouts/{cfg.out_ch}/imp50",              0)   # High-Z output
-    daq.setInt(   f"/{d}/sigouts/{cfg.out_ch}/on",                 1)
-    daq.sync()
-    I_nA = cfg.amplitude_V / cfg.series_R_ohm * 1e9
-    log.info(
-        "Output configured: %s  f=%.4f Hz  Vpp=%.4f V  R=%.2e Ω  → I≈%.3f nA",
-        d, cfg.frequency_Hz, cfg.amplitude_V, cfg.series_R_ohm, I_nA,
-    )
-
-
-def set_output_enabled(daq: zi.ziDAQServer, cfg: OutputConfig, enabled: bool) -> None:
-    """Toggle the excitation on/off without touching any other output setting."""
-    daq.setInt(f"/{cfg.device}/sigouts/{cfg.out_ch}/on", int(enabled))
-    daq.sync()
-    log.info("Excitation output %s (%s, f=%.4f Hz, %.4f V)",
-              "ENABLED" if enabled else "DISABLED", cfg.device, cfg.frequency_Hz, cfg.amplitude_V)
-
 
 def configure_noise_demod(daq: zi.ziDAQServer, cfg: NoiseDemodConfig) -> None:
     """Configure a demodulator for wide-bandwidth noise streaming and log the actually-applied values."""
     d, di = cfg.device, cfg.demod_index
 
-    daq.setInt(   f"/{d}/demods/{di}/oscselect",    cfg.osc_index)
     daq.setInt(   f"/{d}/demods/{di}/harmonic",     cfg.harmonic)
     daq.setDouble(f"/{d}/demods/{di}/timeconstant", cfg.time_constant_s)
     daq.setInt(   f"/{d}/demods/{di}/order",        cfg.order)
@@ -378,70 +310,29 @@ def thermal_noise_asd(R_ohm: float, T_K: float) -> float:
 
 
 def measure_noise_spectrum(daq: zi.ziDAQServer, cfg: NoiseDemodConfig,
-                            acq_cfg: AcquisitionConfig,
-                            temp_ctrl: Optional[MercuryITC] = None,
-                            temp_cfg: Optional[TemperatureControllerConfig] = None,
-                            mds=None) -> dict:
-    """
-    Record (possibly repeated) time series for one channel/condition and
-    return its spectrum + stats.
-
-    `mds`, if given (the module handle setup_mds() returns), is passed down
-    to acquire_time_series() so a sync drop during any repeat is caught and
-    flagged (`mds_synced` in the returned dict).
-
-    `temp_ctrl`/`temp_cfg`, if given, take one live temperature reading
-    (temperature_1_K / temperature_2_K, via the shared MercuryiTC
-    controller — see mercury_itc.py) right before the recording starts, and
-    include it in the returned dict. A noise recording runs for tens of
-    seconds to minutes, far slower than the cryostat drifts, so a single
-    reading per condition/channel is enough — this is not a per-point
-    sweep. Passing `temp_ctrl=None` (e.g. because the MercuryiTC isn't
-    connected) simply leaves those fields empty; it's never a reason to
-    stop the measurement.
-    """
-    temp_1_K, temp_2_K = read_temperature(temp_ctrl, temp_cfg) \
-        if temp_cfg is not None else (None, None)
-
-    psd_x_runs, psd_y_runs = [], []
-    freq = None
-    overload_detected = False
-    mds_synced = True if mds is not None else None
-    for rep in range(acq_cfg.n_repeats):
-        if acq_cfg.n_repeats > 1:
-            log.info("   Repeat %d/%d", rep + 1, acq_cfg.n_repeats)
-        ts = acquire_time_series(daq, cfg, acq_cfg.duration_s, acq_cfg.poll_chunk_s, mds=mds)
-        overload_detected = overload_detected or ts["overload_detected"]
-        if mds is not None and not ts["mds_synced"]:
-            mds_synced = False
-        f, psd_x = compute_psd(ts["x"], ts["fs"], acq_cfg.welch_seg_s, acq_cfg.welch_overlap_frac)
-        _, psd_y = compute_psd(ts["y"], ts["fs"], acq_cfg.welch_seg_s, acq_cfg.welch_overlap_frac)
-        freq = f
-        psd_x_runs.append(psd_x)
-        psd_y_runs.append(psd_y)
-
-    psd_x = np.mean(psd_x_runs, axis=0)
-    psd_y = np.mean(psd_y_runs, axis=0)
+                            acq_cfg: AcquisitionConfig, mds=None) -> dict:
+    """Record a time series for one channel/condition and return its spectrum + stats."""
+    ts = acquire_time_series(daq, cfg, acq_cfg.duration_s, acq_cfg.poll_chunk_s, mds=mds)
+    f, psd_x = compute_psd(ts["x"], ts["fs"], acq_cfg.welch_seg_s, acq_cfg.welch_overlap_frac)
+    _, psd_y = compute_psd(ts["y"], ts["fs"], acq_cfg.welch_seg_s, acq_cfg.welch_overlap_frac)
     asd_x = np.sqrt(psd_x)
     asd_y = np.sqrt(psd_y)
     asd_avg = np.sqrt(0.5 * (psd_x + psd_y))
 
-    stats = summarize_asd(freq, asd_avg)
-    band = freq > 0
-    rms_V = float(np.sqrt(np.trapz(0.5 * (psd_x + psd_y)[band], freq[band])))
+    stats = summarize_asd(f, asd_avg)
+    band = f > 0
+    rms_V = float(np.sqrt(np.trapz(0.5 * (psd_x + psd_y)[band], f[band])))
 
     return {
-        "freq_Hz": freq,
+        "freq_Hz": f,
         "asd_x_V_rthz": asd_x,
         "asd_y_V_rthz": asd_y,
         "asd_avg_V_rthz": asd_avg,
-        "nyquist_Hz": float(freq[-1]),
+        "nyquist_Hz": float(f[-1]),
         "rms_V": rms_V,
         "label": cfg.label,
-        "temperature_1_K": temp_1_K,
-        "temperature_2_K": temp_2_K,
-        "overload_detected": overload_detected,
-        "mds_synced": mds_synced,
+        "overload_detected": ts["overload_detected"],
+        "mds_synced": ts["mds_synced"],
         **stats,
     }
 
@@ -470,88 +361,216 @@ def report_mains_peaks(results: Dict[Tuple[str, str], dict], ref_cfg: ReferenceC
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Orchestration  ── the two ON/OFF passes, no manual rewiring
+# ─────────────────────────────────────────────────────────────────────────────
+
+def measure_noise_floor(
+    daq: zi.ziDAQServer,
+    ac_cfg: ACSourceConfig,
+    leader_extref_cfg: ExtRefConfig,
+    follower_extref_cfg: ExtRefConfig,
+    demod_cfgs: List[NoiseDemodConfig],
+    acq_cfg: AcquisitionConfig,
+    *,
+    also_measure_off: bool = True,
+    extref_lock_timeout_s: float = 5.0,
+    mds=None,
+    stop_event=None,
+    on_status: Optional[Callable[[str], None]] = None,
+    on_result: Optional[Callable[[str, str, dict], None]] = None,
+) -> Dict[Tuple[str, str], dict]:
+    """
+    Run the "Excitation ON" pass (6221 armed at ac_cfg's operating point,
+    both MFLIs ExtRef-locked to its phase marker — the real operating-point
+    floor) and, unless `also_measure_off` is False, the "Excitation OFF"
+    pass (6221 disabled, wiring otherwise untouched — baseline).
+
+    `_check_ac_safety(ac_cfg)` guards against a mistyped exponent before
+    arming, same as mfli_dual_harmonic_6221.py's own run path.
+
+    `on_result(condition, label, spec)`, if given, fires right after each
+    condition/channel spectrum is computed -- lets a caller (e.g. a TUI)
+    drive a progress indicator without duplicating this function's loop.
+
+    The 6221 is always left disabled on return (via `shutdown_ac_source()`
+    in `finally`) — this is a diagnostic tool, not a measurement that should
+    leave current flowing unattended.
+    """
+    _check_ac_safety(ac_cfg)
+    disable_sigout(daq, leader_extref_cfg.device)
+    disable_sigout(daq, follower_extref_cfg.device)
+
+    results: Dict[Tuple[str, str], dict] = {}
+    source = None
+    try:
+        if on_status:
+            on_status("Starting 6221 AC current source …")
+        source = connect_ac_source(ac_cfg)
+
+        if on_status:
+            on_status("Locking MFLI oscillators to the 6221 marker (ExtRef) …")
+        configure_external_reference(daq, leader_extref_cfg, ac_cfg.frequency_Hz)
+        configure_external_reference(daq, follower_extref_cfg, ac_cfg.frequency_Hz)
+        leader_locked = wait_for_reference_lock(daq, leader_extref_cfg,
+                                                 extref_lock_timeout_s, stop_event)
+        follower_locked = wait_for_reference_lock(daq, follower_extref_cfg,
+                                                   extref_lock_timeout_s, stop_event)
+        if not leader_locked:
+            log.warning("Leader ExtRef PLL did not report locked within %.2g s — "
+                        "check the marker cabling before trusting this floor.",
+                        extref_lock_timeout_s)
+        if not follower_locked:
+            log.warning("Follower ExtRef PLL did not report locked within %.2g s — "
+                        "check the marker fan-out cabling before trusting this floor.",
+                        extref_lock_timeout_s)
+
+        for cfg in demod_cfgs:
+            if on_status:
+                on_status(f"Recording noise floor: Excitation ON — {cfg.label} …")
+            spec = measure_noise_spectrum(daq, cfg, acq_cfg, mds=mds)
+            spec["leader_reference_locked"] = leader_locked
+            spec["follower_reference_locked"] = follower_locked
+            results[("Excitation ON", cfg.label)] = spec
+            log.info("   → white floor %.3e V/√Hz | RMS(%.2f–%.0f Hz) %.3e V",
+                      spec["white_floor_V_rthz"], spec["freq_Hz"][1],
+                      spec["nyquist_Hz"], spec["rms_V"])
+            if on_result:
+                on_result("Excitation ON", cfg.label, spec)
+
+        if also_measure_off:
+            if on_status:
+                on_status("Disabling 6221 output for baseline pass …")
+            shutdown_ac_source(source)
+            source = None
+            for cfg in demod_cfgs:
+                if on_status:
+                    on_status(f"Recording noise floor: Excitation OFF — {cfg.label} …")
+                spec = measure_noise_spectrum(daq, cfg, acq_cfg, mds=mds)
+                spec["leader_reference_locked"] = None
+                spec["follower_reference_locked"] = None
+                results[("Excitation OFF", cfg.label)] = spec
+                log.info("   → white floor %.3e V/√Hz | RMS(%.2f–%.0f Hz) %.3e V",
+                          spec["white_floor_V_rthz"], spec["freq_Hz"][1],
+                          spec["nyquist_Hz"], spec["rms_V"])
+                if on_result:
+                    on_result("Excitation OFF", cfg.label, spec)
+    finally:
+        if source is not None:
+            shutdown_ac_source(source)
+
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Output: CSV + plot
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _slug(s: str) -> str:
-    return "".join(c if c.isalnum() else "_" for c in s).strip("_").lower()
+def _spec_records(spec: dict) -> list[dict]:
+    n = len(spec["freq_Hz"])
+    return pd.DataFrame({
+        "frequency_Hz":        spec["freq_Hz"],
+        "asd_x_V_per_rtHz":    spec["asd_x_V_rthz"],
+        "asd_y_V_per_rtHz":    spec["asd_y_V_rthz"],
+        "asd_avg_V_per_rtHz":  spec["asd_avg_V_rthz"],
+        "overload_detected":  [spec.get("overload_detected")] * n,
+        "mds_synced":         [spec.get("mds_synced")] * n,
+        "leader_reference_locked":   [spec.get("leader_reference_locked")] * n,
+        "follower_reference_locked": [spec.get("follower_reference_locked")] * n,
+    }).to_dict("records")
+
+
+def build_header_fields(ctx: RunContext, cond: str, label: str, spec: dict, *,
+                         cooldown: str, series: str, status: str, comment: str = "") -> dict:
+    """Universal + measurement-specific header/index fields for one
+    (condition, channel) pair's run. Used by save_results() for the initial
+    write, and reusable afterward (same shape, `status`/`comment` updated)
+    for the operator's post-run status/comment prompt -- see
+    mfli_noise_spectrum_tui.py's RunScreen._on_status_comment()."""
+    return {
+        "run": ctx.run_number,
+        "timestamp": ctx.timestamp.isoformat(timespec="seconds"),
+        "sample": ctx.sample,
+        "device": ctx.device,
+        "type": MEASUREMENT_TYPE,
+        "T_setpoint_K": "",
+        "T_K": "",
+        "cooldown": cooldown,
+        "status": status,
+        "comment": comment,
+        "series": series,
+        "condition": cond,
+        "channel_label": label,
+        "white_floor_V_rthz": spec["white_floor_V_rthz"],
+        "corner_freq_Hz": spec["corner_freq_Hz"],
+        "rms_V": spec["rms_V"],
+        "overload_detected": spec["overload_detected"],
+        "mds_synced": spec["mds_synced"],
+        "leader_reference_locked": spec.get("leader_reference_locked"),
+        "follower_reference_locked": spec.get("follower_reference_locked"),
+    }
 
 
 def save_results(
     results: Dict[Tuple[str, str], dict], *,
-    sample: str, device: str, temperature_setpoint_K: Optional[float],
-    cooldown: str, series: str, status: str = "completed",
+    sample: str, device: str, cooldown: str, series: str, status: str = "completed",
+    data_root: Optional[Path] = None,
 ) -> List[RunContext]:
     """
     Write one raw file per (condition, channel) pair via allocate_run() +
-    write_record() — single-shot, matching this script's existing
+    write_record() — single-shot, matching this suite's existing
     no-incremental-write behavior (a noise recording is one long acquisition
-    per pair, not a point-by-point sweep, so there's nothing to write until
-    the whole spectrum for that pair is ready). All pairs share one
-    `series` tag so they're recognizable as one session in index.csv.
+    per pair, not a point-by-point sweep). All pairs share one `series` tag
+    so they're recognizable as one session in index.csv.
 
     `status` should be "completed" only if the whole session ran to
-    completion; pass "error" (or similar) when saving a partial result set
-    collected before an exception — see main()'s try/except, which calls
-    this unconditionally so a failed session never loses already-recorded
-    spectra.
+    completion; pass "error" when saving a partial result set collected
+    before an exception — see main()'s try/except, which calls this
+    unconditionally so a failed session never loses already-recorded spectra.
 
-    Returns the allocated RunContexts in the order written, so the caller
-    can build the combined plot's run-range label from the first/last one.
+    `data_root` defaults to this module's own `_DATA_DIR` fallback (the
+    plain main() usage); a TUI/web front end must pass its own identity
+    bar's "Data root" — see docs/architecture.md's hard rule on this.
+
+    Returns the allocated RunContexts, in the same order as `results` --
+    zip them together to recover which context belongs to which
+    (condition, channel) pair (see finalize_comment()).
     """
+    root = _DATA_DIR if data_root is None else data_root
     contexts: List[RunContext] = []
     for (cond, label), spec in results.items():
-        ctx = allocate_run(
-            _DATA_DIR, sample, device, MEASUREMENT_TYPE,
-            temperature_setpoint_K=temperature_setpoint_K, series=series,
-        )
-        n = len(spec["freq_Hz"])
-        records = pd.DataFrame({
-            "frequency_Hz":        spec["freq_Hz"],
-            "asd_x_V_per_rtHz":    spec["asd_x_V_rthz"],
-            "asd_y_V_per_rtHz":    spec["asd_y_V_rthz"],
-            "asd_avg_V_per_rtHz":  spec["asd_avg_V_rthz"],
-            # Single reading taken before this condition/channel's recording
-            # started (see measure_noise_spectrum) — constant across the
-            # spectrum, not re-measured per frequency bin.
-            "temperature_1_K":    [spec.get("temperature_1_K")] * n,
-            "temperature_2_K":    [spec.get("temperature_2_K")] * n,
-            "overload_detected":  [spec.get("overload_detected")] * n,
-            "mds_synced":         [spec.get("mds_synced")] * n,
-        }).to_dict("records")
-
-        measured = [r["temperature_1_K"] for r in records if r.get("temperature_1_K") is not None]
-        T_K = (sum(measured) / len(measured)) if measured else ""
-        header_fields = {
-            "run": ctx.run_number,
-            "timestamp": ctx.timestamp.isoformat(timespec="seconds"),
-            "sample": ctx.sample,
-            "device": ctx.device,
-            "type": MEASUREMENT_TYPE,
-            "T_setpoint_K": temperature_setpoint_K,
-            "T_K": T_K,
-            "cooldown": cooldown,
-            "status": status,
-            "comment": "",
-            "series": series,
-            "condition": cond,
-            "channel_label": label,
-            "white_floor_V_rthz": spec["white_floor_V_rthz"],
-            "corner_freq_Hz": spec["corner_freq_Hz"],
-            "rms_V": spec["rms_V"],
-            "overload_detected": spec["overload_detected"],
-            "mds_synced": spec["mds_synced"],
-        }
-        write_record(ctx.raw_path, records, header_fields)
-        finalize_index_row(_DATA_DIR, ctx.sample, ctx.run_number, header_fields)
+        ctx = allocate_run(root, sample, device, MEASUREMENT_TYPE, series=series)
+        header_fields = build_header_fields(ctx, cond, label, spec,
+                                             cooldown=cooldown, series=series, status=status)
+        write_record(ctx.raw_path, _spec_records(spec), header_fields)
+        finalize_index_row(root, ctx.sample, ctx.run_number, header_fields)
         contexts.append(ctx)
         log.info("Saved spectrum data: %s", ctx.raw_path)
     return contexts
 
 
+def finalize_comment(ctx: RunContext, cond: str, label: str, spec: dict, *,
+                      cooldown: str, series: str, status: str, comment: str,
+                      data_root: Optional[Path] = None) -> None:
+    """Re-finalize one already-saved run's index.csv row with the
+    operator's real status/comment -- the full row, not just the comment
+    field, since finalize_index_row() rewrites the row wholesale."""
+    root = _DATA_DIR if data_root is None else data_root
+    header_fields = build_header_fields(ctx, cond, label, spec, cooldown=cooldown,
+                                         series=series, status=status, comment=comment)
+    finalize_index_row(root, ctx.sample, ctx.run_number, header_fields)
+
+
 def plot_results(results: Dict[Tuple[str, str], dict], demod_cfgs: List[NoiseDemodConfig],
                   ref_cfg: ReferenceConfig, out_path: Path) -> Path:
-    """One log-log subplot per demodulator channel, one colored trace per condition."""
+    """One log-log subplot per demodulator channel, one colored trace per condition.
+
+    matplotlib.pyplot is imported here, not at module top -- a TUI/web
+    caller needs to force the Agg backend (matplotlib.use("Agg")) *before*
+    pyplot's first import anywhere in the process; importing it eagerly at
+    module load time would lock in whatever GUI backend is default first,
+    same reason mfli_dual_harmonic_6221.py's own core module never imports
+    matplotlib at all."""
+    import matplotlib.pyplot as plt
     plt.rcParams.update({
         "figure.facecolor": "#fcfcfb",
         "axes.facecolor":   "#fcfcfb",
@@ -563,7 +582,6 @@ def plot_results(results: Dict[Tuple[str, str], dict], demod_cfgs: List[NoiseDem
         "grid.color":       "#e1e0d9",
         "font.size":        10,
     })
-    # Fixed categorical assignment: color encodes *condition*, consistent across subplots.
     condition_colors = {
         "Excitation ON":  "#2a78d6",   # blue
         "Excitation OFF": "#eb6834",   # orange
@@ -613,7 +631,7 @@ def plot_results(results: Dict[Tuple[str, str], dict], demod_cfgs: List[NoiseDem
         ax.spines["right"].set_visible(False)
         ax.legend(frameon=False, loc="lower left")
 
-    fig.suptitle("Dual-MFLI Voltage Noise Spectral Density", fontsize=13)
+    fig.suptitle("Dual-MFLI Noise Floor Estimate (6221-sourced)", fontsize=13)
     fig.tight_layout(rect=(0, 0, 1, 0.95))
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -628,19 +646,16 @@ def plot_results(results: Dict[Tuple[str, str], dict], demod_cfgs: List[NoiseDem
 
 def main() -> None:
     # ── Device IDs ──────────────────────────────────────────────────────────
-    LEADER   = "dev7885"    # Current source + 1f measurement
+    LEADER   = "dev7885"    # Current source phase marker + 1f measurement
     FOLLOWER = "dev7886"    # 2f measurement
-    USE_MDS  = True         # Keep True to reproduce the real experiment's clocking condition
+    USE_MDS  = True
 
     # ── Sample / run identity (see instruments/data_naming.py) ───────────────
-    # No TUI/web front end for this script — set these by hand, same place
-    # every other hardware parameter for this script already lives.
+    # No TUI/web front end needed to use this module directly — set these by
+    # hand. See mfli_noise_spectrum_tui.py for a form-based front end.
     SAMPLE = "_test"                  # ← real sample name, or "_test" for a smoke test
     DEVICE = "noise_check"            # ← e.g. HB3, SV2
     COOLDOWN = ""                     # ← optional
-    TEMPERATURE_SETPOINT_K: Optional[float] = 293.0
-    # create=True only stubs sample.yaml/notes.md/raw//proc//index.csv the
-    # first time SAMPLE is used — never overwrites an existing sample.
     ensure_sample(_DATA_DIR, SAMPLE, create=True)
 
     # ── Connect ─────────────────────────────────────────────────────────────
@@ -649,115 +664,38 @@ def main() -> None:
     connect_device(daq, FOLLOWER, interface="1GbE")
     mds = setup_mds(daq, leader=LEADER, follower=FOLLOWER) if USE_MDS else None
 
-    # ── Output (the excitation we'll toggle on/off between conditions) ───────
-    out_cfg = OutputConfig(
-        device        = LEADER,
+    # ── Excitation (Keithley 6221) — match your real operating point ─────────
+    ac_cfg = ACSourceConfig(
+        visa_resource = "GPIB0::20::INSTR",
+        amplitude_A   = 1e-4,
         frequency_Hz  = 317.3,
-        amplitude_V   = 0.1,
-        series_R_ohm  = 10000,
+        compliance_V  = 2.0,
     )
-    configure_output(daq, out_cfg)
-    if USE_MDS:
-        sync_follower_oscillator(daq, out_cfg, FOLLOWER)   # do NOT skip — see module docstring
+    leader_extref_cfg = ExtRefConfig(device=LEADER)
+    follower_extref_cfg = ExtRefConfig(device=FOLLOWER)
 
     # ── Demodulator channels to characterize ──────────────────────────────────
     demod_cfgs = [
-        NoiseDemodConfig(
-            device         = LEADER,
-            label          = "MFLI-1 (1f channel)",
-            demod_index    = 0,
-            harmonic       = 1,
-            input_range_V  = 1.0,          # same as the real measurement; try smaller w/ inputs shorted
-            sample_rate_Hz = 13389.0,
-            time_constant_s= 30e-6,
-            order          = 1,
-        ),
-        NoiseDemodConfig(
-            device         = FOLLOWER,
-            label          = "MFLI-2 (2f channel)",
-            demod_index    = 0,
-            harmonic       = 2,
-            input_range_V  = 1.0,
-            sample_rate_Hz = 13389.0,
-            time_constant_s= 30e-6,
-            order          = 1,
-        ),
+        NoiseDemodConfig(device=LEADER,   label="MFLI-1 (1f channel)", harmonic=1),
+        NoiseDemodConfig(device=FOLLOWER, label="MFLI-2 (2f channel)", harmonic=2),
     ]
     for cfg in demod_cfgs:
         configure_noise_demod(daq, cfg)
 
-    # ── Temperature (Oxford Instruments MercuryiTC, optional) ────────────────
-    # Not every rig has one, and not every MercuryiTC has two probes wired up
-    # — connect_temperature_controller() returns None rather than raising if
-    # it can't be reached, and the measurement runs fine either way.
-    temp_cfg = TemperatureControllerConfig(
-        visa_resource = "TCPIP0::192.168.1.5::7020::SOCKET",  # ← set to your iTC's address
-        sensor_uids   = ("MB1.T1",),   # ← 1 or 2 board UIDs, e.g. ("MB1.T1", "DB5.T1")
-    )
-    temp_ctrl = connect_temperature_controller(temp_cfg)
+    # ── Acquisition / reference settings ──────────────────────────────────────
+    acq_cfg = AcquisitionConfig(duration_s=30.0)
+    ref_cfg = ReferenceConfig(thermal_R_ohm=10_000, thermal_T_K=293.0)
 
-    # ── Acquisition / analysis settings ────────────────────────────────────
-    acq_cfg = AcquisitionConfig(
-        duration_s        = 60.0,
-        poll_chunk_s       = 5.0,
-        welch_seg_s        = 10.0,
-        welch_overlap_frac = 0.5,
-        n_repeats          = 1,
-        output_dir         = "noise_spectrum_results",
-    )
-    ref_cfg = ReferenceConfig(
-        mains_freq_Hz    = 50.0,
-        mains_harmonics  = 6,
-        thermal_R_ohm    = out_cfg.series_R_ohm,   # comparison line + current-noise conversion
-        thermal_T_K      = 293.15,
-    )
-
-    # ── Conditions to run ───────────────────────────────────────────────────
-    # Add more entries here as needed, e.g. a manual rewiring step:
-    #   Condition("Inputs shorted (noise floor)", excitation_on=False,
-    #             prompt="Disconnect the sample and short/terminate both signal inputs."),
-    conditions = [
-        Condition("Excitation ON",  excitation_on=True),
-        Condition("Excitation OFF", excitation_on=False),
-    ]
-
-    results: Dict[Tuple[str, str], dict] = {}
-    total_steps = len(conditions) * len(demod_cfgs)
-    step = 0
     error: Optional[BaseException] = None
-
+    results: Dict[Tuple[str, str], dict] = {}
     try:
-        for cond in conditions:
-            log.info("═" * 78)
-            log.info("Condition: %s", cond.label)
-            if cond.prompt:
-                log.info("ACTION REQUIRED: %s", cond.prompt)
-                input(">>> Press Enter when ready to continue ... ")
-
-            set_output_enabled(daq, out_cfg, cond.excitation_on)
-            settle_s = 2.0
-            log.info("Settling %.1f s ...", settle_s)
-            time.sleep(settle_s)
-
-            for cfg in demod_cfgs:
-                step += 1
-                log.info("[%d/%d] Recording noise spectrum: %s — %s",
-                          step, total_steps, cond.label, cfg.label)
-                spec = measure_noise_spectrum(daq, cfg, acq_cfg,
-                                               temp_ctrl=temp_ctrl, temp_cfg=temp_cfg,
-                                               mds=mds)
-                results[(cond.label, cfg.label)] = spec
-                corner_str = f"{spec['corner_freq_Hz']:.2f} Hz" if spec["corner_freq_Hz"] == spec["corner_freq_Hz"] else "n/a"
-                log.info("   → white floor %.3e V/√Hz | 1/f corner %s | RMS(%.2f–%.0f Hz) %.3e V",
-                          spec["white_floor_V_rthz"], corner_str, spec["freq_Hz"][1],
-                          spec["nyquist_Hz"], spec["rms_V"])
+        results = measure_noise_floor(
+            daq, ac_cfg, leader_extref_cfg, follower_extref_cfg, demod_cfgs, acq_cfg,
+            mds=mds, on_status=lambda msg: log.info(msg),
+        )
     except BaseException as exc:  # noqa: BLE001 — re-raised below, after saving what we have
-        log.exception("Noise spectrum measurement failed — saving whatever was collected before re-raising")
+        log.exception("Noise floor estimate failed — saving whatever was collected before re-raising")
         error = exc
-    finally:
-        # Leave the excitation in its normal ON state regardless of how the loop ended.
-        set_output_enabled(daq, out_cfg, True)
-        shutdown_temperature_controller(temp_ctrl)
 
     if not results:
         log.warning("No results collected — nothing to save or plot.")
@@ -765,13 +703,9 @@ def main() -> None:
             raise error
         return
 
-    # Save unconditionally — even a partial result set from a failed/aborted
-    # session is worth keeping, and this must not be skipped by the
-    # exception path above (see the try/except this sits after).
     series = f"{SAMPLE}_{DEVICE}_{MEASUREMENT_TYPE}_{datetime.now():%Y%m%dT%H%M%S}"
     run_contexts = save_results(
-        results, sample=SAMPLE, device=DEVICE,
-        temperature_setpoint_K=TEMPERATURE_SETPOINT_K, cooldown=COOLDOWN, series=series,
+        results, sample=SAMPLE, device=DEVICE, cooldown=COOLDOWN, series=series,
         status="completed" if error is None else "error",
     )
     report_mains_peaks(results, ref_cfg)
@@ -781,13 +715,11 @@ def main() -> None:
     png_path = proc_path(_DATA_DIR, SAMPLE, run_label, DEVICE, MEASUREMENT_TYPE, "combined", combined=True)
     plot_results(results, demod_cfgs, ref_cfg, png_path)
 
-    # ── Console summary ────────────────────────────────────────────────────
     log.info("═" * 78)
     log.info("SUMMARY")
     for (cond, label), spec in results.items():
-        corner_str = f"{spec['corner_freq_Hz']:.2f} Hz" if spec["corner_freq_Hz"] == spec["corner_freq_Hz"] else "n/a"
-        log.info("  %-16s | %-24s | floor %.3e V/√Hz | corner %-10s | RMS(%.2f-%.0fHz) %.3e V | %d mains peak(s)",
-                  cond, label, spec["white_floor_V_rthz"], corner_str,
+        log.info("  %-16s | %-24s | floor %.3e V/√Hz | RMS(%.2f-%.0fHz) %.3e V | %d mains peak(s)",
+                  cond, label, spec["white_floor_V_rthz"],
                   spec["freq_Hz"][1], spec["nyquist_Hz"], spec["rms_V"], len(spec["mains_peaks"]))
         if ref_cfg.thermal_R_ohm:
             i_noise = spec["white_floor_V_rthz"] / ref_cfg.thermal_R_ohm
@@ -797,10 +729,9 @@ def main() -> None:
               _DATA_DIR / SAMPLE)
 
     if error is not None:
-        # Already saved what we collected above — re-raise now so the
-        # caller/console still sees this run did not complete cleanly.
         raise error
 
+    import matplotlib.pyplot as plt
     plt.show()
 
 
