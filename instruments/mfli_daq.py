@@ -26,6 +26,11 @@ Usage example:
     setup_mds(daq, leader="dev1234", follower="dev5678")
     ...
     d = acquire_averaged(daq, demod_cfg, n_averages=50)
+
+    # Two demods to read at the same point (e.g. 1f/2f)? Use
+    # acquire_averaged_pair() -- one poll() window covering both instead
+    # of two sequential ones:
+    d1, d2 = acquire_averaged_pair(daq, demod1_cfg, demod2_cfg, n_averages=50)
 """
 
 import time
@@ -147,30 +152,46 @@ def sync_follower_oscillator(daq: zi.ziDAQServer, out_cfg, follower: str,
              follower, follower_osc_index, out_cfg.frequency_Hz)
 
 
-def _poll_demod(daq: zi.ziDAQServer, path: str,
-                duration_s: float, timeout_ms: int) -> dict:
+def _poll_demod_paths(daq: zi.ziDAQServer, paths: list,
+                      duration_s: float, timeout_ms: int) -> dict:
     """
-    Subscribe, flush, poll for `duration_s`, unsubscribe.
-    Returns a dict with arrays for x, y, r, theta_deg.
+    Subscribe to every path in `paths`, issue ONE poll() spanning all of
+    them over the same wall-clock window, then unsubscribe. LabOne's
+    poll() is a session-level call -- it returns buffered data for every
+    currently-subscribed path in one shot, regardless of which physical
+    device each path lives on (a session already connects multiple
+    devices; see docs.zhinst.com's "Subscribe and Poll" reference) -- so
+    this is the supported way to read several demodulators without paying
+    for N sequential poll windows. Returns {path: {x, y, r, theta_deg}}.
     """
-    daq.subscribe(path)
+    for path in paths:
+        daq.subscribe(path)
     daq.sync()
     data = daq.poll(duration_s, timeout_ms, flat=True)
-    daq.unsubscribe(path)
+    for path in paths:
+        daq.unsubscribe(path)
 
-    if path not in data or len(data[path]) == 0:
-        raise RuntimeError(f"No data returned for {path}. "
-                           "Check demodulator is enabled and sample rate > 0.")
+    result: dict = {}
+    for path in paths:
+        if path not in data or len(data[path]) == 0:
+            raise RuntimeError(f"No data returned for {path}. "
+                               "Check demodulator is enabled and sample rate > 0.")
+        # With flat=True, data[path] is a single dict of field -> numpy
+        # array (all samples from the poll window concatenated), not a
+        # list of per-sample dicts.
+        samples = data[path]
+        x = np.atleast_1d(samples["x"])
+        y = np.atleast_1d(samples["y"])
+        result[path] = {"x": x, "y": y, "r": np.hypot(x, y),
+                         "theta_deg": np.degrees(np.arctan2(y, x))}
+    return result
 
-    # With flat=True, data[path] is a single dict of field -> numpy array
-    # (all samples from the poll window concatenated), not a list of
-    # per-sample dicts.
-    samples = data[path]
-    x = np.atleast_1d(samples["x"])
-    y = np.atleast_1d(samples["y"])
-    r = np.hypot(x, y)
-    theta = np.degrees(np.arctan2(y, x))
-    return {"x": x, "y": y, "r": r, "theta_deg": theta}
+
+def _poll_demod(daq: zi.ziDAQServer, path: str,
+                duration_s: float, timeout_ms: int) -> dict:
+    """Single-path case of _poll_demod_paths() -- see there for the shared
+    subscribe/poll/unsubscribe mechanics."""
+    return _poll_demod_paths(daq, [path], duration_s, timeout_ms)[path]
 
 
 _overload_node_warned: set = set()
@@ -237,21 +258,34 @@ def acquire_averaged(daq: zi.ziDAQServer, cfg, n_averages: int) -> dict:
     `None` rather than reading the wrong (unused) Signal Input's flag.
     """
     path = f"/{cfg.device}/demods/{cfg.demod_index}/sample".lower()
-    # Poll long enough that the samples are actually independent. The demod
-    # low-pass has a correlation time on the order of its own time constant,
-    # so a window shorter than a few TC returns ~1 independent sample no
-    # matter how many rows come back -- the mean barely improves on a single
-    # reading and x_std/y_std/r_std understate the true uncertainty by
-    # ~sqrt(window / TC). Floor the window at 3x TC. `cfg.filter` is optional
-    # in this module's duck-typed contract (see the module docstring), so
-    # fall back to the plain sample-count window when it isn't present.
-    tc = getattr(getattr(cfg, "filter", None), "time_constant_s", 0.0)
-    # 50 % margin on the sample-count term so we comfortably exceed n_averages.
-    duration_s  = max(0.1, 3.0 * tc, (n_averages * 1.5) / cfg.sample_rate_Hz)
-    timeout_ms  = int(duration_s * 1000) + 2000
+    duration_s = _poll_duration_s(cfg, n_averages)
+    timeout_ms = int(duration_s * 1000) + 2000
 
     raw = _poll_demod(daq, path, duration_s, timeout_ms)
+    return _finish_average(daq, cfg, raw, n_averages)
 
+
+def _poll_duration_s(cfg, n_averages: int) -> float:
+    """Poll window long enough that the samples are actually independent.
+    The demod low-pass has a correlation time on the order of its own time
+    constant, so a window shorter than a few TC returns ~1 independent
+    sample no matter how many rows come back -- the mean barely improves
+    on a single reading and x_std/y_std/r_std understate the true
+    uncertainty by ~sqrt(window / TC). Floor the window at 3x TC.
+    `cfg.filter` is optional in this module's duck-typed contract (see the
+    module docstring), so fall back to the plain sample-count window when
+    it isn't present. 50% margin on the sample-count term so we comfortably
+    exceed n_averages."""
+    tc = getattr(getattr(cfg, "filter", None), "time_constant_s", 0.0)
+    return max(0.1, 3.0 * tc, (n_averages * 1.5) / cfg.sample_rate_Hz)
+
+
+def _finish_average(daq: zi.ziDAQServer, cfg, raw: dict, n_averages: int) -> dict:
+    """Trim `raw` (as returned by _poll_demod/_poll_demod_paths) to the
+    freshest n_averages samples and reduce to the mean/SEM/std/overload
+    dict acquire_averaged() and acquire_averaged_pair() both return -- see
+    acquire_averaged()'s docstring for the two uncertainty flavors and why
+    R/theta come from the mean X/Y, not the mean of per-sample R/theta."""
     # Trim to last n_averages samples (freshest data after settling)
     for k in raw:
         raw[k] = raw[k][-n_averages:]
@@ -303,3 +337,45 @@ def acquire_averaged(daq: zi.ziDAQServer, cfg, n_averages: int) -> dict:
         "n_samples":  n,
         "overload":   overload,
     }
+
+
+def acquire_averaged_pair(daq: zi.ziDAQServer, cfg_a, cfg_b, n_averages: int) -> tuple:
+    """
+    Same result as calling acquire_averaged(cfg_a) then acquire_averaged(cfg_b),
+    but in ONE poll() window instead of two back-to-back ones. Use this for
+    a pair of demods that both need reading at the same measurement point
+    (e.g. a 1f/2f harmonic pair on two MDS-synced MFLIs, or a current/
+    voltage pair for differential resistance).
+
+    LabOne's poll() operates at the session level: it returns buffered
+    data for every currently-subscribed path in one call, regardless of
+    which physical device each path lives on (a session already connects
+    multiple devices -- see docs.zhinst.com's "Subscribe and Poll"
+    reference). Subscribing both demods' paths and issuing a single
+    poll(max(duration_a, duration_b)) is therefore the supported way to
+    read them together, over the same wall-clock window, instead of
+    duration_a + duration_b of sequential windows.
+
+    Each cfg keeps its own poll-window floor -- the shared duration is the
+    MAX of the two (see _poll_duration_s()), so neither channel's own
+    3x-TC/n_averages floor is ever under-spanned; the channel with the
+    shorter requirement just gets a few extra, harmless samples.
+
+    A shared window means both channels cover the same WALL-CLOCK
+    interval, NOT that sample i of cfg_a is simultaneous with sample i of
+    cfg_b. MDS (setup_mds()) is orthogonal to this API call -- it's what
+    makes the shared interval meaningful (both devices already share a
+    sample clock and start instant), not what makes poll()ing them
+    together possible.
+    """
+    path_a = f"/{cfg_a.device}/demods/{cfg_a.demod_index}/sample".lower()
+    path_b = f"/{cfg_b.device}/demods/{cfg_b.demod_index}/sample".lower()
+
+    duration_s = max(_poll_duration_s(cfg_a, n_averages),
+                      _poll_duration_s(cfg_b, n_averages))
+    timeout_ms = int(duration_s * 1000) + 2000
+
+    raw = _poll_demod_paths(daq, [path_a, path_b], duration_s, timeout_ms)
+
+    return (_finish_average(daq, cfg_a, raw[path_a], n_averages),
+            _finish_average(daq, cfg_b, raw[path_b], n_averages))

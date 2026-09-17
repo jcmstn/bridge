@@ -13,7 +13,7 @@ import math
 import numpy as np
 import pytest
 
-from instruments.mfli_daq import acquire_averaged
+from instruments.mfli_daq import acquire_averaged, acquire_averaged_pair
 
 
 class _FakeCfg:
@@ -116,3 +116,89 @@ def test_sem_fields_are_nan_for_a_single_sample():
     assert math.isnan(out["y_sem"])
     assert math.isnan(out["r_sem"])
     assert out["n_samples"] == 1
+
+
+class _FakeCfgB:
+    device = "dev1111"
+    demod_index = 0
+    sample_rate_Hz = 1000.0
+
+
+class _FakeCfgBTC(_FakeCfgB):
+    class filter:
+        time_constant_s = 0.1
+
+
+class _FakeDAQPair:
+    """Subscribe/poll fake that serves multiple paths from ONE poll() call,
+    like the real LabOne session-level poll() (see acquire_averaged_pair()'s
+    docstring) -- as opposed to _FakeDAQ above, which only ever has one path
+    subscribed at a time."""
+
+    def __init__(self, data: dict):
+        self._data = data  # {path: (x, y)}
+        self.subscribed: list = []
+        self.poll_calls = 0
+        self.last_duration_s = None
+
+    def subscribe(self, path):
+        self.subscribed.append(path)
+
+    def unsubscribe(self, path):
+        self.subscribed.remove(path)
+
+    def sync(self):
+        pass
+
+    def poll(self, duration_s, timeout_ms, flat=True):
+        self.poll_calls += 1
+        self.last_duration_s = duration_s
+        return {
+            path: {"x": np.asarray(x, dtype=float), "y": np.asarray(y, dtype=float)}
+            for path, (x, y) in self._data.items()
+            if path in self.subscribed
+        }
+
+
+def test_acquire_averaged_pair_uses_one_poll_for_both_demods():
+    path_a = "/dev0000/demods/0/sample"
+    path_b = "/dev1111/demods/0/sample"
+    ang_a, ang_b = math.radians(30.0), math.radians(60.0)
+    xa = np.full(16, 2.0 * math.cos(ang_a)); ya = np.full(16, 2.0 * math.sin(ang_a))
+    xb = np.full(16, 3.0 * math.cos(ang_b)); yb = np.full(16, 3.0 * math.sin(ang_b))
+    daq = _FakeDAQPair({path_a: (xa, ya), path_b: (xb, yb)})
+
+    d_a, d_b = acquire_averaged_pair(daq, _FakeCfg(), _FakeCfgB(), n_averages=16)
+
+    assert daq.poll_calls == 1
+    assert d_a["r_mean"] == pytest.approx(2.0)
+    assert d_b["r_mean"] == pytest.approx(3.0)
+    assert d_a["theta_mean"] == pytest.approx(30.0)
+    assert d_b["theta_mean"] == pytest.approx(60.0)
+
+
+def test_acquire_averaged_pair_duration_is_max_not_sum():
+    # cfg_a's TC=0.3s floors its own window at 0.9s; cfg_b's TC=0.1s floors
+    # its own window at 0.3s. The shared poll must cover both in ONE call
+    # at the MAX (0.9s), not the sum (1.2s) -- that's the whole point.
+    path_a = f"/{_FakeCfgTC.device}/demods/{_FakeCfgTC.demod_index}/sample"
+    path_b = f"/{_FakeCfgBTC.device}/demods/{_FakeCfgBTC.demod_index}/sample"
+    daq = _FakeDAQPair({path_a: (np.zeros(8), np.zeros(8)),
+                         path_b: (np.zeros(8), np.zeros(8))})
+
+    acquire_averaged_pair(daq, _FakeCfgTC(), _FakeCfgBTC(), n_averages=10)
+
+    assert daq.poll_calls == 1
+    assert daq.last_duration_s == pytest.approx(0.9)
+
+
+def test_acquire_averaged_pair_raises_naming_the_missing_path():
+    # If one demod is disabled/misconfigured, poll() comes back missing
+    # that path's key -- the error must name WHICH one, not just "no data".
+    path_a = "/dev0000/demods/0/sample"
+    path_b = "/dev1111/demods/0/sample"
+    daq = _FakeDAQPair({path_a: (np.zeros(4), np.zeros(4))})
+
+    with pytest.raises(RuntimeError) as exc:
+        acquire_averaged_pair(daq, _FakeCfg(), _FakeCfgB(), n_averages=4)
+    assert path_b in str(exc.value)

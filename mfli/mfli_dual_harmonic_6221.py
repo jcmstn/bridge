@@ -106,7 +106,10 @@ import pandas as pd
 import zhinst.core as zi
 
 from instruments.keithley6221 import ACSourceConfig, connect_ac_source, shutdown_ac_source
-from instruments.mfli_daq import connect, connect_device, setup_mds, check_mds_status, acquire_averaged
+from instruments.mfli_daq import (
+    connect, connect_device, setup_mds, check_mds_status,
+    acquire_averaged, acquire_averaged_pair,
+)
 from instruments.kepco_magnet import (
     MagnetConfig,
     connect_magnet,
@@ -456,15 +459,12 @@ def run_measurement(
         log.info("   Settling %.2f s ...", settle)
         time.sleep(settle)
 
-        # ── 3. Acquire 1f ──────────────────────────────────────────────────
-        d1 = acquire_averaged(daq, demod1_cfg, acq_cfg.n_averages)
+        # ── 3. Acquire 1f + 2f together (one poll window, not two) ──────────
+        d1, d2 = acquire_averaged_pair(daq, demod1_cfg, demod2_cfg, acq_cfg.n_averages)
         log.info("   1f  R=%.4e V  θ=%.2f°  SEM_R=%.2e V  (n=%d)",
                  d1["r_mean"], d1["theta_mean"], d1["r_sem"], d1["n_samples"])
         if d1["overload"]:
             log.warning("   1f input is OVERLOADED — this reading is not trustworthy.")
-
-        # ── 4. Acquire 2f ──────────────────────────────────────────────────
-        d2 = acquire_averaged(daq, demod2_cfg, acq_cfg.n_averages)
         log.info("   2f  R=%.4e V  θ=%.2f°  SEM_R=%.2e V  (n=%d)",
                  d2["r_mean"], d2["theta_mean"], d2["r_sem"], d2["n_samples"])
         if d2["overload"]:

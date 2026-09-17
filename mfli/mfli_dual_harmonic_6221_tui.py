@@ -520,10 +520,10 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         else:
             errors.append(f"{label} time constant must be > 0 s.")
 
-    # 1f and 2f are acquired sequentially per point (see run_measurement) —
-    # their poll windows add, they don't overlap.
-    per_point_s = (state["settling_time_s"]
-                    + acq_window_s["1f"] + acq_window_s["2f"])
+    # 1f and 2f are polled together in one window (acquire_averaged_pair(),
+    # see run_measurement) — their poll windows overlap, so it's the max
+    # of the two, not the sum.
+    per_point_s = state["settling_time_s"] + max(acq_window_s["1f"], acq_window_s["2f"])
 
     # ── Sweep ────────────────────────────────────────────────────────────────
     total_points = 0
