@@ -680,7 +680,7 @@ class _LogRelay(logging.Handler):
 class RunScreen(Screen):
     CSS = """
     #status_line { height: 1; padding: 0 1; text-style: bold; }
-    #progress_row { margin: 1 2; align: left middle; }
+    #progress_row { height: auto; margin: 1 2; align: left middle; }
     #run_label { width: auto; padding: 0 2 0 0; text-style: bold; }
     #progress { margin: 0; }
     #results_table { height: 12; margin: 0 2 1 2; }
