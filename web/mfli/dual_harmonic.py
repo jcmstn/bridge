@@ -94,17 +94,21 @@ def build_plan(state: dict) -> MeasurementPlan:
         device=state["leader_device"], frequency_Hz=state["frequency_Hz"],
         amplitude_V=state["amplitude_V"], series_R_ohm=state["series_R_ohm"],
     )
-    filt = FilterConfig(
-        time_constant_s=state["time_constant_s"], order=int(state["order"]),
-        sinc_filter=state["sinc_filter"],
+    filt_1f = FilterConfig(
+        time_constant_s=state["time_constant_1f_s"], order=int(state["order_1f"]),
+        sinc_filter=state["sinc_filter_1f"],
+    )
+    filt_2f = FilterConfig(
+        time_constant_s=state["time_constant_2f_s"], order=int(state["order_2f"]),
+        sinc_filter=state["sinc_filter_2f"],
     )
     demod1_cfg = DemodConfig(
         device=state["leader_device"], demod_index=0, harmonic=1,
-        input_range_V=state["input_range_1f_V"], sample_rate_Hz=state["sample_rate_Hz"], filter=filt,
+        input_range_V=state["input_range_1f_V"], sample_rate_Hz=state["sample_rate_Hz"], filter=filt_1f,
     )
     demod2_cfg = DemodConfig(
         device=state["follower_device"], demod_index=0, harmonic=2,
-        input_range_V=state["input_range_2f_V"], sample_rate_Hz=state["sample_rate_Hz"], filter=filt,
+        input_range_V=state["input_range_2f_V"], sample_rate_Hz=state["sample_rate_Hz"], filter=filt_2f,
     )
     run_ctx = allocate_run(
         Path(state["data_dir"]), state["sample"], state["device"], MEASUREMENT_TYPE,
@@ -151,8 +155,10 @@ def build_plan(state: dict) -> MeasurementPlan:
         "excitation_frequency_Hz": state["frequency_Hz"],
         "excitation_amplitude_V": state["amplitude_V"],
         "series_R_ohm": state["series_R_ohm"],
-        "demod_time_constant_s": state["time_constant_s"],
-        "demod_order": int(state["order"]),
+        "demod1_time_constant_s": state["time_constant_1f_s"],
+        "demod1_order": int(state["order_1f"]),
+        "demod2_time_constant_s": state["time_constant_2f_s"],
+        "demod2_order": int(state["order_2f"]),
         "n_averages": int(state["n_averages"]),
         "settling_time_s": state["settling_time_s"],
     }
@@ -310,12 +316,20 @@ def page() -> None:
             # ── Tier 2: precision / speed knobs — collapsed ─────────────────
             with advanced_section("Acquisition & filter settings"):
                 with stable_grid():
-                    with param_card("Lock-in filter"):
-                        inputs["time_constant_s"] = num_field(
-                            "Filter time constant (s)", float(d("time_constant_s")),
+                    with param_card("1f lock-in filter"):
+                        inputs["time_constant_1f_s"] = num_field(
+                            "Filter time constant (s)", float(d("time_constant_1f_s")),
                             hint="Bigger = quieter but slower & longer settling.")
-                        order_select = ui.select(list(range(1, 9)), value=int(d("order")), label="Filter order").classes("w-full")
-                        switches["sinc_filter"] = bool_switch("Sinc filter (extra harmonic rejection)", d("sinc_filter"))
+                        order_select_1f = ui.select(list(range(1, 9)), value=int(d("order_1f")), label="Filter order").classes("w-full")
+                        switches["sinc_filter_1f"] = bool_switch("Sinc filter (extra harmonic rejection)", d("sinc_filter_1f"))
+
+                    with param_card("2f lock-in filter"):
+                        inputs["time_constant_2f_s"] = num_field(
+                            "Filter time constant (s)", float(d("time_constant_2f_s")),
+                            hint="1f bleed-through into the 2f channel is the usual reason "
+                                 "this needs a longer TC / higher order than 1f.")
+                        order_select_2f = ui.select(list(range(1, 9)), value=int(d("order_2f")), label="Filter order").classes("w-full")
+                        switches["sinc_filter_2f"] = bool_switch("Sinc filter (extra harmonic rejection)", d("sinc_filter_2f"))
 
                     with param_card("Input channels"):
                         inputs["input_range_1f_V"] = num_field(
@@ -434,7 +448,8 @@ def page() -> None:
             state[fid] = float(v) if v is not None else None
         for fid, sw in switches.items():
             state[fid] = sw.value
-        state["order"] = int(order_select.value)
+        state["order_1f"] = int(order_select_1f.value)
+        state["order_2f"] = int(order_select_2f.value)
         sample_value = identity.sample_dropdown.value
         state["sample"] = sample_value if sample_value not in (None, NEW_SAMPLE_SENTINEL) else ""
 
@@ -454,7 +469,8 @@ def page() -> None:
             raw[fid] = inp.value if inp.value is not None else ""
         for fid, sw in switches.items():
             raw[fid] = sw.value
-        raw["order"] = order_select.value
+        raw["order_1f"] = order_select_1f.value
+        raw["order_2f"] = order_select_2f.value
         raw["data_dir"] = identity.data_dir_input.value
         raw["device"] = identity.device_input.value
         raw["cooldown"] = identity.cooldown_input.value
@@ -496,7 +512,8 @@ def page() -> None:
         inp.on_value_change(refresh_summary.refresh)
     for sw in switches.values():
         sw.on_value_change(refresh_summary.refresh)
-    order_select.on_value_change(refresh_summary.refresh)
+    order_select_1f.on_value_change(refresh_summary.refresh)
+    order_select_2f.on_value_change(refresh_summary.refresh)
     refresh_summary()
     ui.timer(2.0, refresh_summary.refresh)
 

@@ -872,7 +872,15 @@ def main() -> None:
 
     # ── Filters ─────────────────────────────────────────────────────────────
     #   Settling rule: settling_time_s ≥ 5×TC (order 1) or ≥ 10×TC (order 4, below)
-    shared_filter = FilterConfig(
+    #   Independent per harmonic: the follower's 2f channel needs real stopband
+    #   attenuation against 1f bleed-through (order/sinc) that the leader's 1f
+    #   channel doesn't, and shouldn't inherit 2f's settling-time cost.
+    filter_1f = FilterConfig(
+        time_constant_s = 0.3,       # s
+        order           = 4,
+        sinc_filter     = True,
+    )
+    filter_2f = FilterConfig(
         time_constant_s = 0.3,       # s
         order           = 4,
         sinc_filter     = True,
@@ -885,7 +893,7 @@ def main() -> None:
         harmonic       = 1,
         input_range_V  = 1.0,
         sample_rate_Hz = 857.0,
-        filter         = shared_filter,
+        filter         = filter_1f,
     )
     configure_demodulator(daq, demod1_cfg)
 
@@ -896,7 +904,7 @@ def main() -> None:
         harmonic       = 2,
         input_range_V  = 1.0,
         sample_rate_Hz = 857.0,
-        filter         = shared_filter,
+        filter         = filter_2f,
     )
     configure_demodulator(daq, demod2_cfg)
 

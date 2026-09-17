@@ -21,7 +21,8 @@ def _state(**overrides) -> dict:
         daq_host="localhost", daq_port=8004,
         ac_visa_resource="GPIB0::20::INSTR",
         frequency_Hz=317.3, amplitude_A=1e-7, ac_compliance_V=2.0, phasemarker_line=1,
-        time_constant_s=0.3, order=4, sinc_filter=True,
+        time_constant_1f_s=0.3, order_1f=4, sinc_filter_1f=True,
+        time_constant_2f_s=0.3, order_2f=4, sinc_filter_2f=True,
         differential=True, ac_coupling=True,
         input_range_1f_V=1.0, input_range_2f_V=1.0, sample_rate_Hz=857.0,
         settling_time_s=15.0, n_averages=50,
@@ -54,13 +55,17 @@ def test_build_plan_allocates_run_and_matches_filename_convention(tmp_path, monk
     app = tui.MFLIDualHarmonic6221App()
     app.data_root = tmp_path
 
-    plan1 = app._build_plan(_state())
+    plan1 = app._build_plan(_state(time_constant_1f_s=0.1, time_constant_2f_s=0.5))
     assert plan1.run_ctx.run_number == 1
     assert plan1.acq_cfg.output_file == str(plan1.run_ctx.raw_path)
     assert Path(plan1.acq_cfg.output_file).name.startswith("A_0001_HB3_HARM6_T300K_")
     assert plan1.ac_cfg.amplitude_A == 1e-7
     assert plan1.leader_extref_cfg.device == "dev7885"
     assert plan1.follower_extref_cfg.device == "dev7886"
+    # 1f and 2f must get independent FilterConfig instances -- regresses if
+    # someone re-collapses them into one shared object.
+    assert plan1.demod1_cfg.filter is not plan1.demod2_cfg.filter
+    assert plan1.demod1_cfg.filter.time_constant_s != plan1.demod2_cfg.filter.time_constant_s
 
     plan2 = app._build_plan(_state())
     assert plan2.run_ctx.run_number == 2

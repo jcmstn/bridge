@@ -139,9 +139,12 @@ DEFAULTS: dict = {
     "frequency_Hz": "317.3",
     "amplitude_V": "0.1",
     "series_R_ohm": "10000",
-    "time_constant_s": "0.3",
-    "order": "4",
-    "sinc_filter": True,
+    "time_constant_1f_s": "0.3",
+    "order_1f": "4",
+    "sinc_filter_1f": True,
+    "time_constant_2f_s": "0.3",
+    "order_2f": "4",
+    "sinc_filter_2f": True,
     "differential": True,
     "ac_coupling": True,
     "input_range_1f_V": "1.0",
@@ -183,7 +186,8 @@ NUMERIC_FIELDS: dict = {
     "frequency_Hz": float,
     "amplitude_V": float,
     "series_R_ohm": float,
-    "time_constant_s": float,
+    "time_constant_1f_s": float,
+    "time_constant_2f_s": float,
     "input_range_1f_V": float,
     "input_range_2f_V": float,
     "sample_rate_Hz": float,
@@ -428,53 +432,59 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
                     f"harmonic ({nearest} Hz) — mains pickup risk."
                 )
 
-    # ── Filter / timing ─────────────────────────────────────────────────────
-    tc = state["time_constant_s"]
-    if tc > 0:
-        # Rule of thumb: ≥5×TC for a 1st-order filter, ≥10×TC for 3rd/4th
-        # order (settles more slowly per time constant at higher order).
-        settle_multiple = 10 if state["order"] >= 3 else 5
-        recommended_settle = settle_multiple * tc
-        if state["settling_time_s"] < recommended_settle:
-            warnings.append(
-                f"Settling time {state['settling_time_s']:g} s < {settle_multiple}×TC "
-                f"({recommended_settle:g} s, order {state['order']}) — filter may not have settled."
+    # ── Filter / timing (1f and 2f each get their own filter) ──────────────
+    acq_window_s = {"1f": 0.0, "2f": 0.0}
+    for label, tc_key, order_key in (("1f", "time_constant_1f_s", "order_1f"),
+                                      ("2f", "time_constant_2f_s", "order_2f")):
+        tc = state[tc_key]
+        if tc > 0:
+            # Rule of thumb: ≥5×TC for a 1st-order filter, ≥10×TC for 3rd/4th
+            # order (settles more slowly per time constant at higher order).
+            order = state[order_key]
+            settle_multiple = 10 if order >= 3 else 5
+            recommended_settle = settle_multiple * tc
+            if state["settling_time_s"] < recommended_settle:
+                warnings.append(
+                    f"{label} settling time {state['settling_time_s']:g} s < {settle_multiple}×TC "
+                    f"({recommended_settle:g} s, order {order}) — filter may not have settled."
+                )
+            else:
+                info.append(f"{label} settling ≥ {settle_multiple}×TC ({recommended_settle:g} s) ✓")
+
+            bw = 1.0 / (2 * math.pi * tc)
+            min_rate = 4 * bw
+            info.append(f"{label} filter noise bandwidth ≈ {bw:.3g} Hz")
+            if state["sample_rate_Hz"] < min_rate:
+                warnings.append(
+                    f"Sample rate {state['sample_rate_Hz']:g} Sa/s may be low for {label} TC "
+                    f"(want ≳ {min_rate:.1f} Sa/s)."
+                )
+
+            # Independent-average check: acquire_averaged() polls for
+            # max(0.1, 3xTC, n*1.5/rate) s, but consecutive demod outputs are
+            # correlated over ~TC, so the window only holds ~window/(pi*TC)
+            # independent samples. If that's well below n_averages, the mean
+            # barely beats one reading and the reported 1f/2f R_sem is optimistic.
+            acq_window_s[label] = _acquire_duration_s(
+                state["n_averages"], state["sample_rate_Hz"], tc
             )
+            n_indep = acq_window_s[label] / (math.pi * tc)
+            if n_indep < 0.5 * state["n_averages"]:
+                warnings.append(
+                    f"{label} averaging window ≈ {acq_window_s[label]:g} s holds only "
+                    f"~{max(1, round(n_indep))} independent filter outputs at TC={tc:g} s "
+                    f"— far fewer than the {state['n_averages']} samples requested, so "
+                    f"per-point noise averages down much less than √n and the reported "
+                    f"R_sem understates it. Use a shorter time constant, or raise the "
+                    f"sample count into the thousands."
+                )
         else:
-            info.append(f"Settling ≥ {settle_multiple}×TC ({recommended_settle:g} s) ✓")
+            errors.append(f"{label} time constant must be > 0 s.")
 
-        bw = 1.0 / (2 * math.pi * tc)
-        min_rate = 4 * bw
-        info.append(f"Filter noise bandwidth ≈ {bw:.3g} Hz")
-        if state["sample_rate_Hz"] < min_rate:
-            warnings.append(
-                f"Sample rate {state['sample_rate_Hz']:g} Sa/s may be low for this TC "
-                f"(want ≳ {min_rate:.1f} Sa/s)."
-            )
-
-        # Independent-average check: acquire_averaged() polls for
-        # max(0.1, 3xTC, n*1.5/rate) s, but consecutive demod outputs are
-        # correlated over ~TC, so the window only holds ~window/(pi*TC)
-        # independent samples. If that's well below n_averages, the mean
-        # barely beats one reading and the reported 1f/2f R_sem is optimistic.
-        acq_window_s = _acquire_duration_s(
-            state["n_averages"], state["sample_rate_Hz"], tc
-        )
-        n_indep = acq_window_s / (math.pi * tc)
-        if n_indep < 0.5 * state["n_averages"]:
-            warnings.append(
-                f"Averaging window ≈ {acq_window_s:g} s holds only ~{max(1, round(n_indep))} "
-                f"independent filter outputs at TC={tc:g} s — far fewer than the "
-                f"{state['n_averages']} samples requested, so per-point noise averages "
-                f"down much less than √n and the reported R_sem understates it. Use a "
-                f"shorter time constant, or raise the sample count into the thousands."
-            )
-    else:
-        errors.append("Time constant must be > 0 s.")
-
-    per_point_s = state["settling_time_s"] + _acquire_duration_s(
-        state["n_averages"], state["sample_rate_Hz"], state["time_constant_s"]
-    )
+    # 1f and 2f are acquired sequentially per point (see run_measurement) —
+    # their poll windows add, they don't overlap.
+    per_point_s = (state["settling_time_s"]
+                    + acq_window_s["1f"] + acq_window_s["2f"])
 
     # ── Sweep ────────────────────────────────────────────────────────────────
     total_points = 0
@@ -1204,15 +1214,27 @@ class MFLIDualHarmonicApp(App):
                 with Collapsible(title="Acquisition & filter settings", collapsed=True):
                     with Vertical(classes="param-grid"):
                         yield card(
-                            "Lock-in filter",
-                            field("time_constant_s", "Filter time constant (s)",
-                                  DEFAULTS["time_constant_s"],
+                            "1f lock-in filter",
+                            field("time_constant_1f_s", "Filter time constant (s)",
+                                  DEFAULTS["time_constant_1f_s"],
                                   hint="Bigger = quieter but slower & longer settling.",
                                   validators=[Number(minimum=1e-6, failure_description="must be > 0")]),
-                            select_field("order", "Filter order", list(range(1, 9)),
-                                         int(DEFAULTS["order"])),
-                            switch_field("sinc_filter", "Sinc filter (extra harmonic rejection)",
-                                         DEFAULTS["sinc_filter"]),
+                            select_field("order_1f", "Filter order", list(range(1, 9)),
+                                         int(DEFAULTS["order_1f"])),
+                            switch_field("sinc_filter_1f", "Sinc filter (extra harmonic rejection)",
+                                         DEFAULTS["sinc_filter_1f"]),
+                        )
+                        yield card(
+                            "2f lock-in filter",
+                            field("time_constant_2f_s", "Filter time constant (s)",
+                                  DEFAULTS["time_constant_2f_s"],
+                                  hint="2f bleed-through from 1f is the usual reason "
+                                       "this needs a longer TC / higher order than 1f.",
+                                  validators=[Number(minimum=1e-6, failure_description="must be > 0")]),
+                            select_field("order_2f", "Filter order", list(range(1, 9)),
+                                         int(DEFAULTS["order_2f"])),
+                            switch_field("sinc_filter_2f", "Sinc filter (extra harmonic rejection)",
+                                         DEFAULTS["sinc_filter_2f"]),
                         )
                         yield card(
                             "Input channels",
@@ -1388,13 +1410,15 @@ class MFLIDualHarmonicApp(App):
     def collect_raw(self) -> dict:
         raw: dict = {fid: self.query_one(f"#{fid}", Input).value for fid in self._all_field_ids()}
         raw["sweep_rows"] = self.query_one("#sweep_rows", TextArea).text
-        raw["sinc_filter"] = self.query_one("#sinc_filter", Switch).value
+        raw["sinc_filter_1f"] = self.query_one("#sinc_filter_1f", Switch).value
+        raw["sinc_filter_2f"] = self.query_one("#sinc_filter_2f", Switch).value
         raw["differential"] = self.query_one("#differential", Switch).value
         raw["ac_coupling"] = self.query_one("#ac_coupling", Switch).value
         raw["enable_sweep"] = self.query_one("#enable_sweep", Switch).value
         raw["enable_temperature"] = self.query_one("#enable_temperature", Switch).value
         raw["enable_phase_cal"] = self.query_one("#enable_phase_cal", Switch).value
-        raw["order"] = self.query_one("#order", Select).value
+        raw["order_1f"] = self.query_one("#order_1f", Select).value
+        raw["order_2f"] = self.query_one("#order_2f", Select).value
         sample_value = self.query_one("#sample_select", Select).value
         if sample_value not in (None, Select.BLANK, NEW_SAMPLE_SENTINEL):
             raw["sample"] = sample_value
@@ -1413,8 +1437,10 @@ class MFLIDualHarmonicApp(App):
                     pass
         if "sweep_rows" in saved:
             self.query_one("#sweep_rows", TextArea).text = str(saved["sweep_rows"])
-        if "sinc_filter" in saved:
-            self.query_one("#sinc_filter", Switch).value = bool(saved["sinc_filter"])
+        if "sinc_filter_1f" in saved:
+            self.query_one("#sinc_filter_1f", Switch).value = bool(saved["sinc_filter_1f"])
+        if "sinc_filter_2f" in saved:
+            self.query_one("#sinc_filter_2f", Switch).value = bool(saved["sinc_filter_2f"])
         if "differential" in saved:
             self.query_one("#differential", Switch).value = bool(saved["differential"])
         if "ac_coupling" in saved:
@@ -1425,9 +1451,14 @@ class MFLIDualHarmonicApp(App):
             self.query_one("#enable_temperature", Switch).value = bool(saved["enable_temperature"])
         if "enable_phase_cal" in saved:
             self.query_one("#enable_phase_cal", Switch).value = bool(saved["enable_phase_cal"])
-        if "order" in saved:
+        if "order_1f" in saved:
             try:
-                self.query_one("#order", Select).value = int(saved["order"])
+                self.query_one("#order_1f", Select).value = int(saved["order_1f"])
+            except Exception:
+                pass
+        if "order_2f" in saved:
+            try:
+                self.query_one("#order_2f", Select).value = int(saved["order_2f"])
             except Exception:
                 pass
         self._sync_data_root()
@@ -1464,13 +1495,15 @@ class MFLIDualHarmonicApp(App):
                     state[fid] = None
             else:
                 state[fid] = None
-        state["sinc_filter"] = self.query_one("#sinc_filter", Switch).value
+        state["sinc_filter_1f"] = self.query_one("#sinc_filter_1f", Switch).value
+        state["sinc_filter_2f"] = self.query_one("#sinc_filter_2f", Switch).value
         state["differential"] = self.query_one("#differential", Switch).value
         state["ac_coupling"] = self.query_one("#ac_coupling", Switch).value
         state["enable_sweep"] = self.query_one("#enable_sweep", Switch).value
         state["enable_temperature"] = self.query_one("#enable_temperature", Switch).value
         state["enable_phase_cal"] = self.query_one("#enable_phase_cal", Switch).value
-        state["order"] = int(self.query_one("#order", Select).value)
+        state["order_1f"] = int(self.query_one("#order_1f", Select).value)
+        state["order_2f"] = int(self.query_one("#order_2f", Select).value)
         sample_value = self.query_one("#sample_select", Select).value
         state["sample"] = sample_value if sample_value not in (None, Select.BLANK) else ""
 
@@ -1585,22 +1618,27 @@ class MFLIDualHarmonicApp(App):
             amplitude_V=state["amplitude_V"],
             series_R_ohm=state["series_R_ohm"],
         )
-        filt = FilterConfig(
-            time_constant_s=state["time_constant_s"],
-            order=state["order"],
-            sinc_filter=state["sinc_filter"],
+        filt_1f = FilterConfig(
+            time_constant_s=state["time_constant_1f_s"],
+            order=state["order_1f"],
+            sinc_filter=state["sinc_filter_1f"],
+        )
+        filt_2f = FilterConfig(
+            time_constant_s=state["time_constant_2f_s"],
+            order=state["order_2f"],
+            sinc_filter=state["sinc_filter_2f"],
         )
         demod1_cfg = DemodConfig(
             device=state["leader_device"], demod_index=0, harmonic=1,
             differential=state["differential"], ac_coupling=state["ac_coupling"],
             input_range_V=state["input_range_1f_V"],
-            sample_rate_Hz=state["sample_rate_Hz"], filter=filt,
+            sample_rate_Hz=state["sample_rate_Hz"], filter=filt_1f,
         )
         demod2_cfg = DemodConfig(
             device=state["follower_device"], demod_index=0, harmonic=2,
             differential=state["differential"], ac_coupling=state["ac_coupling"],
             input_range_V=state["input_range_2f_V"],
-            sample_rate_Hz=state["sample_rate_Hz"], filter=filt,
+            sample_rate_Hz=state["sample_rate_Hz"], filter=filt_2f,
         )
         run_ctx = allocate_run(
             self.data_root, state["sample"], state["device"], MEASUREMENT_TYPE,
@@ -1655,8 +1693,10 @@ class MFLIDualHarmonicApp(App):
             "excitation_frequency_Hz": state["frequency_Hz"],
             "excitation_amplitude_V": state["amplitude_V"],
             "series_R_ohm": state["series_R_ohm"],
-            "demod_time_constant_s": state["time_constant_s"],
-            "demod_order": state["order"],
+            "demod1_time_constant_s": state["time_constant_1f_s"],
+            "demod1_order": state["order_1f"],
+            "demod2_time_constant_s": state["time_constant_2f_s"],
+            "demod2_order": state["order_2f"],
             "n_averages": state["n_averages"],
             "settling_time_s": state["settling_time_s"],
         }

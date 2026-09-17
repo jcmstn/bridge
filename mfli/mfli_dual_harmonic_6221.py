@@ -582,19 +582,23 @@ def main() -> None:
                     "marker fan-out cabling before trusting any data.")
 
     # ── Filters ─────────────────────────────────────────────────────────────
-    shared_filter = FilterConfig(time_constant_s=0.3, order=4, sinc_filter=True)
+    # Independent per harmonic: the follower's 2f channel needs real stopband
+    # attenuation against 1f bleed-through (order/sinc) that the leader's 1f
+    # channel doesn't, and shouldn't inherit 2f's settling-time cost.
+    filter_1f = FilterConfig(time_constant_s=0.3, order=4, sinc_filter=True)
+    filter_2f = FilterConfig(time_constant_s=0.3, order=4, sinc_filter=True)
 
     # ── 1f demodulator (leader) ───────────────────────────────────────────────
     demod1_cfg = DemodConfig(
         device=LEADER, demod_index=0, harmonic=1, osc_index=leader_extref_cfg.osc_index,
-        input_range_V=1.0, sample_rate_Hz=857.0, filter=shared_filter,
+        input_range_V=1.0, sample_rate_Hz=857.0, filter=filter_1f,
     )
     configure_demodulator(daq, demod1_cfg)
 
     # ── 2f demodulator (follower) ─────────────────────────────────────────────
     demod2_cfg = DemodConfig(
         device=FOLLOWER, demod_index=0, harmonic=2, osc_index=follower_extref_cfg.osc_index,
-        input_range_V=1.0, sample_rate_Hz=857.0, filter=shared_filter,
+        input_range_V=1.0, sample_rate_Hz=857.0, filter=filter_2f,
     )
     configure_demodulator(daq, demod2_cfg)
 
