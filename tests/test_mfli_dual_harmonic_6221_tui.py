@@ -15,6 +15,30 @@ import mfli.mfli_dual_harmonic_6221_tui as tui
 from instruments.data_naming import ensure_sample
 
 
+def test_follower_naming_default_is_2f():
+    assert tui.follower_naming(False) == ("2f", "2f")
+
+
+def test_follower_naming_rxx_mode_is_rxx_1f():
+    assert tui.follower_naming(True) == ("rxx_1f", "R_xx (1f)")
+
+
+def test_build_plan_rxx_mode_sets_demod2_harmonic_to_1(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(tui, "_DEFAULT_DATA_DIR", tmp_path)
+    app = tui.MFLIDualHarmonic6221App()
+    app.data_root = tmp_path
+
+    plan_off = app._build_plan(_state())
+    assert plan_off.demod2_cfg.harmonic == 2
+    assert plan_off.measure_rxx is False
+
+    plan_on = app._build_plan(_state(measure_rxx=True))
+    assert plan_on.demod2_cfg.harmonic == 1
+    assert plan_on.measure_rxx is True
+    # Leader (R_xy 1f) is unaffected either way.
+    assert plan_on.demod1_cfg.harmonic == 1
+
+
 def _state(**overrides) -> dict:
     base = dict(
         leader_device="dev7885", follower_device="dev7886",
@@ -22,6 +46,7 @@ def _state(**overrides) -> dict:
         ac_visa_resource="GPIB0::20::INSTR",
         frequency_Hz=317.3, ac_compliance_V=2.0, phasemarker_line=1,
         amplitude_values="1e-7", amplitude_list=[1e-7], amplitude_parse_error=None,
+        measure_rxx=False,
         time_constant_1f_s=0.3, order_1f=4, sinc_filter_1f=True,
         time_constant_2f_s=0.3, order_2f=4, sinc_filter_2f=True,
         differential=True, ac_coupling=True,

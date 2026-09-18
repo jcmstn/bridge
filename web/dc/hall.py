@@ -39,7 +39,8 @@ from dc.dc_sweep_utils import build_segmented_sweep, parse_sweep_rows, parse_val
 from dc.dc_hall_measurement_tui import (
     DEFAULTS, NUMERIC_FIELDS, TEXT_FIELDS, OPTIONAL_NUMERIC_FIELDS, DC_HALL_DESCRIPTION,
     MEASUREMENT_TYPE, MeasurementPlan, build_header_fields, build_summary,
-    compute_filename_preview, format_si, parse_sensor_uids,
+    compute_filename_preview, format_si, parse_sensor_uids, resolve_channel_map,
+    QUANTITY_PLOT_LABELS, QUANTITY_LINESTYLES, active_quantities,
 )
 from instruments.data_naming import (
     TEST_SAMPLE, RunContext, allocate_run, finalize_index_row, make_incremental_writer,
@@ -98,7 +99,9 @@ def build_plan(state: dict) -> MeasurementPlan:
         visa_resource=state["voltmeter_visa_resource"],
         nplc=state["nplc"],
         auto_range=state["auto_range"],
+        channel=1,
     )
+    channel_map = resolve_channel_map(state["measure_rxx"], state["measure_rxy"])
     acq_cfg = AcquisitionConfig(
         settling_time_s=state["settling_time_s"],
         field_settle_tolerance_mT=state["field_settle_tolerance_mT"],
@@ -139,6 +142,8 @@ def build_plan(state: dict) -> MeasurementPlan:
         "compliance_V": state["compliance_V"],
         "n_reversals": int(state["n_reversals"]),
         "settling_time_s": state["settling_time_s"],
+        "measure_rxy": "rxy" in channel_map,
+        "measure_rxx": "rxx" in channel_map,
     }
     if state["enable_sweep"]:
         header_extra["field_sweep_rows_A"] = state["sweep_rows_parsed"]
@@ -150,6 +155,7 @@ def build_plan(state: dict) -> MeasurementPlan:
 
     return MeasurementPlan(
         src_cfg=src_cfg, volt_cfg=volt_cfg, acq_cfg=acq_cfg,
+        channel_map=channel_map, channel_settle_s=state["channel_settle_s"],
         magnet_cfg=magnet_cfg, gauss_cfg=gauss_cfg, currents_A=currents_A,
         sense_currents_A=state["sense_current_list"],
         temp_cfg=temp_cfg, sample=state["sample"], device=state["device"],
@@ -187,16 +193,22 @@ def _save_combined_png(records: list[dict], png_path: Path,
     series_ids = sorted({r.get("series_index", 0) for r in records})
     for idx in series_ids:
         rows = [r for r in records if r.get("series_index", 0) == idx]
-        label = rows[0].get("series_label")
+        series_label = rows[0].get("series_label")
         xs = [r["magnet_field_mT"] if has_field else r["point_index"] for r in rows]
-        ax.plot(xs, [r["hall_voltage_V"] for r in rows], ".-", color=cmap(idx % 10), label=label)
+        for q in ("rxy", "rxx"):
+            if not any(q in active_quantities(r) for r in rows):
+                continue
+            ys = [r.get(f"{q}_resistance_ohm") for r in rows]
+            label = f"{QUANTITY_PLOT_LABELS[q]} {series_label}" if series_label \
+                else QUANTITY_PLOT_LABELS[q]
+            ax.plot(xs, ys, marker=".", linestyle=QUANTITY_LINESTYLES[q],
+                     color=cmap(idx % 10), label=label)
 
-    ax.set_ylabel("Hall voltage (V)")
+    ax.set_ylabel("Resistance (Ω)")
     ax.set_xlabel("Magnetic field (mT)" if has_field else "Point #")
     ax.set_title("Measurement result")
     ax.grid(True, alpha=0.3)
-    if any(r.get("series_label") for r in records):
-        ax.legend(loc="best", fontsize=8)
+    ax.legend(loc="best", fontsize=8)
     fig.tight_layout()
 
     lines: list[str] = []
@@ -264,6 +276,12 @@ def page() -> None:
                              "Single value, or comma-separated list — one complete "
                              "measurement runs per value, each saved to its own file.")
 
+                with param_card("Quantities (Keithley 2182)"):
+                    switches["measure_rxy"] = bool_switch(
+                        "R_xy (transverse/Hall) — ch1", d("measure_rxy"))
+                    switches["measure_rxx"] = bool_switch(
+                        "R_xx (longitudinal) — ch2 if both on, else ch1", d("measure_rxx"))
+
                 with param_card("Field sweep (Kepco magnet)"):
                     switches["enable_sweep"] = bool_switch(
                         "Sweep magnetic field (Kepco magnet)", d("enable_sweep"))
@@ -321,6 +339,10 @@ def page() -> None:
                             "+I/-I reversal pairs averaged per point", float(d("n_reversals")), integer=True,
                             hint="Splits each point into (V(+I)-V(-I))/2 [reported R] and "
                                  "(V(+I)+V(-I))/2 [recorded, not discarded].")
+                        inputs["channel_settle_s"] = num_field(
+                            "2182 channel-mux settle (s)", float(d("channel_settle_s")),
+                            hint="Only used when both R_xy and R_xx are on — dead time after "
+                                 "switching the 2182's active channel, before reading.")
 
             # ── Tier 3: instrument wiring & safety — collapsed ──────────────
             with advanced_section("Instrument configuration & addresses", icon="settings"):
@@ -329,7 +351,7 @@ def page() -> None:
                         inputs["source_visa_resource"] = text_field(
                             "Keithley 6221 (current source)", d("source_visa_resource"))
                         inputs["voltmeter_visa_resource"] = text_field(
-                            "Keithley 2182 (Hall voltage)", d("voltmeter_visa_resource"))
+                            "Keithley 2182 (R_xy / R_xx voltage)", d("voltmeter_visa_resource"))
                         inputs["magnet_visa_resource"] = text_field(
                             "Magnet VISA resource", d("magnet_visa_resource"))
                         inputs["gaussmeter_visa_resource"] = text_field(
@@ -380,7 +402,7 @@ def page() -> None:
 
             fig = go.Figure()
             fig.update_layout(
-                xaxis_title="Magnetic field (mT)", yaxis_title="Hall voltage (V)",
+                xaxis_title="Magnetic field (mT)", yaxis_title="Resistance (Ω)",
                 margin=dict(l=60, r=20, t=30, b=50), showlegend=True,
             )
             with ui.element("div").classes("w-full").style("aspect-ratio: 1 / 1; min-height: 320px"):
@@ -391,8 +413,8 @@ def page() -> None:
                 {"name": "Isense", "label": "I_sense (A)", "field": "Isense"},
                 {"name": "I", "label": "I_magnet (A)", "field": "I"},
                 {"name": "B", "label": "B (mT)", "field": "B"},
-                {"name": "V", "label": "V_Hall (V)", "field": "V"},
-                {"name": "R", "label": "R_Hall (Ω)", "field": "R"},
+                {"name": "Rxy", "label": "R_xy (Ω)", "field": "Rxy"},
+                {"name": "Rxx", "label": "R_xx (Ω)", "field": "Rxx"},
                 {"name": "T1", "label": "T1 (K)", "field": "T1"},
                 {"name": "T2", "label": "T2 (K)", "field": "T2"},
             ]
@@ -495,15 +517,25 @@ def page() -> None:
 
     # ── Run wiring ────────────────────────────────────────────────────────
 
+    trace_index: dict[tuple, int] = {}
+
     def on_record(record: dict) -> None:
         idx = record.get("series_index", 0)
-        while len(fig.data) <= idx:
-            fig.add_trace(go.Scatter(x=[], y=[], mode="lines+markers",
-                                      name=record.get("series_label") or "Hall voltage"))
+        series_label = record.get("series_label")
         has_field = record.get("magnet_field_mT") is not None
         x = record["magnet_field_mT"] if has_field else record["point_index"]
-        fig.data[idx].x = fig.data[idx].x + (x,)
-        fig.data[idx].y = fig.data[idx].y + (record["hall_voltage_V"],)
+        for q in active_quantities(record):
+            key = (idx, q)
+            if key not in trace_index:
+                label = f"{QUANTITY_PLOT_LABELS[q]} {series_label}" if series_label \
+                    else QUANTITY_PLOT_LABELS[q]
+                dash = "solid" if q == "rxy" else "dash"
+                fig.add_trace(go.Scatter(x=[], y=[], mode="lines+markers", name=label,
+                                          line=dict(dash=dash)))
+                trace_index[key] = len(fig.data) - 1
+            ti = trace_index[key]
+            fig.data[ti].x = fig.data[ti].x + (x,)
+            fig.data[ti].y = fig.data[ti].y + (record[f"{q}_resistance_ohm"],)
         fig.update_layout(xaxis_title="Magnetic field (mT)" if has_field else "Point #")
         plot.update()
         table.rows.append({
@@ -511,8 +543,8 @@ def page() -> None:
             "Isense": f"{record['sense_current_A']:.4g}" if record.get("sense_current_A") is not None else "—",
             "I": f"{record['magnet_current_A']:.4f}" if record.get("magnet_current_A") is not None else "—",
             "B": f"{record['magnet_field_mT']:.2f}" if record.get("magnet_field_mT") is not None else "—",
-            "V": f"{record['hall_voltage_V']:.4e}",
-            "R": f"{record['hall_resistance_ohm']:.5g}",
+            "Rxy": f"{record['rxy_resistance_ohm']:.5g}" if "rxy" in active_quantities(record) else "—",
+            "Rxx": f"{record['rxx_resistance_ohm']:.5g}" if "rxx" in active_quantities(record) else "—",
             "T1": f"{record['temperature_1_K']:.3f}" if record.get("temperature_1_K") is not None else "—",
             "T2": f"{record['temperature_2_K']:.3f}" if record.get("temperature_2_K") is not None else "—",
         })
@@ -575,7 +607,8 @@ def page() -> None:
             try:
                 cb.on_status("Connecting to Keithley 6221 & 2182 …")
                 source = connect_source(plan.src_cfg)
-                voltmeter = connect_voltmeter(plan.volt_cfg)
+                extra_channels = (2,) if len(plan.channel_map) == 2 else ()
+                voltmeter = connect_voltmeter(plan.volt_cfg, extra_channels=extra_channels)
 
                 if plan.temp_cfg is not None:
                     cb.on_status("Connecting to MercuryiTC (temperature) …")
@@ -646,6 +679,8 @@ def page() -> None:
                             temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg,
                             field_theta_deg=plan.field_theta_deg, field_phi_deg=plan.field_phi_deg,
                             write_csv=write_csv,
+                            channel_map=plan.channel_map,
+                            channel_settle_s=plan.channel_settle_s,
                         )
                     except Exception as exc:
                         iter_error = exc
@@ -729,6 +764,7 @@ def page() -> None:
         controller["c"] = rc
 
         fig.data = []
+        trace_index.clear()
         plot.update()
         table.rows.clear()
         table.update()

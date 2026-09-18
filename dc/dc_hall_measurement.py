@@ -11,16 +11,24 @@ Wiring
       Output (current) ──▶ sample ── common ground
 
     Keithley 2182 (nanovoltmeter)
-      Channel 1 (differential) ──▶ across the transverse (Hall) voltage
-      leads of the sample
+      Channel 1 (differential) ──▶ across the transverse (Hall, R_xy)
+      voltage leads of the sample
+      Channel 2 (differential, optional) ──▶ across the longitudinal
+      (R_xx) voltage leads — only wire this up if `measure_rxx` is on;
+      channel 2's LO is tied to channel 1's LO internally (2182 hardware),
+      so only combine both channels when the R_xx and R_xy probe pairs
+      genuinely share a physical contact — verify with a multimeter.
 
 Method
 ------
 Sources a fixed DC sense current with the 6221 and reads the transverse
-(Hall) voltage with the 2182, reversing the current (+I / -I) at each field
-point and decomposing the voltage into odd (the reported Hall voltage) and
-even parts — see docs/current-reversal.md for why both are recorded
-(columns hall_voltage_even_V / hall_voltage_even_sem_V).
+(R_xy) and/or longitudinal (R_xx) voltage with the 2182 — whichever is
+enabled via `channel_map` (see `run_measurement`) — reversing the current
+(+I / -I) at each field point and decomposing each channel's voltage into
+odd (the reported resistance) and even parts — see
+docs/current-reversal.md for why both are recorded
+(columns rxy_voltage_even_V / rxx_voltage_even_V etc). Both quantities'
+columns are always written; whichever wasn't measured is left NaN.
 
 Magnetic field sweep
 --------------------
@@ -161,10 +169,12 @@ def run_measurement(
     field_theta_deg: Optional[float] = None,
     field_phi_deg: Optional[float] = None,
     write_csv: Optional[Callable[[List[dict]], None]] = None,
+    channel_map: Optional[dict] = None,
+    channel_settle_s: float = 0.0,
 ) -> pd.DataFrame:
     """
-    Iterate over `points`, acquire the reversal-averaged Hall voltage at
-    each, log to CSV.
+    Iterate over `points`, acquire the reversal-averaged voltage at each,
+    log to CSV.
 
     Returns a DataFrame of all recorded data. The CSV is written after
     every point so a crash never loses data.
@@ -204,7 +214,20 @@ def run_measurement(
     the TUI/web layer to write the sample-convention header alongside the
     data. Omit it (the default) to keep writing a plain headerless CSV to
     acq_cfg.output_file, unchanged from before.
+
+    `channel_map`, e.g. `{"rxy": 1, "rxx": 2}`, says which 2182 channel(s)
+    to read and what each one is labeled in the output columns
+    (`rxy_*`/`rxx_*`). Defaults to `{"rxy": 1}` — today's single-channel
+    R_xy-only behavior, unchanged. Passing both keys reads channels 1 and 2
+    together (see `instruments.keithley6221.acquire_reversal_averaged_voltage`);
+    passing only `{"rxx": 1}` reads R_xx alone on channel 1. Whichever of
+    rxy/rxx isn't in `channel_map` gets NaN-filled columns rather than
+    being omitted, so every row of a given run has the same column set.
+    `channel_settle_s` is the 2182 channel-mux settle time, only relevant
+    when `channel_map` names two channels.
     """
+    channel_map = channel_map or {"rxy": 1}
+    channels = tuple(sorted(set(channel_map.values())))
     records: List[dict] = []
 
     for idx, pt in enumerate(points):
@@ -236,16 +259,22 @@ def run_measurement(
             field_mT = read_field_mT(gaussmeter, gauss_cfg)
             log.info("   B=%.4f mT (measured)", field_mT)
 
-        # ── 4. Acquire reversal-averaged Hall voltage ───────────────────────
+        # ── 4. Acquire reversal-averaged voltage(s) ─────────────────────────
         # source_delay_s is slept after each +I/-I flip before the 2182 is
         # read -- a bare source_current write does not itself wait for the
         # reversed current to settle (same as dc_spin_valve.py).
         hv = acquire_reversal_averaged_voltage(
             source, voltmeter, src_cfg.sense_current_A, acq_cfg.n_reversals,
-            stop_event, source_delay_s=src_cfg.source_delay_s)
-        r_hall = hv["mean"] / src_cfg.sense_current_A
-        log.info("   V_Hall=%.4e V  SEM=%.2e V  R_Hall=%.5g Ω  V_even=%.4e V  (n=%d reversals)",
-                  hv["mean"], hv["sem"], r_hall, hv["even_mean"], hv["n_reversals"])
+            stop_event, source_delay_s=src_cfg.source_delay_s,
+            channels=channels, channel_settle_s=channel_settle_s)
+        n_reversals_used = hv["n_reversals"]
+        quantities: dict = {}
+        for label, ch in channel_map.items():
+            q = hv if len(channels) == 1 else hv[ch]
+            r_ohm = q["mean"] / src_cfg.sense_current_A
+            quantities[label] = {**q, "resistance_ohm": r_ohm}
+            log.info("   %s: V=%.4e V  SEM=%.2e V  R=%.5g Ω  V_even=%.4e V",
+                      label, q["mean"], q["sem"], r_ohm, q["even_mean"])
 
         # ── 4b. Read temperature (MercuryiTC, optional) ─────────────────────
         temp_1_K, temp_2_K = read_temperature(temp_ctrl, temp_cfg) \
@@ -262,13 +291,15 @@ def run_measurement(
             "temperature_1_K":  temp_1_K,
             "temperature_2_K":  temp_2_K,
             "sense_current_A":  src_cfg.sense_current_A,
-            "hall_voltage_V":   hv["mean"],
-            "hall_voltage_sem_V": hv["sem"],
-            "hall_voltage_even_V":     hv["even_mean"],
-            "hall_voltage_even_sem_V": hv["even_sem"],
-            "hall_resistance_ohm": r_hall,
-            "n_reversals":      hv["n_reversals"],
+            "n_reversals":      n_reversals_used,
         }
+        for label in ("rxy", "rxx"):
+            q = quantities.get(label)
+            record[f"{label}_voltage_V"] = q["mean"] if q else float("nan")
+            record[f"{label}_voltage_sem_V"] = q["sem"] if q else float("nan")
+            record[f"{label}_voltage_even_V"] = q["even_mean"] if q else float("nan")
+            record[f"{label}_voltage_even_sem_V"] = q["even_sem"] if q else float("nan")
+            record[f"{label}_resistance_ohm"] = q["resistance_ohm"] if q else float("nan")
         if isinstance(settle_info, dict):
             record.update({
                 "current_settled":  settle_info.get("current_settled"),

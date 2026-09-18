@@ -21,6 +21,7 @@ def _state(data_dir: Path, **overrides) -> dict:
         ac_visa_resource="GPIB0::20::INSTR",
         frequency_Hz=317.3, ac_compliance_V=2.0, phasemarker_line=1,
         amplitude_values="1e-7", amplitude_list=[1e-7], amplitude_parse_error=None,
+        measure_rxx=False,
         time_constant_1f_s=0.3, order_1f=4, sinc_filter_1f=True,
         time_constant_2f_s=0.3, order_2f=4, sinc_filter_2f=True,
         differential=True, ac_coupling=True,

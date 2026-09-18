@@ -38,15 +38,33 @@ class VoltmeterConfig:
     channel: int       = 1      # 2182 input channel (1 or 2)
 
 
-def connect_voltmeter(cfg: VoltmeterConfig) -> Keithley2182:
-    """Open and configure the Keithley 2182 for a differential voltage readout."""
-    if cfg.channel not in (1, 2):
-        raise ValueError(f"Keithley 2182 channel must be 1 or 2, got {cfg.channel}")
+def connect_voltmeter(cfg: VoltmeterConfig, extra_channels: tuple = ()) -> Keithley2182:
+    """
+    Open and configure the Keithley 2182 for a differential voltage readout
+    on `cfg.channel`, plus any `extra_channels` on the same instrument (e.g.
+    `extra_channels=(2,)` to also read R_xx on ch2 alongside R_xy on ch1).
+
+    Channel 2's LO is internally tied to Channel 1's LO on this instrument
+    (2182 hardware, not configurable) — only combine ch1+ch2 reads when the
+    two probe pairs genuinely share a physical contact; verify with a
+    multimeter before trusting it. Channel 2 also defaults to
+    `voltage_offset_enabled=True` (relative-to-ch1) on `*RST` — this is
+    explicitly turned off here so ch2 reads an absolute voltage like ch1.
+    """
+    channels = (cfg.channel, *extra_channels)
+    for ch in channels:
+        if ch not in (1, 2):
+            raise ValueError(f"Keithley 2182 channel must be 1 or 2, got {ch}")
     voltmeter = Keithley2182(cfg.visa_resource)
     voltmeter.reset()
-    getattr(voltmeter, f"ch_{cfg.channel}").setup_voltage(auto_range=cfg.auto_range, nplc=cfg.nplc)
-    log.info("Keithley 2182 connected: %s  ch=%d  NPLC=%.1f",
-             cfg.visa_resource, cfg.channel, cfg.nplc)
+    for ch in channels:
+        channel = getattr(voltmeter, f"ch_{ch}")
+        channel.setup_voltage(auto_range=cfg.auto_range, nplc=cfg.nplc)
+        if ch == 2:
+            channel.voltage_offset_enabled = False
+    voltmeter.active_channel = cfg.channel
+    log.info("Keithley 2182 connected: %s  ch=%s  NPLC=%.1f",
+             cfg.visa_resource, channels, cfg.nplc)
     return voltmeter
 
 

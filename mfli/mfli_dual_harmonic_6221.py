@@ -31,8 +31,15 @@ Wiring
     either default) ──▶ split (BNC T or power divider, EQUAL cable lengths)
     to AUX IN 1 on **BOTH** MFLIs.
 
-    Leader MFLI  Signal Input 1 (differential) ──▶ demod 1f
-    Follower MFLI  Signal Input 1 (differential) ──▶ demod 2f
+    Leader MFLI  Signal Input 1 (differential) ──▶ demod 1f (R_xy)
+    Follower MFLI  Signal Input 1 (differential) ──▶ demod 2f (R_xy), OR,
+      with `measure_rxx` on, the R_xx voltage leads instead ──▶ demod 1f
+      (R_xx) — R_xx and R_xy's 2f can't be read at once with only two
+      physical MFLIs (each needs its own Signal Input for an independent
+      input range), so `measure_rxx` trades one for the other: move the
+      follower's Signal Input BNC by hand between the R_xy and R_xx probe
+      pairs depending on which mode you're running. The leader always
+      reads R_xy 1f either way.
 
     MDS cabling (both units, same as mfli_dual_harmonic.py):
       Leader Ref Out       ───BNC───▶ Follower Ref In
@@ -342,6 +349,7 @@ def build_run_metadata(
     demod2_cfg: DemodConfig,
     geometry_cfg: Optional[SampleGeometryConfig] = None,
     demod2_phase_null_1f_deg: Optional[float] = None,
+    measure_rxx: bool = False,
 ) -> dict:
     """Same shape/purpose as mfli_dual_harmonic.build_run_metadata(), with
     the excitation terms sourced from the 6221 instead: amplitude_A is
@@ -350,12 +358,17 @@ def build_run_metadata(
     live from the leader's ExtRef-locked oscillator (the PLL's true tracked
     frequency, not the 6221's commanded value — matches the convention
     already used by sot_pulsed_switching_6221.py for the same reason).
+
+    `measure_rxx` is recorded verbatim so a downstream analysis script can
+    tell what the follower's columns mean (R_xy 2f vs R_xx 1f) without
+    re-deriving it from which column prefix happens to be present.
     """
     geometry_cfg = geometry_cfg or SampleGeometryConfig()
     I_peak_A = ac_cfg.amplitude_A
     excitation_frequency_Hz = daq.getDouble(
         f"/{leader_extref_cfg.device}/oscs/{leader_extref_cfg.osc_index}/freq")
     return {
+        "measure_rxx": measure_rxx,
         "demod2_phase_null_1f_deg": demod2_phase_null_1f_deg,
         "excitation_frequency_Hz":       excitation_frequency_Hz,
         "excitation_current_A_peak":     I_peak_A,
@@ -405,9 +418,10 @@ def run_measurement(
     demod2_phase_null_1f_deg: Optional[float] = None,
     mds=None,
     write_csv: Optional[Callable[[List[dict]], None]] = None,
+    demod2_label: str = "2f",
 ) -> pd.DataFrame:
     """Same loop shape as mfli_dual_harmonic.run_measurement(): iterate
-    `points`, acquire 1f (leader) + 2f (follower) at each, log to CSV,
+    `points`, acquire 1f (leader) + demod2 (follower) at each, log to CSV,
     return a DataFrame. The 6221 (`source`, connected by the caller via
     connect_ac_source()) is not touched here — it is not re-armed per
     point, since the AC excitation runs continuously for the whole sweep
@@ -419,8 +433,16 @@ def run_measurement(
     independent way this measurement can silently go bad (see the module
     docstring), so it gets the same "log + tag the row, don't abort" policy
     MDS already has.
+
+    `demod2_label` names the follower's column prefix — `"2f"` (default,
+    today's R_xy 2f) or e.g. `"rxx_1f"` when the caller has set
+    `demod2_cfg.harmonic=1` and physically rewired the follower's Signal
+    Input to the R_xx probe pair (see the module docstring). Whether the
+    caller passed a non-"2f" label is what `measure_rxx` in the recorded
+    run metadata reflects.
     """
     _check_ac_safety(ac_cfg)
+    measure_rxx = demod2_label != "2f"
     records: List[dict] = []
 
     for idx, pt in enumerate(points):
@@ -459,16 +481,16 @@ def run_measurement(
         log.info("   Settling %.2f s ...", settle)
         time.sleep(settle)
 
-        # ── 3. Acquire 1f + 2f together (one poll window, not two) ──────────
+        # ── 3. Acquire 1f + demod2 together (one poll window, not two) ──────
         d1, d2 = acquire_averaged_pair(daq, demod1_cfg, demod2_cfg, acq_cfg.n_averages)
         log.info("   1f  R=%.4e V  θ=%.2f°  SEM_R=%.2e V  (n=%d)",
                  d1["r_mean"], d1["theta_mean"], d1["r_sem"], d1["n_samples"])
         if d1["overload"]:
             log.warning("   1f input is OVERLOADED — this reading is not trustworthy.")
-        log.info("   2f  R=%.4e V  θ=%.2f°  SEM_R=%.2e V  (n=%d)",
-                 d2["r_mean"], d2["theta_mean"], d2["r_sem"], d2["n_samples"])
+        log.info("   %s  R=%.4e V  θ=%.2f°  SEM_R=%.2e V  (n=%d)",
+                 demod2_label, d2["r_mean"], d2["theta_mean"], d2["r_sem"], d2["n_samples"])
         if d2["overload"]:
-            log.warning("   2f input is OVERLOADED — this reading is not trustworthy.")
+            log.warning("   %s input is OVERLOADED — this reading is not trustworthy.", demod2_label)
 
         # ── 4b. Measure field (Lake Shore 475 Gaussmeter) ───────────────────
         field_mT = None
@@ -482,7 +504,8 @@ def run_measurement(
 
         # ── 4d. Run metadata (excitation, filters, phases, geometry) ────────
         run_meta = build_run_metadata(daq, ac_cfg, leader_extref_cfg, demod1_cfg,
-                                      demod2_cfg, geometry_cfg, demod2_phase_null_1f_deg)
+                                      demod2_cfg, geometry_cfg, demod2_phase_null_1f_deg,
+                                      measure_rxx=measure_rxx)
 
         # ── 5. Build record ────────────────────────────────────────────────
         record: dict = {
@@ -505,14 +528,14 @@ def run_measurement(
             "1f_R_sem_V":  d1["r_sem"],
             "1f_n_samples":d1["n_samples"],
             "1f_overload": d1["overload"],
-            # ── 2f ─────────────────────────────────────────────────────────
-            "2f_X_V":      d2["x_mean"],
-            "2f_Y_V":      d2["y_mean"],
-            "2f_R_V":      d2["r_mean"],
-            "2f_theta_deg":d2["theta_mean"],
-            "2f_R_sem_V":  d2["r_sem"],
-            "2f_n_samples":d2["n_samples"],
-            "2f_overload": d2["overload"],
+            # ── demod2 (R_xy 2f, or R_xx 1f when measure_rxx is on) ─────────
+            f"{demod2_label}_X_V":      d2["x_mean"],
+            f"{demod2_label}_Y_V":      d2["y_mean"],
+            f"{demod2_label}_R_V":      d2["r_mean"],
+            f"{demod2_label}_theta_deg":d2["theta_mean"],
+            f"{demod2_label}_R_sem_V":  d2["r_sem"],
+            f"{demod2_label}_n_samples":d2["n_samples"],
+            f"{demod2_label}_overload": d2["overload"],
             # ── Run metadata (excitation/demod/geometry — see build_run_metadata) ──
             **run_meta,
         }

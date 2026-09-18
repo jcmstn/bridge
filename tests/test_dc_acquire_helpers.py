@@ -21,6 +21,7 @@ class _FakeVoltmeter:
     def __init__(self, values):
         self._values = list(values)
         self._k = 0
+        self.active_channel = 1
 
     @property
     def voltage(self):
@@ -105,6 +106,63 @@ def test_reversal_no_sleep_when_source_delay_zero(monkeypatch):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# acquire_reversal_averaged_voltage — two-channel (R_xy + R_xx) interleave
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _FakeVoltmeterChannelLog(_FakeVoltmeter):
+    """Same as _FakeVoltmeter, but records every active_channel switch --
+    lets a test assert the +I:ch1,ch2 / -I:ch1,ch2 interleave order."""
+    def __init__(self, values):
+        super().__init__(values)
+        self.channel_log: list[int] = []
+
+    def __setattr__(self, name, value):
+        if name == "active_channel":
+            self.__dict__.setdefault("channel_log", []).append(value)
+        super().__setattr__(name, value)
+
+
+def test_reversal_single_channel_default_never_touches_active_channel(monkeypatch):
+    """channels=(1,) (the default) must behave exactly as before -- no
+    active_channel switching at all, for the three unchanged single
+    -channel callers (dc_spin_valve, sot_pulsed_switching, dc_hall)."""
+    monkeypatch.setattr(k6221.time, "sleep", lambda *_: None)
+    vm = _FakeVoltmeterChannelLog([1.0, -1.0])
+    out = acquire_reversal_averaged_voltage(
+        _FakeSource(), vm, sense_current_A=1e-3, n_reversals=1)
+    assert vm.channel_log == []
+    assert "mean" in out and "sem" in out          # flat single-channel shape
+
+
+def test_reversal_two_channels_interleaves_within_each_polarity(monkeypatch):
+    monkeypatch.setattr(k6221.time, "sleep", lambda *_: None)
+    # One rep: +I -> read ch1, ch2; -I -> read ch1, ch2.
+    # ch1: odd=5 (V=7/-3), ch2: odd=1 (V=1/-1).
+    vm = _FakeVoltmeterChannelLog([7.0, 1.0, -3.0, -1.0])
+    out = acquire_reversal_averaged_voltage(
+        _FakeSource(), vm, sense_current_A=1e-3, n_reversals=1,
+        channels=(1, 2))
+    assert vm.channel_log == [1, 2, 1, 2]
+    assert out[1]["mean"] == 5.0
+    assert out[1]["even_mean"] == 2.0
+    assert out[2]["mean"] == 1.0
+    assert out[2]["even_mean"] == 0.0
+    assert out["n_reversals"] == 1
+
+
+def test_reversal_two_channels_sleeps_channel_settle_after_each_switch(monkeypatch):
+    slept: list[float] = []
+    monkeypatch.setattr(k6221.time, "sleep", lambda s: slept.append(s))
+    vm = _FakeVoltmeterChannelLog([1.0, 1.0, -1.0, -1.0])
+    acquire_reversal_averaged_voltage(
+        _FakeSource(), vm, sense_current_A=1e-3, n_reversals=1,
+        channels=(1, 2), channel_settle_s=0.01)
+    # 4 channel-mux settles (one per read) -- source_delay_s defaults to 0
+    # here, so every slept call is the channel-settle one.
+    assert slept == [0.01, 0.01, 0.01, 0.01]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # dc_hall_measurement.run_measurement forwards src_cfg.source_delay_s
 # (regression: it used to omit it, so Hall reversals took no settle at all)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -115,7 +173,7 @@ def test_hall_run_measurement_forwards_source_delay(tmp_path, monkeypatch):
     captured: dict = {}
 
     def fake_acquire(source, voltmeter, sense_current_A, n_reversals,
-                     stop_event=None, source_delay_s=0.0):
+                     stop_event=None, source_delay_s=0.0, **kwargs):
         captured["source_delay_s"] = source_delay_s
         captured["n_reversals"] = n_reversals
         return {"mean": 1e-6, "sem": 1e-9,

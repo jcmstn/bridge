@@ -101,12 +101,12 @@ from instruments.tui_sample_picker import (
 )
 
 DC_HALL_DESCRIPTION = (
-    "Sources a fixed DC sense current with a Keithley 6221 and reads the "
-    "transverse (Hall) voltage with a Keithley 2182, reversing the current "
-    "each rep to cancel thermal-EMF offsets. Optionally sweeps a Kepco "
-    "electromagnet's field (bidirectionally, for hysteresis) with the "
-    "field measured live via a Lake Shore 475 Gaussmeter at every point — "
-    "the standard DC (non-lock-in) Hall-effect measurement."
+    "Sources a fixed DC sense current with a Keithley 6221 and reads R_xy "
+    "(transverse/Hall) and/or R_xx (longitudinal) voltage with a Keithley "
+    "2182's two channels, reversing the current each rep to cancel "
+    "thermal-EMF offsets. Optionally sweeps a Kepco electromagnet's field "
+    "(bidirectionally, for hysteresis) with the field measured live via a "
+    "Lake Shore 475 Gaussmeter at every point."
 )
 
 log = logging.getLogger("dc_hall_measurement_tui")
@@ -137,6 +137,9 @@ DEFAULTS: dict = {
     "source_delay_s": "0.05",
     "nplc": "5",
     "auto_range": True,
+    "measure_rxy": True,
+    "measure_rxx": False,
+    "channel_settle_s": "0.02",
     "settling_time_s": "1.0",
     "field_settle_tolerance_mT": "0.02",
     "n_reversals": "5",
@@ -166,6 +169,7 @@ NUMERIC_FIELDS: dict = {
     "compliance_V": float,
     "source_delay_s": float,
     "nplc": float,
+    "channel_settle_s": float,
     "settling_time_s": float,
     "field_settle_tolerance_mT": float,
     "n_reversals": int,
@@ -196,6 +200,20 @@ def parse_sensor_uids(raw: str) -> tuple:
     """Parse a comma-separated "MB1.T1, DB5.T1" field into a 1- or 2-tuple of UIDs."""
     uids = [u.strip() for u in raw.split(",") if u.strip()]
     return tuple(uids[:2])
+
+
+def resolve_channel_map(measure_rxx: bool, measure_rxy: bool) -> dict:
+    """Which 2182 channel each enabled quantity reads. Both on: R_xy keeps
+    channel 1 (today's sole-channel meaning), R_xx gets channel 2. Only
+    one on: that one uses channel 1, identical to today's wiring/behavior
+    when the other is off. Neither on: empty dict (build_summary errors)."""
+    if measure_rxx and measure_rxy:
+        return {"rxy": 1, "rxx": 2}
+    if measure_rxx:
+        return {"rxx": 1}
+    if measure_rxy:
+        return {"rxy": 1}
+    return {}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -238,6 +256,8 @@ class MeasurementPlan:
     src_cfg: SourceConfig
     volt_cfg: VoltmeterConfig
     acq_cfg: AcquisitionConfig
+    channel_map: dict
+    channel_settle_s: float
     magnet_cfg: Optional[MagnetConfig]
     gauss_cfg: Optional[GaussmeterConfig]
     currents_A: Optional[np.ndarray]
@@ -377,6 +397,22 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     if state["source_visa_resource"] == state["voltmeter_visa_resource"]:
         errors.append("Source (6221) and voltmeter (2182) VISA resources must be different.")
 
+    # ── Channel toggle (R_xy / R_xx) ────────────────────────────────────────
+    channel_map = resolve_channel_map(state["measure_rxx"], state["measure_rxy"])
+    if not channel_map:
+        errors.append("Enable at least one of R_xy or R_xx.")
+    elif len(channel_map) == 2:
+        info.append("R_xy on ch1, R_xx on ch2 — 2182 channel 2's LO is tied "
+                     "to channel 1's internally; only safe if the R_xy and "
+                     "R_xx probe pairs share a physical contact. Verify "
+                     "with a multimeter before the first run.")
+        info.append("Both channels read per point — roughly doubles the "
+                     "per-point acquisition time.")
+    else:
+        label = next(iter(channel_map))
+        info.append(f"{label.upper()} only, on channel 1 (identical wiring/timing "
+                     "to a single-channel run).")
+
     # ── Source ───────────────────────────────────────────────────────────────
     if state.get("sense_current_parse_error"):
         errors.append(f"Sense current list: {state['sense_current_parse_error']}")
@@ -400,7 +436,9 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     read_s = _reading_duration_s(state["nplc"])
     info.append(f"Estimated 2182 reading time ≈ {read_s * 1000:.0f} ms (NPLC={state['nplc']:g})")
 
-    per_point_s = state["settling_time_s"] + state["n_reversals"] * 2 * read_s
+    n_channels = max(1, len(channel_map))
+    per_read_s = read_s + (state["channel_settle_s"] if n_channels > 1 else 0.0)
+    per_point_s = state["settling_time_s"] + state["n_reversals"] * 2 * n_channels * per_read_s
 
     # ── Sweep ────────────────────────────────────────────────────────────────
     total_points = 0
@@ -485,6 +523,21 @@ def compute_filename_preview(state: dict) -> Optional[str]:
 # process itself (see _save_measurement_png), so it doesn't depend on this
 # window still being open when the run finishes.
 
+QUANTITY_PLOT_LABELS = {"rxy": "R_xy", "rxx": "R_xx"}
+QUANTITY_LINESTYLES = {"rxy": "-", "rxx": "--"}
+
+
+def active_quantities(record: dict) -> list:
+    """Which of rxy/rxx have a real (non-NaN) resistance in this record —
+    see dc_hall_measurement.run_measurement's always-both-columns convention."""
+    out = []
+    for q in ("rxy", "rxx"):
+        v = record.get(f"{q}_resistance_ohm")
+        if v is not None and not np.isnan(v):
+            out.append(q)
+    return out
+
+
 def _live_plot_worker(queue: "mp.Queue", has_field_sweep: bool) -> None:
     import matplotlib.pyplot as plt
     from matplotlib.animation import FuncAnimation
@@ -494,18 +547,18 @@ def _live_plot_worker(queue: "mp.Queue", has_field_sweep: bool) -> None:
         fig.canvas.manager.set_window_title("DC Hall live measurement")
     except Exception:
         pass
-    ax.set_ylabel("Hall voltage (V)")
+    ax.set_ylabel("Resistance (Ω)")
     ax.set_xlabel("Magnetic field (mT)" if has_field_sweep else "Point #")
     ax.set_title("Live measurement")
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
 
     cmap = plt.get_cmap("tab10")
-    lines: dict[int, "plt.Line2D"] = {}
-    series_data: dict[int, tuple[list, list]] = {}
+    lines: dict[tuple[int, str], "plt.Line2D"] = {}
+    series_data: dict[tuple[int, str], tuple[list, list]] = {}
 
     def _drain(_frame=None):
-        updated: set[int] = set()
+        updated: set[tuple[int, str]] = set()
         new_series = False
         while True:
             try:
@@ -513,22 +566,27 @@ def _live_plot_worker(queue: "mp.Queue", has_field_sweep: bool) -> None:
             except Exception:
                 break
             idx = record.get("series_index", 0)
-            if idx not in lines:
-                label = record.get("series_label")
-                (line,) = ax.plot([], [], "o-", color=cmap(idx % 10), label=label)
-                lines[idx] = line
-                series_data[idx] = ([], [])
-                new_series = True
-            xs, ys = series_data[idx]
-            x = record.get("magnet_field_mT") if has_field_sweep else None
-            xs.append(x if x is not None else record["point_index"])
-            ys.append(record["hall_voltage_V"])
-            updated.add(idx)
+            series_label = record.get("series_label")
+            for q in active_quantities(record):
+                key = (idx, q)
+                if key not in lines:
+                    label = f"{QUANTITY_PLOT_LABELS[q]} {series_label}" if series_label \
+                        else QUANTITY_PLOT_LABELS[q]
+                    (line,) = ax.plot([], [], "o", linestyle=QUANTITY_LINESTYLES[q],
+                                       color=cmap(idx % 10), label=label)
+                    lines[key] = line
+                    series_data[key] = ([], [])
+                    new_series = True
+                xs, ys = series_data[key]
+                x = record.get("magnet_field_mT") if has_field_sweep else None
+                xs.append(x if x is not None else record["point_index"])
+                ys.append(record[f"{q}_resistance_ohm"])
+                updated.add(key)
         if updated:
-            for idx in updated:
-                xs, ys = series_data[idx]
-                lines[idx].set_data(xs, ys)
-            if new_series and any(l.get_label() and not l.get_label().startswith("_") for l in lines.values()):
+            for key in updated:
+                xs, ys = series_data[key]
+                lines[key].set_data(xs, ys)
+            if new_series:
                 ax.legend(loc="best", fontsize=8)
             ax.relim()
             ax.autoscale_view()
@@ -541,9 +599,10 @@ def _live_plot_worker(queue: "mp.Queue", has_field_sweep: bool) -> None:
 
 def _save_measurement_png(records: list[dict], png_path: Path,
                            plan: Optional["MeasurementPlan"] = None, comment: str = "") -> None:
-    """Save a static Hall-voltage-vs-field PNG to proc/, from whatever
-    points were actually collected (including an aborted/partial run),
-    one colored trace per sense current when more than one was used.
+    """Save a static resistance-vs-field PNG to proc/, from whatever
+    points were actually collected (including an aborted/partial run) —
+    one colored trace per sense current when more than one was used,
+    solid for R_xy / dashed for R_xx when both were measured.
 
     `plan`/`comment` drive a small "at a glance" text annotation (field
     direction, a single fixed sense current, the operator's comment) for
@@ -565,16 +624,22 @@ def _save_measurement_png(records: list[dict], png_path: Path,
     series_ids = sorted({r.get("series_index", 0) for r in records})
     for idx in series_ids:
         rows = [r for r in records if r.get("series_index", 0) == idx]
-        label = rows[0].get("series_label")
+        series_label = rows[0].get("series_label")
         xs = [r["magnet_field_mT"] if has_field else r["point_index"] for r in rows]
-        ax.plot(xs, [r["hall_voltage_V"] for r in rows], ".-", color=cmap(idx % 10), label=label)
+        for q in ("rxy", "rxx"):
+            ys = [r.get(f"{q}_resistance_ohm") for r in rows]
+            if all(y is None or np.isnan(y) for y in ys):
+                continue
+            label = f"{QUANTITY_PLOT_LABELS[q]} {series_label}" if series_label \
+                else QUANTITY_PLOT_LABELS[q]
+            ax.plot(xs, ys, marker=".", linestyle=QUANTITY_LINESTYLES[q],
+                     color=cmap(idx % 10), label=label)
 
-    ax.set_ylabel("Hall voltage (V)")
+    ax.set_ylabel("Resistance (Ω)")
     ax.set_xlabel("Magnetic field (mT)" if has_field else "Point #")
     ax.set_title("Measurement result")
     ax.grid(True, alpha=0.3)
-    if any(r.get("series_label") for r in records):
-        ax.legend(loc="best", fontsize=8)
+    ax.legend(loc="best", fontsize=8)
     fig.tight_layout()
 
     lines: list[str] = []
@@ -668,7 +733,7 @@ class RunScreen(Screen):
 
     def on_mount(self) -> None:
         self.query_one("#results_table", DataTable).add_columns(
-            "#", "I_sense (A)", "I_magnet (A)", "B (mT)", "V_Hall (V)", "R_Hall (Ω)", "n_rev",
+            "#", "I_sense (A)", "I_magnet (A)", "B (mT)", "R_xy (Ω)", "R_xx (Ω)", "n_rev",
             "T1 (K)", "T2 (K)",
         )
         self._log_handler = _LogRelay(self)
@@ -715,6 +780,8 @@ class RunScreen(Screen):
         Isense = record.get("sense_current_A")
         I = record.get("magnet_current_A")
         B = record.get("magnet_field_mT")
+        Rxy = record.get("rxy_resistance_ohm")
+        Rxx = record.get("rxx_resistance_ohm")
         T1 = record.get("temperature_1_K")
         T2 = record.get("temperature_2_K")
         table.add_row(
@@ -722,8 +789,8 @@ class RunScreen(Screen):
             f"{Isense:.4g}" if Isense is not None else "—",
             f"{I:.4f}" if I is not None else "—",
             f"{B:.2f}" if B is not None else "—",
-            f"{record['hall_voltage_V']:.4e}",
-            f"{record['hall_resistance_ohm']:.5g}",
+            f"{Rxy:.5g}" if Rxy is not None and not np.isnan(Rxy) else "—",
+            f"{Rxx:.5g}" if Rxx is not None and not np.isnan(Rxx) else "—",
             str(record["n_reversals"]),
             f"{T1:.3f}" if T1 is not None else "—",
             f"{T2:.3f}" if T2 is not None else "—",
@@ -817,7 +884,8 @@ class RunScreen(Screen):
         try:
             self._set_status_threadsafe("Connecting to Keithley 6221 & 2182 …")
             source = connect_source(plan.src_cfg)
-            voltmeter = connect_voltmeter(plan.volt_cfg)
+            extra_channels = (2,) if len(plan.channel_map) == 2 else ()
+            voltmeter = connect_voltmeter(plan.volt_cfg, extra_channels=extra_channels)
 
             if plan.temp_cfg is not None:
                 self._set_status_threadsafe("Connecting to MercuryiTC (temperature) …")
@@ -884,6 +952,8 @@ class RunScreen(Screen):
                         field_theta_deg=plan.field_theta_deg,
                         field_phi_deg=plan.field_phi_deg,
                         write_csv=write_csv,
+                        channel_map=plan.channel_map,
+                        channel_settle_s=plan.channel_settle_s,
                     )
                 except Exception as exc:
                     iter_error = exc
@@ -1031,6 +1101,13 @@ class DCHallMeasurementApp(App):
                                    "measurement runs per value, each saved to its own file."),
                     )
                     yield card(
+                        "Quantities (Keithley 2182)",
+                        switch_field("measure_rxy", "R_xy (transverse/Hall) — ch1",
+                                     DEFAULTS["measure_rxy"]),
+                        switch_field("measure_rxx", "R_xx (longitudinal) — ch2 if both on, "
+                                     "else ch1", DEFAULTS["measure_rxx"]),
+                    )
+                    yield card(
                         "Field sweep (Kepco magnet)",
                         switch_field("enable_sweep", "Sweep magnetic field", DEFAULTS["enable_sweep"]),
                         sweep_rows_field("sweep_rows", DEFAULTS["sweep_rows"]),
@@ -1087,6 +1164,11 @@ class DCHallMeasurementApp(App):
                                   DEFAULTS["n_reversals"], kind="integer",
                                   hint="(V(+I)-V(-I))/2 is the reported R.",
                                   validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
+                            field("channel_settle_s", "2182 channel-mux settle (s)",
+                                  DEFAULTS["channel_settle_s"],
+                                  hint="Only used when both R_xy and R_xx are on — dead time "
+                                       "after switching the 2182's active channel, before reading.",
+                                  validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
                         )
 
                 # ── Tier 3: instrument wiring & timing constants — collapsed ─
@@ -1096,7 +1178,7 @@ class DCHallMeasurementApp(App):
                             "Instrument addresses",
                             field("source_visa_resource", "6221 (current source)",
                                   DEFAULTS["source_visa_resource"], kind="text"),
-                            field("voltmeter_visa_resource", "2182 (Hall voltage)",
+                            field("voltmeter_visa_resource", "2182 (R_xy / R_xx voltage)",
                                   DEFAULTS["voltmeter_visa_resource"], kind="text"),
                             field("magnet_visa_resource", "Magnet (Kepco)",
                                   DEFAULTS["magnet_visa_resource"], kind="text"),
@@ -1216,6 +1298,8 @@ class DCHallMeasurementApp(App):
         raw: dict = {fid: self.query_one(f"#{fid}", Input).value for fid in self._all_field_ids()}
         raw["sweep_rows"] = self.query_one("#sweep_rows", TextArea).text
         raw["auto_range"] = self.query_one("#auto_range", Switch).value
+        raw["measure_rxy"] = self.query_one("#measure_rxy", Switch).value
+        raw["measure_rxx"] = self.query_one("#measure_rxx", Switch).value
         raw["enable_sweep"] = self.query_one("#enable_sweep", Switch).value
         raw["bidirectional_sweep"] = self.query_one("#bidirectional_sweep", Switch).value
         raw["enable_temperature"] = self.query_one("#enable_temperature", Switch).value
@@ -1239,6 +1323,10 @@ class DCHallMeasurementApp(App):
             self.query_one("#sweep_rows", TextArea).text = str(saved["sweep_rows"])
         if "auto_range" in saved:
             self.query_one("#auto_range", Switch).value = bool(saved["auto_range"])
+        if "measure_rxy" in saved:
+            self.query_one("#measure_rxy", Switch).value = bool(saved["measure_rxy"])
+        if "measure_rxx" in saved:
+            self.query_one("#measure_rxx", Switch).value = bool(saved["measure_rxx"])
         if "enable_sweep" in saved:
             self.query_one("#enable_sweep", Switch).value = bool(saved["enable_sweep"])
         if "bidirectional_sweep" in saved:
@@ -1282,6 +1370,8 @@ class DCHallMeasurementApp(App):
             else:
                 state[fid] = None
         state["auto_range"] = self.query_one("#auto_range", Switch).value
+        state["measure_rxy"] = self.query_one("#measure_rxy", Switch).value
+        state["measure_rxx"] = self.query_one("#measure_rxx", Switch).value
         state["enable_sweep"] = self.query_one("#enable_sweep", Switch).value
         state["bidirectional_sweep"] = self.query_one("#bidirectional_sweep", Switch).value
         state["enable_temperature"] = self.query_one("#enable_temperature", Switch).value
@@ -1411,7 +1501,9 @@ class DCHallMeasurementApp(App):
             visa_resource=state["voltmeter_visa_resource"],
             nplc=state["nplc"],
             auto_range=state["auto_range"],
+            channel=1,
         )
+        channel_map = resolve_channel_map(state["measure_rxx"], state["measure_rxy"])
         acq_cfg = AcquisitionConfig(
             settling_time_s=state["settling_time_s"],
             field_settle_tolerance_mT=state["field_settle_tolerance_mT"],
@@ -1452,6 +1544,8 @@ class DCHallMeasurementApp(App):
             "compliance_V": state["compliance_V"],
             "n_reversals": state["n_reversals"],
             "settling_time_s": state["settling_time_s"],
+            "measure_rxy": "rxy" in channel_map,
+            "measure_rxx": "rxx" in channel_map,
         }
         if state["enable_sweep"]:
             header_extra["field_sweep_rows_A"] = state["sweep_rows_parsed"]
@@ -1465,6 +1559,7 @@ class DCHallMeasurementApp(App):
 
         return MeasurementPlan(
             src_cfg=src_cfg, volt_cfg=volt_cfg, acq_cfg=acq_cfg,
+            channel_map=channel_map, channel_settle_s=state["channel_settle_s"],
             magnet_cfg=magnet_cfg, gauss_cfg=gauss_cfg, currents_A=currents_A,
             sense_currents_A=state["sense_current_list"],
             temp_cfg=temp_cfg, data_root=self.data_root,

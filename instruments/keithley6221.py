@@ -286,6 +286,8 @@ def acquire_reversal_averaged_voltage(
     n_reversals: int,
     stop_event: Optional[threading.Event] = None,
     source_delay_s: float = 0.0,
+    channels: tuple = (1,),
+    channel_settle_s: float = 0.0,
 ) -> dict:
     """
     Reverse the sense current n_reversals times and decompose the resulting
@@ -297,30 +299,58 @@ def acquire_reversal_averaged_voltage(
     voltmeter is read — a plain property write does not itself wait for the
     reversed current to settle.
 
+    `channels`, if more than one (e.g. `(1, 2)` to read R_xy and R_xx off
+    the same 2182 alongside each other), interleaves a channel-mux read
+    within each polarity rather than doubling the number of current
+    reversals: `+I -> read ch1 -> read ch2 -> -I -> read ch1 -> read ch2`.
+    `channel_settle_s` is slept after each `active_channel` switch — this
+    is the 2182's channel-mux settle time, distinct from `source_delay_s`
+    (which settles the *current source* after a polarity flip). The
+    single-channel default (`channels=(1,)`) never touches
+    `voltmeter.active_channel` at all, so existing single-channel callers
+    are unaffected.
+
     Leaves the source at +sense_current_A on return. If `stop_event` fires
     partway through, returns the mean/sem of whatever pairs were already
     collected. ``mean``/``even_mean`` are the odd/even components; ``sem``/
     ``even_sem`` are the standard error of each of those means (sample
     stdev over the reversal pairs / sqrt(n); ``nan`` if only one pair was
     collected). The raw pair-to-pair scatter is ``sem * sqrt(n_reversals)``.
+
+    Returns the flat ``{"mean","sem","even_mean","even_sem","n_reversals"}``
+    dict (unchanged shape) when `channels` has exactly one entry; otherwise
+    a ``{channel: {"mean","sem","even_mean","even_sem"}, ...,
+    "n_reversals": n}`` dict keyed by channel number.
     """
-    samples_odd = np.empty(n_reversals)
-    samples_even = np.empty(n_reversals)
+    multi = len(channels) > 1
+    samples_odd = {ch: np.empty(n_reversals) for ch in channels}
+    samples_even = {ch: np.empty(n_reversals) for ch in channels}
     n_used = 0
+
+    def _read_channels() -> dict:
+        v = {}
+        for ch in channels:
+            if multi:
+                voltmeter.active_channel = ch
+                if channel_settle_s > 0:
+                    time.sleep(channel_settle_s)
+            v[ch] = voltmeter.voltage
+        return v
 
     for i in range(n_reversals):
         source.source_current = sense_current_A
         if source_delay_s > 0:
             time.sleep(source_delay_s)
-        v_plus = voltmeter.voltage
+        v_plus = _read_channels()
 
         source.source_current = -sense_current_A
         if source_delay_s > 0:
             time.sleep(source_delay_s)
-        v_minus = voltmeter.voltage
+        v_minus = _read_channels()
 
-        samples_odd[i] = (v_plus - v_minus) / 2.0
-        samples_even[i] = (v_plus + v_minus) / 2.0
+        for ch in channels:
+            samples_odd[ch][i] = (v_plus[ch] - v_minus[ch]) / 2.0
+            samples_even[ch][i] = (v_plus[ch] + v_minus[ch]) / 2.0
         n_used = i + 1
 
         if stop_event is not None and stop_event.is_set():
@@ -328,18 +358,27 @@ def acquire_reversal_averaged_voltage(
 
     source.source_current = sense_current_A
 
-    used_odd = samples_odd[:n_used]
-    used_even = samples_even[:n_used]
-    if n_used >= 2:
-        sqrt_n = np.sqrt(n_used)
-        sem_odd = float(np.std(used_odd, ddof=1) / sqrt_n)
-        sem_even = float(np.std(used_even, ddof=1) / sqrt_n)
-    else:
-        sem_odd = sem_even = float("nan")
-    return {
-        "mean": float(np.mean(used_odd)),
-        "sem": sem_odd,
-        "even_mean": float(np.mean(used_even)),
-        "even_sem": sem_even,
-        "n_reversals": n_used,
-    }
+    def _decompose(ch: int) -> dict:
+        used_odd = samples_odd[ch][:n_used]
+        used_even = samples_even[ch][:n_used]
+        if n_used >= 2:
+            sqrt_n = np.sqrt(n_used)
+            sem_odd = float(np.std(used_odd, ddof=1) / sqrt_n)
+            sem_even = float(np.std(used_even, ddof=1) / sqrt_n)
+        else:
+            sem_odd = sem_even = float("nan")
+        return {
+            "mean": float(np.mean(used_odd)),
+            "sem": sem_odd,
+            "even_mean": float(np.mean(used_even)),
+            "even_sem": sem_even,
+        }
+
+    if not multi:
+        result = _decompose(channels[0])
+        result["n_reversals"] = n_used
+        return result
+
+    result = {ch: _decompose(ch) for ch in channels}
+    result["n_reversals"] = n_used
+    return result

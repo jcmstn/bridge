@@ -20,7 +20,8 @@ def _state(**overrides) -> dict:
         source_visa_resource="GPIB0::20::INSTR",
         voltmeter_visa_resource="GPIB0::7::INSTR",
         sense_current_values="0.001", compliance_V=2.0, source_delay_s=0.05, nplc=5,
-        auto_range=True, settling_time_s=1.0, n_reversals=5,
+        auto_range=True, measure_rxy=True, measure_rxx=False, channel_settle_s=0.02,
+        settling_time_s=1.0, n_reversals=5,
         device="HB3", cooldown="3", temperature_setpoint_K=300.0,
         field_theta_deg=None, field_phi_deg=None,
         enable_sweep=False,
@@ -37,6 +38,22 @@ def _state(**overrides) -> dict:
     # sense_current_values -- fill it in directly here.
     base["sense_current_list"] = [float(v) for v in str(base["sense_current_values"]).split(",")]
     return base
+
+
+def test_resolve_channel_map_both_on_keeps_rxy_on_ch1() -> None:
+    assert tui.resolve_channel_map(measure_rxx=True, measure_rxy=True) == {"rxy": 1, "rxx": 2}
+
+
+def test_resolve_channel_map_only_rxx_uses_ch1() -> None:
+    assert tui.resolve_channel_map(measure_rxx=True, measure_rxy=False) == {"rxx": 1}
+
+
+def test_resolve_channel_map_only_rxy_uses_ch1() -> None:
+    assert tui.resolve_channel_map(measure_rxx=False, measure_rxy=True) == {"rxy": 1}
+
+
+def test_resolve_channel_map_neither_is_empty() -> None:
+    assert tui.resolve_channel_map(measure_rxx=False, measure_rxy=False) == {}
 
 
 def test_build_plan_series_tag_only_set_for_a_real_family(tmp_path) -> None:

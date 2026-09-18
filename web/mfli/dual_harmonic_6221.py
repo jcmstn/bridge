@@ -40,7 +40,7 @@ from mfli.mfli_dual_harmonic_6221 import (
 from mfli.mfli_dual_harmonic_6221_tui import (
     DEFAULTS, NUMERIC_FIELDS, TEXT_FIELDS, OPTIONAL_NUMERIC_FIELDS,
     MEASUREMENT_TYPE, MeasurementPlan, build_header_fields, build_summary,
-    compute_filename_preview, format_si, parse_sensor_uids,
+    compute_filename_preview, format_si, parse_sensor_uids, follower_naming,
 )
 from instruments.data_naming import (
     TEST_SAMPLE, RunContext, allocate_run, finalize_index_row, make_incremental_writer,
@@ -126,7 +126,8 @@ def build_plan(state: dict) -> MeasurementPlan:
         input_range_V=state["input_range_1f_V"], sample_rate_Hz=state["sample_rate_Hz"], filter=filt_1f,
     )
     demod2_cfg = DemodConfig(
-        device=state["follower_device"], demod_index=0, harmonic=2,
+        device=state["follower_device"], demod_index=0,
+        harmonic=1 if state["measure_rxx"] else 2,
         osc_index=int(state["follower_osc_index"]),
         input_range_V=state["input_range_2f_V"], sample_rate_Hz=state["sample_rate_Hz"], filter=filt_2f,
     )
@@ -167,6 +168,7 @@ def build_plan(state: dict) -> MeasurementPlan:
     header_extra = {
         "excitation_frequency_Hz": state["frequency_Hz"],
         "excitation_amplitude_A": state["amplitude_list"][0],
+        "measure_rxx": state["measure_rxx"],
         "demod1_time_constant_s": state["time_constant_1f_s"],
         "demod1_order": int(state["order_1f"]),
         "demod2_time_constant_s": state["time_constant_2f_s"],
@@ -186,6 +188,7 @@ def build_plan(state: dict) -> MeasurementPlan:
         daq_host=state["daq_host"], daq_port=int(state["daq_port"]),
         leader=state["leader_device"], follower=state["follower_device"],
         ac_cfg=ac_cfg, amplitudes_A=state["amplitude_list"],
+        measure_rxx=state["measure_rxx"],
         leader_extref_cfg=leader_extref_cfg, follower_extref_cfg=follower_extref_cfg,
         extref_lock_timeout_s=state["extref_lock_timeout_s"],
         demod1_cfg=demod1_cfg, demod2_cfg=demod2_cfg, acq_cfg=acq_cfg,
@@ -211,6 +214,7 @@ def _save_measurement_png(records: list[dict], png_path: Path,
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    follower_prefix, follower_display = follower_naming(plan.measure_rxx if plan else False)
     has_field = any(r.get("magnet_field_mT") is not None for r in records)
 
     fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True, figsize=(7, 7))
@@ -221,8 +225,8 @@ def _save_measurement_png(records: list[dict], png_path: Path,
         label = rows[0].get("series_label")
         xs = [r["magnet_field_mT"] if has_field else r["point_index"] for r in rows]
         ax1.plot(xs, [r["1f_R_V"] for r in rows], "o-", color=cmap(idx % 10), label=label)
-        ax2.plot(xs, [r["2f_R_V"] for r in rows], "o-", color=cmap(idx % 10), label=label)
-    ax1.set_ylabel("1f  R (V)"); ax2.set_ylabel("2f  R (V)")
+        ax2.plot(xs, [r[f"{follower_prefix}_R_V"] for r in rows], "o-", color=cmap(idx % 10), label=label)
+    ax1.set_ylabel("1f  R (V)"); ax2.set_ylabel(f"{follower_display}  R (V)")
     ax2.set_xlabel("Magnetic field (mT)" if has_field else "Point #")
     ax1.set_title("Measurement result")
     for ax in (ax1, ax2):
@@ -243,7 +247,8 @@ def _save_measurement_png(records: list[dict], png_path: Path,
             lines.append(f"AC excitation: {format_si(amps[0], 'A')} @ {format_si(freq_Hz, 'Hz')}")
         tc1, order1 = plan.demod1_cfg.filter.time_constant_s, plan.demod1_cfg.filter.order
         tc2, order2 = plan.demod2_cfg.filter.time_constant_s, plan.demod2_cfg.filter.order
-        lines.append(f"Filter: 1f TC={tc1:g} s order={order1}, 2f TC={tc2:g} s order={order2}")
+        lines.append(f"Filter: 1f TC={tc1:g} s order={order1}, "
+                     f"{follower_display} TC={tc2:g} s order={order2}")
     if comment:
         lines.append(f"Comment: {textwrap.shorten(comment, width=90, placeholder='…')}")
     if lines:
@@ -301,6 +306,17 @@ def page() -> None:
                              "(own 6221 re-arm), each saved to its own file.")
                     inputs["ac_compliance_V"] = num_field(
                         "6221 voltage compliance (V)", float(d("ac_compliance_V")))
+
+                with param_card("Quantities"):
+                    switches["measure_rxx"] = bool_switch(
+                        "R_xx mode — follower reads R_xx's 1f instead of R_xy's 2f",
+                        d("measure_rxx"))
+                    ui.label(
+                        "Only two physical MFLIs, so this trades 2f for R_xx — move the "
+                        "follower's Signal Input cable by hand to match. The '2f lock-in "
+                        "filter'/'2f input range' fields below configure the follower "
+                        "either way."
+                    ).classes("text-xs text-grey-6")
 
                 with param_card("Magnet & field sweep"):
                     switches["enable_sweep"] = bool_switch("Sweep magnetic field (Kepco magnet)", d("enable_sweep"))
@@ -385,7 +401,8 @@ def page() -> None:
                 with stable_grid():
                     with stable_card("Devices & connection"):
                         inputs["leader_device"] = text_field("Leader MFLI (1f)", d("leader_device"))
-                        inputs["follower_device"] = text_field("Follower MFLI (2f)", d("follower_device"))
+                        inputs["follower_device"] = text_field(
+                            "Follower MFLI (2f, or R_xx 1f if R_xx mode is on)", d("follower_device"))
                         inputs["daq_host"] = text_field("LabOne data server host", d("daq_host"))
                         inputs["daq_port"] = num_field("LabOne data server port", float(d("daq_port")), integer=True)
 
@@ -421,7 +438,7 @@ def page() -> None:
                         inputs["follower_pll_demod_index"] = num_field(
                             "Follower PLL phase-detector demod index", float(d("follower_pll_demod_index")),
                             integer=True,
-                            hint="Must differ from demod 0 (used for the real 2f signal).")
+                            hint="Must differ from demod 0 (used for the real follower signal).")
                         follower_automode_select = ui.select(
                             AUTOMODE_OPTIONS, value=int(d("follower_automode")),
                             label="Follower PLL bandwidth adaptation").classes("w-full")
@@ -604,8 +621,22 @@ def page() -> None:
 
     series_state: dict = {}
 
-    def init_series(n_series: int, labels: list[Optional[str]]) -> None:
+    def init_series(n_series: int, labels: list[Optional[str]], measure_rxx: bool = False) -> None:
+        follower_prefix, follower_display = follower_naming(measure_rxx)
+        series_state["follower_prefix"] = follower_prefix
         fig.data = []
+        fig.update_yaxes(title_text=f"{follower_display}  R (V)", row=2, col=1)
+        table.columns = [
+            {"name": "n", "label": "#", "field": "n"},
+            {"name": "I", "label": "I (A)", "field": "I"},
+            {"name": "B", "label": "B (mT)", "field": "B"},
+            {"name": "R1", "label": "1f R (V)", "field": "R1"},
+            {"name": "th1", "label": "1f θ (°)", "field": "th1"},
+            {"name": "R2", "label": f"{follower_display} R (V)", "field": "R2"},
+            {"name": "th2", "label": f"{follower_display} θ (°)", "field": "th2"},
+            {"name": "T1", "label": "T1 (K)", "field": "T1"},
+            {"name": "T2", "label": "T2 (K)", "field": "T2"},
+        ]
         series_state["traces"] = {}
         cmap = ["#2E3192", "#e34948", "#2ca02c", "#9467bd", "#8c564b", "#17becf", "#ff7f0e", "#7f7f7f"]
         for i in range(n_series):
@@ -615,27 +646,28 @@ def page() -> None:
                                       name=f"1f {name}" if name else "1f R",
                                       line=dict(color=color), legendgroup=f"s{i}"), row=1, col=1)
             fig.add_trace(go.Scatter(x=[], y=[], mode="lines+markers",
-                                      name=f"2f {name}" if name else "2f R",
+                                      name=f"{follower_display} {name}" if name else f"{follower_display} R",
                                       line=dict(color=color, dash="dot"), legendgroup=f"s{i}"),
                           row=2, col=1)
             series_state["traces"][i] = (2 * i, 2 * i + 1)
 
     def on_record(record: dict) -> None:
         idx = record.get("series_index", 0)
+        fp = series_state.get("follower_prefix", "2f")
         t1, t2 = series_state["traces"][idx]
         has_field = record.get("magnet_field_mT") is not None
         x = record["magnet_field_mT"] if has_field else record["point_index"]
         fig.data[t1].x = fig.data[t1].x + (x,)
         fig.data[t1].y = fig.data[t1].y + (record["1f_R_V"],)
         fig.data[t2].x = fig.data[t2].x + (x,)
-        fig.data[t2].y = fig.data[t2].y + (record["2f_R_V"],)
+        fig.data[t2].y = fig.data[t2].y + (record[f"{fp}_R_V"],)
         plot.update()
         table.rows.append({
             "n": record["point_index"] + 1,
             "I": f"{record['magnet_current_A']:.4f}" if record.get("magnet_current_A") is not None else "—",
             "B": f"{record['magnet_field_mT']:.2f}" if record.get("magnet_field_mT") is not None else "—",
             "R1": f"{record['1f_R_V']:.4e}", "th1": f"{record['1f_theta_deg']:.2f}",
-            "R2": f"{record['2f_R_V']:.4e}", "th2": f"{record['2f_theta_deg']:.2f}",
+            "R2": f"{record[f'{fp}_R_V']:.4e}", "th2": f"{record[f'{fp}_theta_deg']:.2f}",
             "T1": f"{record['temperature_1_K']:.3f}" if record.get("temperature_1_K") is not None else "—",
             "T2": f"{record['temperature_2_K']:.3f}" if record.get("temperature_2_K") is not None else "—",
         })
@@ -790,20 +822,21 @@ def page() -> None:
                             daq, plan.demod1_cfg, n_averages=plan.phase_cal_n_averages,
                             max_iterations=plan.phase_cal_max_iterations,
                         )
+                        follower_display = follower_naming(plan.measure_rxx)[1]
                         if not result.converged:
                             log.warning(
                                 "Phase null did not fully converge after %d iteration(s) "
-                                "(|Y|/R=%.2e) — check cabling/contacts before trusting the 2f data.",
-                                result.iterations, result.residual_ratio,
+                                "(|Y|/R=%.2e) — check cabling/contacts before trusting the %s data.",
+                                result.iterations, result.residual_ratio, follower_display,
                             )
                         d2 = acquire_averaged(daq, plan.demod2_cfg, plan.phase_cal_n_averages)
                         log.info(
-                            "2f snapshot at calibration point: X=%.4e V  Y=%.4e V  R=%.4e V — "
+                            "%s snapshot at calibration point: X=%.4e V  Y=%.4e V  R=%.4e V — "
                             "check which channel carries the structured field dependence in the "
                             "recorded sweep before trusting either one.",
-                            d2["x_mean"], d2["y_mean"], d2["r_mean"],
+                            follower_display, d2["x_mean"], d2["y_mean"], d2["r_mean"],
                         )
-                        cb.on_status("Phase calibration: anchoring follower 2f reference (1f null) …")
+                        cb.on_status(f"Phase calibration: anchoring follower {follower_display} reference (1f null) …")
                         demod2_phase_null_1f_deg = null_follower_reference_via_1f(
                             daq, plan.demod2_cfg,
                             n_averages=plan.phase_cal_n_averages,
@@ -849,6 +882,7 @@ def page() -> None:
                             temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg, geometry_cfg=plan.geometry_cfg,
                             demod2_phase_null_1f_deg=demod2_phase_null_1f_deg, mds=mds,
                             write_csv=write_csv,
+                            demod2_label=follower_naming(plan.measure_rxx)[0],
                         )
                     except Exception as exc:
                         iter_error = exc
@@ -912,7 +946,7 @@ def page() -> None:
             return
         controller["c"] = rc
 
-        init_series(len(plan.amplitudes_A), labels)
+        init_series(len(plan.amplitudes_A), labels, measure_rxx=plan.measure_rxx)
         plot.update()
         table.rows.clear()
         table.update()
