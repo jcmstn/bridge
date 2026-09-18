@@ -26,7 +26,7 @@ def _state(**overrides) -> dict:
         pulse_delay_s=0.0, n_pulses=1,
         pmu_sample_rate=2e8, pmu_meas_start_perc=0.75, pmu_meas_stop_perc=0.90,
         pmu_dut_res_ohm=1000.0, pmu_v_range_V=10.0, pmu_i_range_A=0.01, pmu_v_limit_V=5.0,
-        sense_current_A=1e-4, compliance_V=2.0, frequency_Hz=977.0, phasemarker_line=1,
+        sense_current_values="1e-4", compliance_V=2.0, frequency_Hz=977.0, phasemarker_line=1,
         n_averages=50, settle_after_enable_s=1.0, lock_timeout_s=5.0,
         delay_after_pulse_s=1.0,
         magnet_current_A="1.5", field_theta_deg=85.0, field_phi_deg=None, field_settle_tolerance_mT=0.05,
@@ -49,6 +49,8 @@ def _state(**overrides) -> dict:
     base["amplitude_list"], base["amplitude_parse_error"] = tui._resolve_amplitudes(base)
     base["magnet_currents_A"], base["magnet_currents_parse_error"] = \
         tui._resolve_magnet_currents(base)
+    base["sense_currents_A"], base["sense_currents_parse_error"] = \
+        tui._resolve_sense_currents(base)
     return base
 
 
@@ -123,7 +125,7 @@ def test_resolve_magnet_currents_list():
 
 
 def test_summary_blocks_zero_sense_current():
-    _, _, errors = tui.build_summary(_state(sense_current_A=0.0))
+    _, _, errors = tui.build_summary(_state(sense_current_values="0.0"))
     assert any("6221 AC current amplitude" in e for e in errors)
 
 
@@ -133,12 +135,12 @@ def test_summary_blocks_zero_compliance():
 
 
 def test_summary_blocks_read_current_over_safety_ceiling():
-    _, _, errors = tui.build_summary(_state(sense_current_A=0.1))   # 100 mA
+    _, _, errors = tui.build_summary(_state(sense_current_values="0.1"))   # 100 mA
     assert any("safety ceiling" in e for e in errors)
 
 
 def test_summary_warns_large_read_current_below_ceiling():
-    _, warnings, errors = tui.build_summary(_state(sense_current_A=2e-3))
+    _, warnings, errors = tui.build_summary(_state(sense_current_values="2e-3"))
     assert not any("safety ceiling" in e for e in errors)
     assert any("large" in w for w in warnings)
 
@@ -245,8 +247,22 @@ def test_build_plan_multiple_magnet_currents(tmp_path: Path):
                                   magnet_current_A="1.5, -1.5, 3"))
 
     assert plan.magnet_currents_A == [1.5, -1.5, 3.0]
-    assert plan.series_values == [1.5, -1.5, 3.0]
+    assert plan.series_values == [(1e-4, 1.5), (1e-4, -1.5), (1e-4, 3.0)]
     assert plan.total_points == 3 * 3                     # amplitudes × assist currents
+
+
+def test_build_plan_multiple_sense_currents(tmp_path: Path):
+    app = tui.SOTPulsedSwitching2HApp()
+    app.data_root = tmp_path
+    plan = app._build_plan(_state(amplitude_start_V=0.2, amplitude_stop_V=1.0,
+                                  amplitude_step_V=0.4, amplitude_bidirectional=False,
+                                  magnet_current_A="1.5, -1.5",
+                                  sense_current_values="1e-4, 2e-4"))
+
+    assert plan.sense_currents_A == [1e-4, 2e-4]
+    # sense current outer (needs a 6221 AC re-arm), magnet inner
+    assert plan.series_values == [(1e-4, 1.5), (1e-4, -1.5), (2e-4, 1.5), (2e-4, -1.5)]
+    assert plan.read_cfg.sense_current_A == plan.ac_cfg.amplitude_A == 1e-4
 
 
 def test_build_plan_channel_resistance_field_is_gone(tmp_path: Path):

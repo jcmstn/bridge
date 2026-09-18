@@ -74,7 +74,7 @@ def _save_settings(raw: dict) -> None:
 
 def build_plan(state: dict) -> MeasurementPlan:
     src_cfg = SourceConfig(
-        visa_resource=state["source_visa_resource"], sense_current_A=state["sense_current_A"],
+        visa_resource=state["source_visa_resource"], sense_current_A=state["sense_current_list"][0],
         compliance_V=state["compliance_V"], source_delay_s=state["source_delay_s"],
     )
     volt_cfg = VoltmeterConfig(
@@ -114,14 +114,14 @@ def build_plan(state: dict) -> MeasurementPlan:
                 visa_resource=state["temperature_visa_resource"], sensor_uids=uids)
 
     header_extra = {
-        "sense_current_A": state["sense_current_A"],
+        "sense_current_A": state["sense_current_list"][0],
         "compliance_V": state["compliance_V"],
         "n_averages": int(state["n_averages"]),
         "settling_time_s": state["settling_time_s"],
         "gate_sweep_V": [state["gate_min_V"], state["gate_max_V"], state["step_V"]],
     }
     series = ""
-    if len(field_currents_A or []) > 1:
+    if len(field_currents_A or [None]) * len(state["sense_current_list"]) > 1:
         series = (f"{state['sample']}_{state['device']}_{MEASUREMENT_TYPE}_"
                   f"{datetime.now():%Y%m%dT%H%M%S}")
 
@@ -131,14 +131,20 @@ def build_plan(state: dict) -> MeasurementPlan:
         sample=state["sample"], device=state["device"],
         temperature_setpoint_K=state["temperature_setpoint_K"],
         cooldown=state["cooldown"], header_extra=header_extra, series=series,
+        sense_currents_A=state["sense_current_list"],
         magnet_cfg=magnet_cfg, gauss_cfg=gauss_cfg,
         field_currents_A=field_currents_A, field_settle_s=state["field_settle_s"],
         field_settle_tolerance_mT=state["field_settle_tolerance_mT"], temp_cfg=temp_cfg,
     )
 
 
-def series_label(current_A: Optional[float]) -> Optional[str]:
-    return f"I_mag={current_A:g}A" if current_A is not None else None
+def series_label(field_current_A: Optional[float], sense_current_A: float, n_sense: int) -> Optional[str]:
+    parts = []
+    if field_current_A is not None:
+        parts.append(f"I_mag={field_current_A:g}A")
+    if n_sense > 1:
+        parts.append(f"I_sense={sense_current_A:g}A")
+    return ", ".join(parts) or None
 
 
 def _save_combined_png(records: list[dict], png_path: Path,
@@ -169,10 +175,9 @@ def _save_combined_png(records: list[dict], png_path: Path,
     fig.tight_layout()
 
     lines: list[str] = []
-    if plan is not None:
-        sense_current_A = plan.header_extra.get("sense_current_A")
-        if sense_current_A is not None:
-            lines.append(f"Sense current: {format_si(sense_current_A, 'A')}")
+    sense_currents = sorted({r["sense_current_A"] for r in records if r.get("sense_current_A") is not None})
+    if len(sense_currents) == 1:
+        lines.append(f"Sense current: {format_si(sense_currents[0], 'A')}")
     if comment:
         lines.append(f"Comment: {textwrap.shorten(comment, width=90, placeholder='…')}")
     if lines:
@@ -222,7 +227,10 @@ def page() -> None:
                         "Bidirectional sweep (min → max → min)", d("bidirectional_sweep"))
 
                 with param_card("Sense current (Keithley 6221)"):
-                    inputs["sense_current_A"] = num_field("Fixed sense current (A)", float(d("sense_current_A")))
+                    inputs["sense_current_values"] = text_field(
+                        "Sense current (A)", d("sense_current_values"),
+                        hint="Single value, or comma-separated list — one complete gate sweep "
+                             "runs per value, each saved to its own file and plotted together.")
 
                 with param_card("Field (Kepco magnet, optional)"):
                     switches["enable_field"] = bool_switch("Park field (Kepco magnet)", d("enable_field"))
@@ -344,6 +352,12 @@ def page() -> None:
                 state["field_current_list"] = parse_value_list(state["field_current_values"])
             except ValueError as exc:
                 state["field_parse_error"] = str(exc)
+        state["sense_current_list"] = []
+        state["sense_current_parse_error"] = None
+        try:
+            state["sense_current_list"] = parse_value_list(state["sense_current_values"])
+        except ValueError as exc:
+            state["sense_current_parse_error"] = str(exc)
         return state, errors
 
     def collect_raw() -> dict:
@@ -439,10 +453,12 @@ def page() -> None:
             iter_records = [r for r in records if r.get("series_index", 0) == series_idx]
             current_A = iter_records[0].get("magnet_current_A") if iter_records else None
             field_mT = iter_records[0].get("magnet_field_mT") if iter_records else None
+            sense_current_A = iter_records[0].get("sense_current_A") if iter_records else None
+            extra = {"sense_current_A": sense_current_A} if sense_current_A is not None else {}
+            if current_A is not None:
+                extra = {**extra, "magnet_current_A": current_A, "magnet_field_mT": field_mT}
             header_fields = build_header_fields(
-                plan, ctx, iter_records, status=status, comment=comment,
-                extra={"magnet_current_A": current_A, "magnet_field_mT": field_mT}
-                if current_A is not None else None,
+                plan, ctx, iter_records, status=status, comment=comment, extra=extra or None,
             )
             try:
                 # Never truncate an already-written raw file to an empty stub —
@@ -494,20 +510,25 @@ def page() -> None:
                     cb.on_status("Connecting gaussmeter …")
                     gaussmeter = connect_gaussmeter(plan.gauss_cfg)
 
-                for series_idx, current_A in enumerate(plan.series_values):
+                n_sense = len(plan.sense_currents_A)
+                _unset = object()
+                _parked_field_A = _unset
+                field_mT = None
+                for series_idx, (field_current_A, sense_current_A) in enumerate(plan.series_values):
                     if stop_event.is_set():
                         break
-                    label = series_label(current_A)
-                    field_mT = None
-                    if current_A is not None:
-                        cb.on_status(f"Parking magnet at {current_A:g} A …")
-                        set_magnet_current(magnet, plan.magnet_cfg, current_A,
+                    plan.src_cfg.sense_current_A = sense_current_A
+                    label = series_label(field_current_A, sense_current_A, n_sense)
+                    if field_current_A is not None and field_current_A != _parked_field_A:
+                        cb.on_status(f"Parking magnet at {field_current_A:g} A …")
+                        set_magnet_current(magnet, plan.magnet_cfg, field_current_A,
                                            gaussmeter, plan.gauss_cfg,
                                            plan.field_settle_tolerance_mT, stop_event)
                         time.sleep(plan.field_settle_s)
                         field_mT = read_field_mT(gaussmeter, plan.gauss_cfg)
+                        _parked_field_A = field_current_A
 
-                    key_axis = ("current_A", current_A) if current_A is not None else None
+                    key_axis = ("current_A", field_current_A) if field_current_A is not None else None
                     ctx = allocate_run(
                         Path(data_root), plan.sample, plan.device, MEASUREMENT_TYPE,
                         temperature_setpoint_K=plan.temperature_setpoint_K,
@@ -518,10 +539,12 @@ def page() -> None:
                     plan.acq_cfg.output_file = str(ctx.raw_path)
                     write_csv = make_incremental_writer(
                         ctx.raw_path,
-                        lambda records, _ctx=ctx, _i=current_A, _b=field_mT: build_header_fields(
-                            plan, _ctx, records, status="in_progress", comment="",
-                            extra={"magnet_current_A": _i, "magnet_field_mT": _b} if _i is not None else None,
-                        ),
+                        lambda records, _ctx=ctx, _i=field_current_A, _b=field_mT, _s=sense_current_A:
+                            build_header_fields(
+                                plan, _ctx, records, status="in_progress", comment="",
+                                extra={"sense_current_A": _s, "magnet_current_A": _i, "magnet_field_mT": _b}
+                                if _i is not None else {"sense_current_A": _s},
+                            ),
                     )
                     points = [GatePoint(gate_voltage_V=float(v)) for v in plan.gate_voltages_V]
 
@@ -534,14 +557,14 @@ def page() -> None:
                         _iter.append(record)
                         cb.on_point(record)
 
-                    status = "Running gate sweep …" if current_A is None else f"Running gate sweep (I_mag={current_A:g} A) …"
+                    status = "Running gate sweep …" if not label else f"Running gate sweep ({label}) …"
                     cb.on_status(status)
                     iter_error: Optional[BaseException] = None
                     try:
                         run_measurement(
                             source, voltmeter, gate, plan.src_cfg, plan.gate_cfg, plan.acq_cfg, points,
                             stop_event=stop_event, on_point=tagged_on_point,
-                            magnet_current_A=current_A, magnet_field_mT=field_mT,
+                            magnet_current_A=field_current_A, magnet_field_mT=field_mT,
                             temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg,
                             write_csv=write_csv,
                         )
@@ -550,10 +573,11 @@ def page() -> None:
 
                     iter_status = "error" if iter_error is not None \
                         else ("aborted" if stop_event.is_set() else "completed")
+                    extra = {"sense_current_A": sense_current_A, "magnet_current_A": field_current_A,
+                              "magnet_field_mT": field_mT} if field_current_A is not None \
+                        else {"sense_current_A": sense_current_A}
                     header_fields = build_header_fields(
-                        plan, ctx, iter_records, status=iter_status, comment="",
-                        extra={"magnet_current_A": current_A, "magnet_field_mT": field_mT}
-                        if current_A is not None else None,
+                        plan, ctx, iter_records, status=iter_status, comment="", extra=extra,
                     )
                     write_record(ctx.raw_path, iter_records, header_fields)
                     finalize_index_row(Path(data_root), ctx.sample, ctx.run_number, header_fields)
@@ -611,7 +635,8 @@ def page() -> None:
 
         plan = build_plan(state)
         Path(state["data_dir"]).mkdir(parents=True, exist_ok=True)
-        labels = [series_label(v) for v in plan.series_values]
+        n_sense = len(plan.sense_currents_A)
+        labels = [series_label(f, s, n_sense) for f, s in plan.series_values]
         run_contexts: list[RunContext] = []
 
         rc = RunController(

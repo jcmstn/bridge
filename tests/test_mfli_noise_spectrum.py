@@ -68,6 +68,18 @@ def test_save_results_allocates_one_run_per_pair(tmp_path: Path, monkeypatch) ->
     assert set(index_df["condition"]) == {"Excitation ON", "Excitation OFF"}
 
 
+def test_save_results_key_axis_reaches_filename(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(noise, "_DATA_DIR", tmp_path)
+    ensure_sample(tmp_path, "A", create=True)
+
+    results = {("Excitation ON", "MFLI-1 (1f channel)"): _fake_spec("MFLI-1 (1f channel)")}
+    contexts = noise.save_results(
+        results, sample="A", device="HB3", cooldown="", series="A_HB3_NOISE_20260101T000000",
+        key_axis=("current_A", 2e-4),
+    )
+    assert "I0p0002A" in contexts[0].raw_path.name
+
+
 def test_summarize_asd_reproduces_known_white_noise_floor() -> None:
     """Synthetic white noise of known ASD sigma_v [V/√Hz] at known sample
     rate must round-trip through compute_psd()/summarize_asd() within a

@@ -13,7 +13,8 @@ def _state(**overrides) -> dict:
     base = dict(
         source_visa_resource="GPIB0::20::INSTR", voltmeter_visa_resource="GPIB0::7::INSTR",
         gate_visa_resource="GPIB0::25::INSTR",
-        sense_current_A=1e-6, compliance_V=2.0, source_delay_s=0.05, nplc=5,
+        sense_current_values="1e-6", sense_current_list=[1e-6], sense_current_parse_error=None,
+        compliance_V=2.0, source_delay_s=0.05, nplc=5,
         auto_range=True, settling_time_s=0.2, n_averages=5,
         device="HB3", cooldown="", temperature_setpoint_K=300.0,
         gate_voltage_limit_V=20.0, gate_compliance_current_A=1e-6,
@@ -47,8 +48,19 @@ def test_web_build_plan_and_per_iteration_allocation(tmp_path: Path) -> None:
     contexts = [
         allocate_run(tmp_path, plan.sample, plan.device, MEASUREMENT_TYPE,
                      temperature_setpoint_K=plan.temperature_setpoint_K,
-                     key_axis=("current_A", i), series=plan.series)
-        for i in plan.series_values
+                     key_axis=("current_A", field_i), series=plan.series)
+        for field_i, sense_i in plan.series_values
     ]
     assert [c.run_number for c in contexts] == [1, 2]
     assert contexts[0].raw_path.name.startswith("A_0001_HB3_GSWP_T300K_I0A_")
+
+
+def test_tui_build_plan_nests_sense_and_field_lists(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(tui, "_DEFAULT_DATA_DIR", tmp_path)
+    ensure_sample(tmp_path, "A", create=True)
+    app = tui.DCGateSweepApp()
+    app.data_root = tmp_path
+    plan = app._build_plan(_state(sense_current_values="1e-6, 2e-6",
+                                    sense_current_list=[1e-6, 2e-6]))
+    assert plan.series_values == [(0.0, 1e-6), (0.0, 2e-6), (1.0, 1e-6), (1.0, 2e-6)]
+    assert plan.src_cfg.sense_current_A == 1e-6

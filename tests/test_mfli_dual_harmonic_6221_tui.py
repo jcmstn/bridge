@@ -20,7 +20,8 @@ def _state(**overrides) -> dict:
         leader_device="dev7885", follower_device="dev7886",
         daq_host="localhost", daq_port=8004,
         ac_visa_resource="GPIB0::20::INSTR",
-        frequency_Hz=317.3, amplitude_A=1e-7, ac_compliance_V=2.0, phasemarker_line=1,
+        frequency_Hz=317.3, ac_compliance_V=2.0, phasemarker_line=1,
+        amplitude_values="1e-7", amplitude_list=[1e-7], amplitude_parse_error=None,
         time_constant_1f_s=0.3, order_1f=4, sinc_filter_1f=True,
         time_constant_2f_s=0.3, order_2f=4, sinc_filter_2f=True,
         differential=True, ac_coupling=True,
@@ -49,30 +50,47 @@ def _state(**overrides) -> dict:
     return base
 
 
-def test_build_plan_allocates_run_and_matches_filename_convention(tmp_path, monkeypatch) -> None:
+def test_build_plan_does_not_allocate_a_run_upfront(tmp_path, monkeypatch) -> None:
+    # allocate_run() now happens once per amplitude, inside RunScreen.do_run()
+    # -- _build_plan() itself must stay a pure dataclass-construction step
+    # (no filesystem side effects), so a fresh run number is never burned
+    # just from opening the run screen.
     monkeypatch.setattr(tui, "_DEFAULT_DATA_DIR", tmp_path)
     ensure_sample(tmp_path, "A", create=True)
     app = tui.MFLIDualHarmonic6221App()
     app.data_root = tmp_path
 
     plan1 = app._build_plan(_state(time_constant_1f_s=0.1, time_constant_2f_s=0.5))
-    assert plan1.run_ctx.run_number == 1
-    assert plan1.acq_cfg.output_file == str(plan1.run_ctx.raw_path)
-    assert Path(plan1.acq_cfg.output_file).name.startswith("A_0001_HB3_HARM6_T300K_")
+    assert plan1.acq_cfg.output_file == ""
     assert plan1.ac_cfg.amplitude_A == 1e-7
+    assert plan1.amplitudes_A == [1e-7]
+    assert plan1.total_files == 1
     assert plan1.leader_extref_cfg.device == "dev7885"
     assert plan1.follower_extref_cfg.device == "dev7886"
     # 1f and 2f must get independent FilterConfig instances -- regresses if
     # someone re-collapses them into one shared object.
     assert plan1.demod1_cfg.filter is not plan1.demod2_cfg.filter
     assert plan1.demod1_cfg.filter.time_constant_s != plan1.demod2_cfg.filter.time_constant_s
+    assert (tmp_path / "A" / "index.csv").read_text().count("\n") <= 1  # header only, no run rows
 
-    plan2 = app._build_plan(_state())
-    assert plan2.run_ctx.run_number == 2
+
+def test_build_plan_multiple_amplitudes(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(tui, "_DEFAULT_DATA_DIR", tmp_path)
+    ensure_sample(tmp_path, "A", create=True)
+    app = tui.MFLIDualHarmonic6221App()
+    app.data_root = tmp_path
+
+    plan = app._build_plan(_state(amplitude_values="1e-7, 2e-7",
+                                    amplitude_list=[1e-7, 2e-7]))
+    assert plan.amplitudes_A == [1e-7, 2e-7]
+    assert plan.ac_cfg.amplitude_A == 1e-7  # first value, mutated per iteration by do_run()
+    assert plan.total_files == 2
+    assert plan.series.startswith("A_HB3_HARM6_")
 
 
 def test_build_summary_flags_excitation_current_ceiling(tmp_path) -> None:
-    _, _, errors = tui.build_summary(_state(amplitude_A=50e-3, data_dir=str(tmp_path)))
+    _, _, errors = tui.build_summary(_state(amplitude_values="50e-3", amplitude_list=[50e-3],
+                                              data_dir=str(tmp_path)))
     assert any("Excitation current" in e for e in errors)
 
 

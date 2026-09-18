@@ -20,7 +20,8 @@ def _state(data_dir: Path, **overrides) -> dict:
     base = dict(
         leader_device="dev7885", follower_device="dev7886",
         daq_host="localhost", daq_port=8004,
-        ac_visa_resource="GPIB0::20::INSTR", frequency_Hz=317.3, amplitude_A=1e-4,
+        ac_visa_resource="GPIB0::20::INSTR", frequency_Hz=317.3,
+        amplitude_values="1e-4", amplitude_list=[1e-4], amplitude_parse_error=None,
         ac_compliance_V=2.0, phasemarker_line=1, extref_lock_timeout_s=5.0,
         leader_extref_index=0, leader_aux_input_ch=0, leader_osc_index=0,
         leader_pll_demod_index=1, leader_automode=4,
@@ -54,8 +55,20 @@ def test_build_plan_shapes_configs(tmp_path: Path) -> None:
     assert plan_on_only.total_steps == 2
 
 
+def test_build_plan_multiple_amplitudes_scales_total_steps(tmp_path: Path) -> None:
+    ensure_sample(tmp_path, "A", create=True)
+    app = tui.MFLINoiseSpectrumApp()
+    app.data_root = tmp_path
+
+    plan = app._build_plan(_state(tmp_path, amplitude_values="1e-4, 2e-4",
+                                    amplitude_list=[1e-4, 2e-4]))
+    assert plan.amplitudes_A == [1e-4, 2e-4]
+    assert plan.ac_cfg.amplitude_A == 1e-4
+    assert plan.total_steps == 8  # 2 channels x 2 passes x 2 amplitudes
+
+
 def test_build_summary_flags_mistyped_current(tmp_path: Path) -> None:
-    state = _state(tmp_path, amplitude_A=5.0)  # way past the safety ceiling
+    state = _state(tmp_path, amplitude_values="5.0", amplitude_list=[5.0])  # past the safety ceiling
     _, _, errors = tui.build_summary(state)
     assert any("Excitation current" in e for e in errors)
 
@@ -81,3 +94,7 @@ def test_compute_filename_preview(tmp_path: Path) -> None:
 
     preview_on_only = tui.compute_filename_preview({**state, "also_measure_off": False})
     assert "×2 files" in preview_on_only
+
+    preview_multi_amp = tui.compute_filename_preview(
+        {**state, "amplitude_list": [1e-4, 2e-4]})
+    assert "×8 files" in preview_multi_amp

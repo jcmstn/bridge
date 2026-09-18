@@ -16,13 +16,15 @@ import json
 import logging
 import textwrap
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from nicegui import background_tasks, ui
 
-from dc.dc_sweep_utils import build_segmented_sweep, parse_sweep_rows
+from dc.dc_sweep_utils import build_segmented_sweep, parse_sweep_rows, parse_value_list, safe_shutdown
 from mfli.mfli_dual_harmonic_6221 import (
     ACSourceConfig, AcquisitionConfig, DemodConfig, ExtRefConfig, FilterConfig,
     GaussmeterConfig, MagnetConfig, MeasurementPoint, SampleGeometryConfig,
@@ -41,7 +43,7 @@ from mfli.mfli_dual_harmonic_6221_tui import (
     compute_filename_preview, format_si, parse_sensor_uids,
 )
 from instruments.data_naming import (
-    TEST_SAMPLE, allocate_run, finalize_index_row, make_incremental_writer,
+    TEST_SAMPLE, RunContext, allocate_run, finalize_index_row, make_incremental_writer,
     preview_raw_filename, proc_path, write_record,
 )
 from instruments.field_geometry import field_direction_summary_line
@@ -96,7 +98,7 @@ def _save_settings(raw: dict) -> None:
 
 def build_plan(state: dict) -> MeasurementPlan:
     ac_cfg = ACSourceConfig(
-        visa_resource=state["ac_visa_resource"], amplitude_A=state["amplitude_A"],
+        visa_resource=state["ac_visa_resource"], amplitude_A=state["amplitude_list"][0],
         frequency_Hz=state["frequency_Hz"], compliance_V=state["ac_compliance_V"],
         phasemarker_line=int(state["phasemarker_line"]),
     )
@@ -128,14 +130,10 @@ def build_plan(state: dict) -> MeasurementPlan:
         osc_index=int(state["follower_osc_index"]),
         input_range_V=state["input_range_2f_V"], sample_rate_Hz=state["sample_rate_Hz"], filter=filt_2f,
     )
-    run_ctx = allocate_run(
-        Path(state["data_dir"]), state["sample"], state["device"], MEASUREMENT_TYPE,
-        temperature_setpoint_K=state["temperature_setpoint_K"],
-    )
     acq_cfg = AcquisitionConfig(
         settling_time_s=state["settling_time_s"], n_averages=int(state["n_averages"]),
         field_settle_tolerance_mT=state["field_settle_tolerance_mT"],
-        output_file=str(run_ctx.raw_path),
+        output_file="",  # overwritten per amplitude iteration in run_fn
     )
 
     magnet_cfg = None
@@ -168,7 +166,7 @@ def build_plan(state: dict) -> MeasurementPlan:
 
     header_extra = {
         "excitation_frequency_Hz": state["frequency_Hz"],
-        "excitation_amplitude_A": state["amplitude_A"],
+        "excitation_amplitude_A": state["amplitude_list"][0],
         "demod1_time_constant_s": state["time_constant_1f_s"],
         "demod1_order": int(state["order_1f"]),
         "demod2_time_constant_s": state["time_constant_2f_s"],
@@ -179,18 +177,25 @@ def build_plan(state: dict) -> MeasurementPlan:
     if state["enable_sweep"]:
         header_extra["field_sweep_rows_A"] = state["sweep_rows_parsed"]
 
+    series = ""
+    if len(state["amplitude_list"]) > 1:
+        series = (f"{state['sample']}_{state['device']}_{MEASUREMENT_TYPE}_"
+                  f"{datetime.now():%Y%m%dT%H%M%S}")
+
     return MeasurementPlan(
         daq_host=state["daq_host"], daq_port=int(state["daq_port"]),
         leader=state["leader_device"], follower=state["follower_device"],
-        ac_cfg=ac_cfg, leader_extref_cfg=leader_extref_cfg, follower_extref_cfg=follower_extref_cfg,
+        ac_cfg=ac_cfg, amplitudes_A=state["amplitude_list"],
+        leader_extref_cfg=leader_extref_cfg, follower_extref_cfg=follower_extref_cfg,
         extref_lock_timeout_s=state["extref_lock_timeout_s"],
         demod1_cfg=demod1_cfg, demod2_cfg=demod2_cfg, acq_cfg=acq_cfg,
         magnet_cfg=magnet_cfg, gauss_cfg=gauss_cfg, currents_A=currents_A, temp_cfg=temp_cfg,
         phase_cal_enabled=state["enable_phase_cal"], phase_cal_current_A=state["phase_cal_current_A"],
         phase_cal_n_averages=int(state["phase_cal_n_averages"]),
         phase_cal_max_iterations=int(state["phase_cal_max_iterations"]), geometry_cfg=geometry_cfg,
-        run_ctx=run_ctx, temperature_setpoint_K=state["temperature_setpoint_K"],
-        cooldown=state["cooldown"], header_extra=header_extra,
+        sample=state["sample"], device=state["device"], data_root=Path(state["data_dir"]),
+        temperature_setpoint_K=state["temperature_setpoint_K"],
+        cooldown=state["cooldown"], header_extra=header_extra, series=series,
     )
 
 
@@ -207,18 +212,23 @@ def _save_measurement_png(records: list[dict], png_path: Path,
     import matplotlib.pyplot as plt
 
     has_field = any(r.get("magnet_field_mT") is not None for r in records)
-    xs = [r["magnet_field_mT"] if has_field else r["point_index"] for r in records]
-    r1 = [r["1f_R_V"] for r in records]
-    r2 = [r["2f_R_V"] for r in records]
 
     fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True, figsize=(7, 7))
-    ax1.plot(xs, r1, "o-", color="tab:blue")
-    ax2.plot(xs, r2, "o-", color="tab:orange")
+    cmap = plt.get_cmap("tab10")
+    series_ids = sorted({r.get("series_index", 0) for r in records})
+    for idx in series_ids:
+        rows = [r for r in records if r.get("series_index", 0) == idx]
+        label = rows[0].get("series_label")
+        xs = [r["magnet_field_mT"] if has_field else r["point_index"] for r in rows]
+        ax1.plot(xs, [r["1f_R_V"] for r in rows], "o-", color=cmap(idx % 10), label=label)
+        ax2.plot(xs, [r["2f_R_V"] for r in rows], "o-", color=cmap(idx % 10), label=label)
     ax1.set_ylabel("1f  R (V)"); ax2.set_ylabel("2f  R (V)")
     ax2.set_xlabel("Magnetic field (mT)" if has_field else "Point #")
     ax1.set_title("Measurement result")
     for ax in (ax1, ax2):
         ax.grid(True, alpha=0.3)
+    if any(r.get("series_label") for r in records):
+        ax1.legend(loc="best", fontsize=8)
     fig.tight_layout()
 
     lines: list[str] = []
@@ -227,9 +237,10 @@ def _save_measurement_png(records: list[dict], png_path: Path,
         if theta is not None:
             lines.append(field_direction_summary_line(theta, plan.geometry_cfg.field_phi_deg))
         freq_Hz = plan.header_extra.get("excitation_frequency_Hz")
-        amp_A = plan.header_extra.get("excitation_amplitude_A")
-        if freq_Hz is not None and amp_A is not None:
-            lines.append(f"AC excitation: {format_si(amp_A, 'A')} @ {format_si(freq_Hz, 'Hz')}")
+        amps = sorted({r["excitation_current_A_peak"] for r in records
+                       if r.get("excitation_current_A_peak") is not None})
+        if freq_Hz is not None and len(amps) == 1:
+            lines.append(f"AC excitation: {format_si(amps[0], 'A')} @ {format_si(freq_Hz, 'Hz')}")
         tc1, order1 = plan.demod1_cfg.filter.time_constant_s, plan.demod1_cfg.filter.order
         tc2, order2 = plan.demod2_cfg.filter.time_constant_s, plan.demod2_cfg.filter.order
         lines.append(f"Filter: 1f TC={tc1:g} s order={order1}, 2f TC={tc2:g} s order={order2}")
@@ -283,9 +294,11 @@ def page() -> None:
                     inputs["frequency_Hz"] = num_field(
                         "Excitation frequency (Hz)", float(d("frequency_Hz")),
                         hint="Avoid exact multiples of 50/60 Hz (mains pickup).")
-                    inputs["amplitude_A"] = num_field(
-                        "Excitation current (A, peak)", float(d("amplitude_A")),
-                        hint="Ideal current source — no series resistor.")
+                    inputs["amplitude_values"] = text_field(
+                        "Excitation current (A, peak)", d("amplitude_values"),
+                        hint="Ideal current source — no series resistor. Single value, or "
+                             "comma-separated list — one complete sweep runs per value "
+                             "(own 6221 re-arm), each saved to its own file.")
                     inputs["ac_compliance_V"] = num_field(
                         "6221 voltage compliance (V)", float(d("ac_compliance_V")))
 
@@ -463,9 +476,7 @@ def page() -> None:
             fig.update_yaxes(title_text="1f  R (V)", row=1, col=1)
             fig.update_yaxes(title_text="2f  R (V)", row=2, col=1)
             fig.update_xaxes(title_text="Magnetic field (mT)", row=2, col=1)
-            fig.update_layout(margin=dict(l=60, r=20, t=20, b=50), showlegend=False)
-            fig.add_scatter(x=[], y=[], mode="lines+markers", name="1f R", line=dict(color="#1f77b4"), row=1, col=1)
-            fig.add_scatter(x=[], y=[], mode="lines+markers", name="2f R", line=dict(color="#ff7f0e"), row=2, col=1)
+            fig.update_layout(margin=dict(l=60, r=20, t=20, b=50), showlegend=True)
             with ui.element("div").classes("w-full").style("aspect-ratio: 1 / 2; max-height: 90vh"):
                 plot = ui.plotly(fig).classes("w-full h-full")
 
@@ -521,6 +532,13 @@ def page() -> None:
             state["sweep_rows_parsed"] = parse_sweep_rows(state["sweep_rows"])
         except ValueError as exc:
             state["sweep_rows_parse_error"] = str(exc)
+
+        state["amplitude_list"] = []
+        state["amplitude_parse_error"] = None
+        try:
+            state["amplitude_list"] = parse_value_list(state["amplitude_values"])
+        except ValueError as exc:
+            state["amplitude_parse_error"] = str(exc)
 
         return state, errors
 
@@ -584,13 +602,33 @@ def page() -> None:
 
     # ── Run wiring ───────────────────────────────────────────────────────
 
+    series_state: dict = {}
+
+    def init_series(n_series: int, labels: list[Optional[str]]) -> None:
+        fig.data = []
+        series_state["traces"] = {}
+        cmap = ["#2E3192", "#e34948", "#2ca02c", "#9467bd", "#8c564b", "#17becf", "#ff7f0e", "#7f7f7f"]
+        for i in range(n_series):
+            color = cmap[i % len(cmap)]
+            name = labels[i]
+            fig.add_trace(go.Scatter(x=[], y=[], mode="lines+markers",
+                                      name=f"1f {name}" if name else "1f R",
+                                      line=dict(color=color), legendgroup=f"s{i}"), row=1, col=1)
+            fig.add_trace(go.Scatter(x=[], y=[], mode="lines+markers",
+                                      name=f"2f {name}" if name else "2f R",
+                                      line=dict(color=color, dash="dot"), legendgroup=f"s{i}"),
+                          row=2, col=1)
+            series_state["traces"][i] = (2 * i, 2 * i + 1)
+
     def on_record(record: dict) -> None:
+        idx = record.get("series_index", 0)
+        t1, t2 = series_state["traces"][idx]
         has_field = record.get("magnet_field_mT") is not None
         x = record["magnet_field_mT"] if has_field else record["point_index"]
-        fig.data[0].x = fig.data[0].x + (x,)
-        fig.data[0].y = fig.data[0].y + (record["1f_R_V"],)
-        fig.data[1].x = fig.data[1].x + (x,)
-        fig.data[1].y = fig.data[1].y + (record["2f_R_V"],)
+        fig.data[t1].x = fig.data[t1].x + (x,)
+        fig.data[t1].y = fig.data[t1].y + (record["1f_R_V"],)
+        fig.data[t2].x = fig.data[t2].x + (x,)
+        fig.data[t2].y = fig.data[t2].y + (record["2f_R_V"],)
         plot.update()
         table.rows.append({
             "n": record["point_index"] + 1,
@@ -606,31 +644,39 @@ def page() -> None:
     def on_status(text: str) -> None:
         status_label.set_text(text)
 
+    def on_run_label(text: str) -> None:
+        run_label.set_text(text)
+
     def on_log(text: str, level: int) -> None:
         log_area.push(text)
 
-    async def _prompt_status_comment(plan: MeasurementPlan, records: list[dict]) -> None:
+    async def _prompt_status_comment(plan: MeasurementPlan, run_contexts: list[RunContext],
+                                      records: list[dict]) -> None:
         result = await status_comment_dialog(page_client)
         if result is None:
             return
         status, comment = result
-        ctx = plan.run_ctx
-        header_fields = build_header_fields(plan, records, status=status, comment=comment)
-        try:
-            if records or not ctx.raw_path.exists():
-                write_record(ctx.raw_path, records, header_fields)
-            finalize_index_row(ctx.sample_dir.parent, ctx.sample, ctx.run_number, header_fields)
-        except Exception:
-            ui.notify("Could not save final status/comment.", type="negative")
-        if comment:
+        for series_idx, ctx in enumerate(run_contexts):
+            iter_records = [r for r in records if r.get("series_index", 0) == series_idx]
+            amp = iter_records[0].get("excitation_current_A_peak") if iter_records else None
+            extra = {"excitation_amplitude_A": amp} if amp is not None else None
+            header_fields = build_header_fields(
+                plan, ctx, iter_records, status=status, comment=comment, extra=extra,
+            )
             try:
-                png_path = proc_path(ctx.sample_dir.parent, ctx.sample, ctx.run_str, ctx.device,
-                                      MEASUREMENT_TYPE, "plot")
-                _save_measurement_png(records, png_path, plan=plan, comment=comment)
+                if iter_records or not ctx.raw_path.exists():
+                    write_record(ctx.raw_path, iter_records, header_fields)
+                finalize_index_row(plan.data_root, ctx.sample, ctx.run_number, header_fields)
+            except Exception:
+                ui.notify("Could not save final status/comment.", type="negative")
+        if comment and run_contexts:
+            try:
+                _save_measurement_png(records, _combined_png_path(run_contexts, plan),
+                                       plan=plan, comment=comment)
             except Exception:
                 pass
 
-    def make_on_finished(plan: MeasurementPlan):
+    def make_on_finished(plan: MeasurementPlan, run_contexts: list[RunContext]):
         def on_finished(final: FinalStatus, result) -> None:
             label = {"completed": "Measurement complete.", "aborted": "Measurement aborted.",
                       "error": f"ERROR: {final.error}"}[final.status]
@@ -641,20 +687,28 @@ def page() -> None:
             handle = controller["c"].handle if controller["c"] is not None else None
             records = list(handle.records) if handle is not None else []
             background_tasks.create(
-                _prompt_status_comment(plan, records), name="status_comment_prompt")
+                _prompt_status_comment(plan, run_contexts, records), name="status_comment_prompt")
         return on_finished
 
-    def _finalize(plan: MeasurementPlan, records: list[dict], result, status: str) -> list[str]:
-        ctx = plan.run_ctx
-        data_root = ctx.sample_dir.parent
-        header_fields = build_header_fields(plan, records, status=status, comment="")
-        write_record(ctx.raw_path, records, header_fields)
-        finalize_index_row(data_root, ctx.sample, ctx.run_number, header_fields)
-        png_path = proc_path(data_root, ctx.sample, ctx.run_str, ctx.device, MEASUREMENT_TYPE, "plot")
-        _save_measurement_png(records, png_path, plan=plan)
-        return [str(ctx.raw_path), str(png_path)]
+    def _combined_png_path(run_contexts: list[RunContext], plan: MeasurementPlan) -> Path:
+        first, last = run_contexts[0], run_contexts[-1]
+        run_str_label = first.run_str if first is last else f"{first.run_str}-{last.run_str}"
+        return proc_path(plan.data_root, first.sample, run_str_label, first.device,
+                          MEASUREMENT_TYPE, "combined", combined=True)
 
-    def make_run_fn(plan: MeasurementPlan):
+    def _finish_artifacts(records: list[dict], run_contexts: list[RunContext],
+                           plan: MeasurementPlan) -> list[str]:
+        output_paths = [str(c.raw_path) for c in run_contexts]
+        if not run_contexts:
+            return output_paths
+        png_path = _combined_png_path(run_contexts, plan)
+        try:
+            _save_measurement_png(records, png_path, plan=plan)
+            return output_paths + [str(png_path)]
+        except Exception:
+            return output_paths
+
+    def make_run_fn(plan: MeasurementPlan, run_contexts: list[RunContext]):
         def run_fn(stop_event, cb: RunCallbacks):
             daq = source = magnet = gaussmeter = temp_ctrl = None
             try:
@@ -666,23 +720,8 @@ def page() -> None:
                 cb.on_status("Synchronizing MDS …")
                 mds = setup_mds(daq, leader=plan.leader, follower=plan.follower)
 
-                # Checked here too, not just by build_summary(): connect_ac_source()
-                # immediately arms and starts the 6221 at plan.ac_cfg.amplitude_A —
-                # catch a mistyped exponent before that, not after.
-                _check_ac_safety(plan.ac_cfg)
                 disable_sigout(daq, plan.leader)
                 disable_sigout(daq, plan.follower)
-
-                cb.on_status("Starting 6221 AC current source …")
-                source = connect_ac_source(plan.ac_cfg)
-
-                cb.on_status("Locking MFLI oscillators to the 6221 marker (ExtRef) …")
-                configure_external_reference(daq, plan.leader_extref_cfg, plan.ac_cfg.frequency_Hz)
-                configure_external_reference(daq, plan.follower_extref_cfg, plan.ac_cfg.frequency_Hz)
-                if not wait_for_reference_lock(daq, plan.leader_extref_cfg, plan.extref_lock_timeout_s, stop_event):
-                    log.warning("Leader ExtRef PLL did not report locked — check the marker cabling.")
-                if not wait_for_reference_lock(daq, plan.follower_extref_cfg, plan.extref_lock_timeout_s, stop_event):
-                    log.warning("Follower ExtRef PLL did not report locked — check the marker fan-out cabling.")
 
                 cb.on_status("Configuring demodulators …")
                 configure_demodulator(daq, plan.demod1_cfg)
@@ -697,6 +736,8 @@ def page() -> None:
                     magnet = connect_magnet(plan.magnet_cfg)
                     cb.on_status("Connecting gaussmeter …")
                     gaussmeter = connect_gaussmeter(plan.gauss_cfg)
+                    # Amplitude-independent -- built once, reused for every
+                    # amplitude iteration below.
                     points = [
                         MeasurementPoint(magnet_current_A=I,
                                          set_action=lambda daq, I=I: set_magnet_current(
@@ -707,59 +748,129 @@ def page() -> None:
                 else:
                     points = [MeasurementPoint()]
 
-                demod2_phase_null_1f_deg = None
-                if plan.phase_cal_enabled:
-                    cb.on_status("Phase calibration: nulling 1f Y (leader demod phaseshift) …")
-                    if magnet is not None and plan.phase_cal_current_A is not None:
-                        log.info("Phase calibration: ramping magnet to %.4f A ...", plan.phase_cal_current_A)
-                        set_magnet_current(magnet, plan.magnet_cfg, plan.phase_cal_current_A,
-                                           gaussmeter, plan.gauss_cfg,
-                                           plan.acq_cfg.field_settle_tolerance_mT, stop_event)
-                        time.sleep(plan.acq_cfg.settling_time_s)
-                    result = auto_null_phase(
-                        daq, plan.demod1_cfg, n_averages=plan.phase_cal_n_averages,
-                        max_iterations=plan.phase_cal_max_iterations,
-                    )
-                    if not result.converged:
-                        log.warning(
-                            "Phase null did not fully converge after %d iteration(s) "
-                            "(|Y|/R=%.2e) — check cabling/contacts before trusting the 2f data.",
-                            result.iterations, result.residual_ratio,
+                multi = len(plan.amplitudes_A) > 1
+                for series_idx, amp in enumerate(plan.amplitudes_A):
+                    if stop_event.is_set():
+                        break
+
+                    plan.ac_cfg.amplitude_A = amp
+                    label = f"I={amp:g}A" if multi else None
+
+                    # Checked here too, not just by build_summary(): connect_ac_source()
+                    # immediately arms and starts the 6221 at plan.ac_cfg.amplitude_A —
+                    # catch a mistyped exponent before that, not after.
+                    _check_ac_safety(plan.ac_cfg)
+                    if source is not None:
+                        safe_shutdown("6221 AC source", lambda _s=source: shutdown_ac_source(_s))
+                        source = None
+                    cb.on_status(f"Starting 6221 AC current source{f' ({amp:g} A)' if multi else ''} …")
+                    source = connect_ac_source(plan.ac_cfg)
+
+                    cb.on_status("Locking MFLI oscillators to the 6221 marker (ExtRef) …")
+                    configure_external_reference(daq, plan.leader_extref_cfg, plan.ac_cfg.frequency_Hz)
+                    configure_external_reference(daq, plan.follower_extref_cfg, plan.ac_cfg.frequency_Hz)
+                    if not wait_for_reference_lock(daq, plan.leader_extref_cfg,
+                                                   plan.extref_lock_timeout_s, stop_event):
+                        log.warning("Leader ExtRef PLL did not report locked — check the marker cabling.")
+                    if not wait_for_reference_lock(daq, plan.follower_extref_cfg,
+                                                   plan.extref_lock_timeout_s, stop_event):
+                        log.warning("Follower ExtRef PLL did not report locked — check the marker fan-out cabling.")
+
+                    demod2_phase_null_1f_deg = None
+                    if plan.phase_cal_enabled:
+                        cb.on_status("Phase calibration: nulling 1f Y (leader demod phaseshift) …")
+                        if magnet is not None and plan.phase_cal_current_A is not None:
+                            log.info("Phase calibration: ramping magnet to %.4f A ...",
+                                     plan.phase_cal_current_A)
+                            set_magnet_current(magnet, plan.magnet_cfg, plan.phase_cal_current_A,
+                                               gaussmeter, plan.gauss_cfg,
+                                               plan.acq_cfg.field_settle_tolerance_mT, stop_event)
+                            time.sleep(plan.acq_cfg.settling_time_s)
+                        result = auto_null_phase(
+                            daq, plan.demod1_cfg, n_averages=plan.phase_cal_n_averages,
+                            max_iterations=plan.phase_cal_max_iterations,
                         )
-                    d2 = acquire_averaged(daq, plan.demod2_cfg, plan.phase_cal_n_averages)
-                    log.info(
-                        "2f snapshot at calibration point: X=%.4e V  Y=%.4e V  R=%.4e V — "
-                        "check which channel carries the structured field dependence in the "
-                        "recorded sweep before trusting either one.",
-                        d2["x_mean"], d2["y_mean"], d2["r_mean"],
+                        if not result.converged:
+                            log.warning(
+                                "Phase null did not fully converge after %d iteration(s) "
+                                "(|Y|/R=%.2e) — check cabling/contacts before trusting the 2f data.",
+                                result.iterations, result.residual_ratio,
+                            )
+                        d2 = acquire_averaged(daq, plan.demod2_cfg, plan.phase_cal_n_averages)
+                        log.info(
+                            "2f snapshot at calibration point: X=%.4e V  Y=%.4e V  R=%.4e V — "
+                            "check which channel carries the structured field dependence in the "
+                            "recorded sweep before trusting either one.",
+                            d2["x_mean"], d2["y_mean"], d2["r_mean"],
+                        )
+                        cb.on_status("Phase calibration: anchoring follower 2f reference (1f null) …")
+                        demod2_phase_null_1f_deg = null_follower_reference_via_1f(
+                            daq, plan.demod2_cfg,
+                            n_averages=plan.phase_cal_n_averages,
+                            max_iterations=plan.phase_cal_max_iterations,
+                        )
+
+                    # A fresh RunContext (own run number, own file) EVERY
+                    # amplitude iteration -- never reuse one across the series.
+                    ctx = allocate_run(
+                        plan.data_root, plan.sample, plan.device, MEASUREMENT_TYPE,
+                        temperature_setpoint_K=plan.temperature_setpoint_K,
+                        key_axis=None, series=plan.series,
                     )
-                    cb.on_status("Phase calibration: anchoring follower 2f reference (1f null) …")
-                    demod2_phase_null_1f_deg = null_follower_reference_via_1f(
-                        daq, plan.demod2_cfg,
-                        n_averages=plan.phase_cal_n_averages,
-                        max_iterations=plan.phase_cal_max_iterations,
+                    run_contexts.append(ctx)
+                    cb.on_run_label(f"Run #{ctx.run_str}")
+                    plan.acq_cfg.output_file = str(ctx.raw_path)
+                    write_csv = make_incremental_writer(
+                        ctx.raw_path,
+                        lambda records, _ctx=ctx, _a=amp: build_header_fields(
+                            plan, _ctx, records, status="in_progress", comment="",
+                            extra={"excitation_amplitude_A": _a},
+                        ),
                     )
 
-                cb.on_status("Running measurement …")
-                write_csv = make_incremental_writer(
-                    plan.run_ctx.raw_path,
-                    lambda records: build_header_fields(plan, records, status="in_progress", comment=""),
-                )
-                return run_measurement(
-                    daq, plan.ac_cfg, plan.leader_extref_cfg, plan.follower_extref_cfg,
-                    plan.demod1_cfg, plan.demod2_cfg, plan.acq_cfg, points,
-                    stop_event=stop_event, on_point=cb.on_point,
-                    gaussmeter=gaussmeter, gauss_cfg=plan.gauss_cfg,
-                    temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg, geometry_cfg=plan.geometry_cfg,
-                    demod2_phase_null_1f_deg=demod2_phase_null_1f_deg, mds=mds,
-                    write_csv=write_csv,
-                )
+                    iter_records: list[dict] = []
+
+                    def tagged_on_point(record: dict, _idx=series_idx, _label=label,
+                                         _iter=iter_records) -> None:
+                        record["series_index"] = _idx
+                        record["series_label"] = _label
+                        _iter.append(record)
+                        cb.on_point(record)
+
+                    cb.on_status("Running measurement …" if not multi
+                                 else f"Running measurement ({label}) …")
+                    iter_error: Optional[BaseException] = None
+                    try:
+                        run_measurement(
+                            daq, plan.ac_cfg, plan.leader_extref_cfg, plan.follower_extref_cfg,
+                            plan.demod1_cfg, plan.demod2_cfg, plan.acq_cfg, points,
+                            stop_event=stop_event, on_point=tagged_on_point,
+                            gaussmeter=gaussmeter, gauss_cfg=plan.gauss_cfg,
+                            temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg, geometry_cfg=plan.geometry_cfg,
+                            demod2_phase_null_1f_deg=demod2_phase_null_1f_deg, mds=mds,
+                            write_csv=write_csv,
+                        )
+                    except Exception as exc:
+                        iter_error = exc
+
+                    iter_status = "error" if iter_error is not None \
+                        else ("aborted" if stop_event.is_set() else "completed")
+                    header_fields = build_header_fields(
+                        plan, ctx, iter_records, status=iter_status, comment="",
+                        extra={"excitation_amplitude_A": amp},
+                    )
+                    write_record(ctx.raw_path, iter_records, header_fields)
+                    finalize_index_row(plan.data_root, ctx.sample, ctx.run_number, header_fields)
+
+                    if iter_error is not None:
+                        raise iter_error
+                return None
             finally:
                 # 6221 output off first (immediate, no current into the DUT),
                 # so the magnet can start its ramp-down right away rather
                 # than waiting behind it.
                 if source is not None:
-                    shutdown_ac_source(source)
+                    safe_shutdown("6221 AC source", lambda: shutdown_ac_source(source))
                 if magnet is not None:
                     shutdown_magnet(magnet, plan.magnet_cfg)
                 if gaussmeter is not None:
@@ -783,25 +894,25 @@ def page() -> None:
         _save_settings(collect_raw())
 
         plan = build_plan(state)
-        run_label.set_text(f"Run #{plan.run_ctx.run_str}")
         Path(state["data_dir"]).mkdir(parents=True, exist_ok=True)
+        labels = [f"I={amp:g}A" if len(plan.amplitudes_A) > 1 else None for amp in plan.amplitudes_A]
+        run_contexts: list[RunContext] = []
 
         rc = RunController(
-            suite=SUITE, measurement=PAGE_TITLE, run_fn=make_run_fn(plan),
-            save_artifacts=lambda records, result, status: _finalize(plan, records, result, status),
-            parameters=state, data_dir=state["data_dir"], planned_output_paths=[plan.acq_cfg.output_file],
-            on_record=on_record, on_status=on_status, on_log=on_log,
-            on_finished=make_on_finished(plan),
-            sample=plan.run_ctx.sample, device=plan.run_ctx.device,
-            run_number=plan.run_ctx.run_number,
+            suite=SUITE, measurement=PAGE_TITLE, run_fn=make_run_fn(plan, run_contexts),
+            save_artifacts=lambda records, result, status: _finish_artifacts(
+                records, run_contexts, plan),
+            parameters=state, data_dir=state["data_dir"], planned_output_paths=[],
+            on_record=on_record, on_status=on_status, on_run_label=on_run_label, on_log=on_log,
+            on_finished=make_on_finished(plan, run_contexts),
+            sample=plan.sample, device=plan.device,
         )
         if not rc.try_start():
             ui.notify("Another measurement is already running — see the banner above.", type="warning")
             return
         controller["c"] = rc
 
-        fig.data[0].x = (); fig.data[0].y = ()
-        fig.data[1].x = (); fig.data[1].y = ()
+        init_series(len(plan.amplitudes_A), labels)
         plot.update()
         table.rows.clear()
         table.update()

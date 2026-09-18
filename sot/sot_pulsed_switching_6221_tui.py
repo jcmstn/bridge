@@ -20,6 +20,7 @@ Run:  python sot_pulsed_switching_6221_tui.py
 
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 import multiprocessing as mp
@@ -132,7 +133,7 @@ DEFAULTS: dict = {
     "pulse_width_s": "1e-3",
     "pulse_compliance_V": "5.0",
     # delayed harmonic read (6221 AC + MFLI)
-    "sense_current_A": "1e-4",
+    "sense_current_values": "1e-4",
     "compliance_V": "2.0",
     "frequency_Hz": "977.0",
     "phasemarker_line": "1",
@@ -198,7 +199,6 @@ NUMERIC_FIELDS: dict = {
     "pulse_current_step_A": float,
     "pulse_width_s": float,
     "pulse_compliance_V": float,
-    "sense_current_A": float,
     "compliance_V": float,
     "frequency_Hz": float,
     "phasemarker_line": int,
@@ -231,7 +231,7 @@ TEXT_FIELDS = ["device", "cooldown",
                "source_visa_resource", "mfli_host", "mfli_device",
                "magnet_visa_resource",
                "gaussmeter_visa_resource", "temperature_visa_resource",
-               "temperature_sensor_uids", "magnet_current_A", "data_dir"]
+               "temperature_sensor_uids", "magnet_current_A", "sense_current_values", "data_dir"]
 OPTIONAL_NUMERIC_FIELDS = ["temperature_setpoint_K", "field_phi_deg"]
 TEMPERATURE_FIELD_IDS = ["temperature_visa_resource", "temperature_sensor_uids"]
 
@@ -268,6 +268,17 @@ def _resolve_magnet_currents(state: dict) -> tuple[list[float], Optional[str]]:
     file. A single value behaves exactly as before."""
     try:
         return parse_value_list(state["magnet_current_A"]), None
+    except ValueError as exc:
+        return [], str(exc)
+
+
+def _resolve_sense_currents(state: dict) -> tuple[list[float], Optional[str]]:
+    """(list, None) or ([], error) — one or more 6221 AC read-current
+    amplitudes (comma-separated); nests with the assist-current list
+    (sense outer, since changing it means a full 6221 AC re-arm; magnet
+    inner), each pair its own complete pulse-current sweep, its own file."""
+    try:
+        return parse_value_list(state["sense_current_values"]), None
     except ValueError as exc:
         return [], str(exc)
 
@@ -310,6 +321,7 @@ class MeasurementPlan:
     gauss_cfg: GaussmeterConfig
     pulse_currents_A: List[float]
     magnet_currents_A: List[float]
+    sense_currents_A: List[float]
     field_theta_deg: Optional[float]
     field_phi_deg: Optional[float]
     field_settle_tolerance_mT: float
@@ -323,14 +335,17 @@ class MeasurementPlan:
     data_root: Path = _DEFAULT_DATA_DIR
 
     @property
-    def series_values(self) -> List[float]:
-        """One entry per assist-field current — one complete amplitude sweep
-        per value, each saved to its own file."""
-        return list(self.magnet_currents_A)
+    def series_values(self) -> List[tuple[float, float]]:
+        """Cross product of sense (6221 AC) currents x assist-field currents
+        -- one complete pulse-current sweep per pair, each saved to its own
+        file. Sense current is outer (changing it means a full 6221 AC
+        re-arm) and magnet is inner (just a ramp, no reconnect) -- see
+        dc_spin_valve_tui.py for the same nested-product pattern."""
+        return list(itertools.product(self.sense_currents_A, self.magnet_currents_A))
 
     @property
     def total_points(self) -> int:
-        return len(self.pulse_currents_A) * max(1, len(self.magnet_currents_A))
+        return len(self.pulse_currents_A) * max(1, len(self.series_values))
 
 
 def build_header_fields(plan: "MeasurementPlan", ctx: RunContext, records: list[dict], *,
@@ -448,15 +463,22 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
                "pulse. Start well below the expected switching current.")
 
     # read (6221 AC + MFLI)
-    if state["sense_current_A"] <= 0:
-        errors.append("6221 AC current amplitude must be > 0 A.")
-    elif state["sense_current_A"] > _READ_CURRENT_CEILING_A:
-        errors.append(f"6221 AC current amplitude {format_si(state['sense_current_A'], 'A')} "
-                      f"exceeds the {format_si(_READ_CURRENT_CEILING_A, 'A')} safety ceiling "
-                      "— the Hall read needs µA–mA; check for a mistyped exponent.")
-    elif state["sense_current_A"] > 1e-3:
-        warnings.append(f"6221 AC current amplitude {format_si(state['sense_current_A'], 'A')} "
-                        "is large for a read — keep it well below the switching current.")
+    sense_currents = state.get("sense_currents_A", [])
+    if state.get("sense_currents_parse_error"):
+        errors.append(f"6221 AC current amplitude(s): {state['sense_currents_parse_error']}")
+    else:
+        zero = [i for i in sense_currents if i <= 0]
+        over = [i for i in sense_currents if i > _READ_CURRENT_CEILING_A]
+        large = [i for i in sense_currents if 1e-3 < i <= _READ_CURRENT_CEILING_A]
+        if zero:
+            errors.append("6221 AC current amplitude must be > 0 A.")
+        elif over:
+            errors.append(f"6221 AC current amplitude(s) {over} exceed the "
+                          f"{format_si(_READ_CURRENT_CEILING_A, 'A')} safety ceiling — the Hall "
+                          "read needs µA–mA; check for a mistyped exponent.")
+        elif large:
+            warnings.append(f"6221 AC current amplitude(s) {large} are large for a read — keep "
+                            "them well below the switching current.")
     if state["compliance_V"] <= 0:
         errors.append("6221 read compliance must be > 0 V.")
     elif state["compliance_V"] > _READ_COMPLIANCE_CEILING_V:
@@ -496,21 +518,25 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
 
     n = max(1, len(amps))
     n_currents = max(1, len(currents))
+    n_sense = max(1, len(sense_currents))
+    n_files = n_currents * n_sense
     tc = state["filter_time_constant_s"]
     acquire_window_s = max(0.1, 3.0 * tc,
                            state["n_averages"] * 1.5 / max(state["sample_rate_Hz"], 1.0))
     per_point_s = (state["pulse_width_s"] + state["delay_after_pulse_s"] + state["lock_timeout_s"]
                    + state["settle_after_enable_s"] + acquire_window_s + 0.2)
     info.append(f"{n} amplitudes, one pulse each"
-                + (f", × {n_currents} assist currents = {n * n_currents} total points"
-                   if n_currents > 1 else ""))
-    info.append(f"Estimated run time ≈ {format_duration(n * n_currents * per_point_s)} "
+                + (f", × {n_files} files ({n_currents} assist current(s) x {n_sense} sense "
+                   f"current(s)) = {n * n_files} total points"
+                   if n_files > 1 else ""))
+    info.append(f"Estimated run time ≈ {format_duration(n * n_files * per_point_s)} "
                 f"(worst case — assumes the full lock timeout every point)")
     info.append(f"For P(V) / I50 statistics, re-run this sweep several times.")
-    info.append(f"AC excitation: {format_si(state['sense_current_A'], 'A')} peak @ "
-                f"{state['frequency_Hz']:g} Hz, {state['harmonic']}f read, phase marker on "
-                f"Trigger Link pin {state['phasemarker_line']} → MFLI Aux In "
-                f"{state['aux_input_ch'] + 1}")
+    if sense_currents:
+        info.append(f"AC excitation: {format_si(sense_currents[0], 'A')} peak @ "
+                    f"{state['frequency_Hz']:g} Hz, {state['harmonic']}f read, phase marker on "
+                    f"Trigger Link pin {state['phasemarker_line']} → MFLI Aux In "
+                    f"{state['aux_input_ch'] + 1}")
 
     if state["pll_demod_index"] == state["demod_index"]:
         errors.append(
@@ -545,8 +571,8 @@ def compute_filename_preview(state: dict) -> Optional[str]:
     preview = preview_raw_filename(
         state["sample"], state["device"], MEASUREMENT_TYPE,
         temperature_setpoint_K=state.get("temperature_setpoint_K"))
-    suffix = (" (one file per assist current)"
-              if len(state.get("magnet_currents_A", [])) > 1 else "")
+    n_files = max(1, len(state.get("magnet_currents_A", []))) * max(1, len(state.get("sense_currents_A", [])))
+    suffix = " (one file per run)" if n_files > 1 else ""
     return f"{preview}_<I_mag A>_<timestamp>.csv{suffix}"
 
 
@@ -644,9 +670,10 @@ def _save_measurement_png(records: list[dict], png_path: Path, harmonic: int,
     if plan is not None:
         if plan.field_theta_deg is not None:
             lines.append(field_direction_summary_line(plan.field_theta_deg, plan.field_phi_deg))
-        sense_current_A = plan.header_extra.get("sense_current_A")
-        if sense_current_A is not None:
-            lines.append(f"6221 AC read current: {format_si(sense_current_A, 'A')}")
+        sense_currents = sorted({r["excitation_current_A_peak"] for r in records
+                                  if r.get("excitation_current_A_peak") is not None})
+        if len(sense_currents) == 1:
+            lines.append(f"6221 AC read current: {format_si(sense_currents[0], 'A')}")
     if comment:
         lines.append(f"Comment: {textwrap.shorten(comment, width=90, placeholder='…')}")
     if lines:
@@ -816,10 +843,12 @@ class RunScreen(Screen):
         status, comment = result
         for series_idx, ctx in enumerate(self._run_contexts):
             iter_records = [r for r in self._records if r.get("series_index", 0) == series_idx]
+            extra = None
+            if iter_records:
+                extra = {"magnet_current_A": iter_records[0].get("magnet_current_A"),
+                          "sense_current_A": iter_records[0].get("excitation_current_A_peak")}
             header_fields = build_header_fields(
-                self.plan, ctx, iter_records, status=status, comment=comment,
-                extra={"magnet_current_A": iter_records[0].get("magnet_current_A")}
-                if iter_records else None)
+                self.plan, ctx, iter_records, status=status, comment=comment, extra=extra)
             try:
                 if iter_records or not ctx.raw_path.exists():
                     write_record(ctx.raw_path, iter_records, header_fields)
@@ -860,11 +889,7 @@ class RunScreen(Screen):
             points = [PulsePoint(pulse_current_A=float(v)) for v in plan.pulse_currents_A]
             _check_write_safety(plan.pulse_cfg)
             _check_pulse_currents(points)
-            _check_read_safety(plan.read_cfg)
             _check_extref_demod_conflict(plan.demod_cfg, plan.extref_cfg)
-            self._set_status_threadsafe("Connecting to Keithley 6221 …")
-            source = connect_ac_source(plan.ac_cfg)
-            _six221_ac_output_off(source)          # channel quiet before any pulse
 
             self._set_status_threadsafe("Connecting to MFLI …")
             daq = connect(plan.mfli_host, plan.mfli_port)
@@ -880,11 +905,36 @@ class RunScreen(Screen):
                 self._set_status_threadsafe("Connecting to MercuryiTC …")
                 temp_ctrl = connect_temperature_controller(plan.temp_cfg)
 
-            for series_idx, I_mag in enumerate(plan.series_values):
+            multi_sense = len(plan.sense_currents_A) > 1
+            for series_idx, (I_sense, I_mag) in enumerate(plan.series_values):
                 if self._stop_event.is_set():
                     break
 
-                label = f"I={I_mag:g}A" if len(plan.series_values) > 1 else None
+                plan.ac_cfg.amplitude_A = I_sense
+                plan.read_cfg.sense_current_A = I_sense
+
+                label_parts = []
+                if multi_sense:
+                    label_parts.append(f"I_sense={I_sense:g}A")
+                if len(plan.magnet_currents_A) > 1:
+                    label_parts.append(f"I_mag={I_mag:g}A")
+                label = ", ".join(label_parts) or None
+
+                # Checked here too, not just by build_summary(): connect_ac_source()
+                # immediately arms and starts the 6221 at plan.ac_cfg.amplitude_A —
+                # catch a mistyped exponent before that, not after. Amplitude
+                # requires a full re-arm -- tear down the previous amplitude's
+                # source first.
+                _check_read_safety(plan.read_cfg)
+                if source is not None:
+                    safe_shutdown("6221 AC source", lambda _s=source: shutdown_ac_source(_s))
+                    source = None
+                self._set_status_threadsafe(
+                    f"Starting 6221 AC current source{f' ({I_sense:g} A)' if multi_sense else ''} …"
+                )
+                source = connect_ac_source(plan.ac_cfg)
+                _six221_ac_output_off(source)          # channel quiet before any pulse
+
                 self._set_status_threadsafe(f"Ramping magnet to {I_mag:g} A …")
                 set_magnet_current(magnet, plan.magnet_cfg, I_mag,
                                    gaussmeter, plan.gauss_cfg, plan.field_settle_tolerance_mT,
@@ -897,12 +947,12 @@ class RunScreen(Screen):
                 self._set_run_label_threadsafe(f"Run #{ctx.run_str}")
                 write_csv = make_incremental_writer(
                     ctx.raw_path,
-                    lambda records, _ctx=ctx, _I=I_mag: build_header_fields(
+                    lambda records, _ctx=ctx, _I=I_mag, _s=I_sense: build_header_fields(
                         plan, _ctx, records, status="in_progress", comment="",
-                        extra={"magnet_current_A": _I}))
+                        extra={"magnet_current_A": _I, "sense_current_A": _s}))
 
-                status = "Running the switching sweep …" if len(plan.series_values) == 1 \
-                    else f"Running the switching sweep (I_mag={I_mag:g} A) …"
+                status = "Running the switching sweep …" if not label_parts \
+                    else f"Running the switching sweep ({', '.join(label_parts)}) …"
                 self._set_status_threadsafe(status)
                 iter_error: Optional[BaseException] = None
                 try:
@@ -923,7 +973,7 @@ class RunScreen(Screen):
                 iter_records = [r for r in self._records if r.get("series_index", 0) == series_idx]
                 header_fields = build_header_fields(
                     plan, ctx, iter_records, status=iter_status, comment="",
-                    extra={"magnet_current_A": I_mag})
+                    extra={"magnet_current_A": I_mag, "sense_current_A": I_sense})
                 write_record(ctx.raw_path, iter_records, header_fields)
                 finalize_index_row(plan.data_root, ctx.sample, ctx.run_number, header_fields)
                 if iter_error is not None:
@@ -1045,9 +1095,12 @@ class SOTPulsedSwitching6221App(App):
                               DEFAULTS["delay_after_pulse_s"],
                               validators=[Number(minimum=0.0, failure_description="must be ≥ 0")],
                               hint="Wait between pulse end and the read."),
-                        field("sense_current_A", "6221 AC current amplitude, peak (A)",
-                              DEFAULTS["sense_current_A"],
-                              hint="Keep well below the switching current."),
+                        field("sense_current_values", "6221 AC current amplitude, peak (A)",
+                              DEFAULTS["sense_current_values"], kind="text",
+                              hint="Keep well below the switching current. Single value, or "
+                                   "comma-separated list — one complete pulse-current sweep "
+                                   "runs per value (own 6221 re-arm), each saved to its own "
+                                   "file."),
                         field("compliance_V", "6221 read compliance (V)", DEFAULTS["compliance_V"],
                               hint="Keep low — the Hall read needs < 1 V of headroom."),
                         field("frequency_Hz", "AC excitation frequency (Hz)",
@@ -1319,6 +1372,8 @@ class SOTPulsedSwitching6221App(App):
             _resolve_pulse_currents(state)
         state["magnet_currents_A"], state["magnet_currents_parse_error"] = \
             _resolve_magnet_currents(state)
+        state["sense_currents_A"], state["sense_currents_parse_error"] = \
+            _resolve_sense_currents(state)
         return state, errors
 
     def on_input_changed(self, event: Input.Changed) -> None:
@@ -1397,7 +1452,7 @@ class SOTPulsedSwitching6221App(App):
             width_s=state["pulse_width_s"], compliance_V=state["pulse_compliance_V"],
         )
         read_cfg = ReadConfig(
-            sense_current_A=state["sense_current_A"], compliance_V=state["compliance_V"],
+            sense_current_A=state["sense_currents_A"][0], compliance_V=state["compliance_V"],
             frequency_Hz=state["frequency_Hz"], phasemarker_line=state["phasemarker_line"],
             harmonic=state["harmonic"], n_averages=state["n_averages"],
             settle_after_enable_s=state["settle_after_enable_s"],
@@ -1405,7 +1460,7 @@ class SOTPulsedSwitching6221App(App):
             delay_after_pulse_s=state["delay_after_pulse_s"],
         )
         ac_cfg = ACSourceConfig(
-            visa_resource=state["source_visa_resource"], amplitude_A=state["sense_current_A"],
+            visa_resource=state["source_visa_resource"], amplitude_A=state["sense_currents_A"][0],
             frequency_Hz=state["frequency_Hz"], compliance_V=state["compliance_V"],
             phasemarker_line=state["phasemarker_line"],
         )
@@ -1446,7 +1501,7 @@ class SOTPulsedSwitching6221App(App):
             "pulse_width_s": state["pulse_width_s"],
             "pulse_compliance_V": state["pulse_compliance_V"],
             "delay_after_pulse_s": state["delay_after_pulse_s"],
-            "sense_current_A": state["sense_current_A"],
+            "sense_current_A": state["sense_currents_A"][0],
             "frequency_Hz": state["frequency_Hz"],
             "phasemarker_line": state["phasemarker_line"],
             "harmonic": state["harmonic"],
@@ -1463,6 +1518,7 @@ class SOTPulsedSwitching6221App(App):
             mfli_host=state["mfli_host"], mfli_port=state["mfli_port"],
             read_cfg=read_cfg, magnet_cfg=magnet_cfg, gauss_cfg=gauss_cfg,
             pulse_currents_A=state["pulse_current_list"], magnet_currents_A=state["magnet_currents_A"],
+            sense_currents_A=state["sense_currents_A"],
             field_theta_deg=state["field_theta_deg"], field_phi_deg=state["field_phi_deg"],
             field_settle_tolerance_mT=state["field_settle_tolerance_mT"],
             data_root=self.data_root,

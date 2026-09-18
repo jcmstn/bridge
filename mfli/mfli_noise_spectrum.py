@@ -513,7 +513,7 @@ def build_header_fields(ctx: RunContext, cond: str, label: str, spec: dict, *,
 def save_results(
     results: Dict[Tuple[str, str], dict], *,
     sample: str, device: str, cooldown: str, series: str, status: str = "completed",
-    data_root: Optional[Path] = None,
+    data_root: Optional[Path] = None, key_axis: Optional[Tuple[str, float]] = None,
 ) -> List[RunContext]:
     """
     Write one raw file per (condition, channel) pair via allocate_run() +
@@ -531,6 +531,11 @@ def save_results(
     plain main() usage); a TUI/web front end must pass its own identity
     bar's "Data root" — see docs/architecture.md's hard rule on this.
 
+    `key_axis`, when given (e.g. `("current_A", amplitude)`), is passed
+    straight through to every allocate_run() call in this batch -- used by
+    a caller running one full session per excitation-current value, so each
+    value's files carry that value in the filename.
+
     Returns the allocated RunContexts, in the same order as `results` --
     zip them together to recover which context belongs to which
     (condition, channel) pair (see finalize_comment()).
@@ -538,7 +543,7 @@ def save_results(
     root = _DATA_DIR if data_root is None else data_root
     contexts: List[RunContext] = []
     for (cond, label), spec in results.items():
-        ctx = allocate_run(root, sample, device, MEASUREMENT_TYPE, series=series)
+        ctx = allocate_run(root, sample, device, MEASUREMENT_TYPE, series=series, key_axis=key_axis)
         header_fields = build_header_fields(ctx, cond, label, spec,
                                              cooldown=cooldown, series=series, status=status)
         write_record(ctx.raw_path, _spec_records(spec), header_fields)

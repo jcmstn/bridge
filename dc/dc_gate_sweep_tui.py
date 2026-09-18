@@ -25,6 +25,7 @@ Requirements:
 
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 import multiprocessing as mp
@@ -135,7 +136,7 @@ DC_GATE_SWEEP_DESCRIPTION = (
 DEFAULTS: dict = {
     "source_visa_resource": "GPIB0::20::INSTR",
     "voltmeter_visa_resource": "GPIB0::7::INSTR",
-    "sense_current_A": "0.000001",
+    "sense_current_values": "0.000001",
     "compliance_V": "2.0",
     "source_delay_s": "0.05",
     "nplc": "5",
@@ -170,7 +171,6 @@ DEFAULTS: dict = {
 }
 
 NUMERIC_FIELDS: dict = {
-    "sense_current_A": float,
     "compliance_V": float,
     "source_delay_s": float,
     "nplc": float,
@@ -192,7 +192,7 @@ NUMERIC_FIELDS: dict = {
 }
 TEXT_FIELDS = ["source_visa_resource", "voltmeter_visa_resource", "gate_visa_resource",
                "device", "cooldown", "magnet_visa_resource",
-               "gaussmeter_visa_resource", "field_current_values",
+               "gaussmeter_visa_resource", "field_current_values", "sense_current_values",
                "temperature_visa_resource", "temperature_sensor_uids", "data_dir"]
 OPTIONAL_NUMERIC_FIELDS = ["temperature_setpoint_K"]
 FIELD_FIELD_IDS = [
@@ -256,6 +256,7 @@ class MeasurementPlan:
     cooldown: str
     header_extra: dict
     series: str
+    sense_currents_A: List[float]
     magnet_cfg: Optional[MagnetConfig] = None
     gauss_cfg: Optional[GaussmeterConfig] = None
     field_currents_A: Optional[List[float]] = None
@@ -265,8 +266,14 @@ class MeasurementPlan:
     data_root: Path = _DEFAULT_DATA_DIR
 
     @property
-    def series_values(self) -> List[Optional[float]]:
-        return list(self.field_currents_A) if self.field_currents_A else [None]
+    def series_values(self) -> List[tuple[Optional[float], float]]:
+        """Cross product of field (magnet-park) currents x sense currents --
+        one complete gate sweep per pair, each saved to its own file. Field
+        is outer (a physical ramp+settle) and sense is inner (an instant
+        config mutation) -- see dc_spin_valve_tui.py for the same
+        nested-product pattern."""
+        field_values = list(self.field_currents_A) if self.field_currents_A else [None]
+        return list(itertools.product(field_values, self.sense_currents_A))
 
     @property
     def total_points(self) -> int:
@@ -365,10 +372,19 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     if len(set(resources)) < len(resources):
         errors.append("Source (6221), voltmeter (2182), and gate (2400) VISA resources must all be different.")
 
-    if state["sense_current_A"] == 0:
-        errors.append("Sense current must be nonzero (resistance divides by it).")
+    sense_list: list[float] = []
+    if state.get("sense_current_parse_error"):
+        errors.append(f"Sense current list: {state['sense_current_parse_error']}")
     else:
-        info.append(f"Sense current I = {format_si(state['sense_current_A'], 'A')}")
+        sense_list = state.get("sense_current_list", [])
+        zero = [i for i in sense_list if i == 0]
+        if zero:
+            errors.append("Sense current must be nonzero (resistance divides by it).")
+        elif len(sense_list) > 1:
+            info.append(f"Sense currents: {sense_list} A — {len(sense_list)} complete gate "
+                        f"sweeps per field value, one file each")
+        elif sense_list:
+            info.append(f"Sense current I = {format_si(sense_list[0], 'A')}")
 
     if state["compliance_V"] <= 0:
         errors.append("Compliance voltage must be > 0 V.")
@@ -412,12 +428,17 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
                     f"±{state['current_limit_A']:g} A."
                 )
         n_series = len(field_list)
+        n_sense = max(1, len(sense_list))
+        n_files = max(1, n_series) * n_sense
         if n_series > 1:
             info.append(f"Field: {n_series} magnet currents {field_list} A — {n_series} complete gate "
                         f"sweeps, one file each, plotted together")
         elif n_series == 1:
             info.append(f"Field parked at I_magnet={field_list[0]:g} A "
                          "(actual field measured live via Lake Shore 475)")
+        if n_files > max(1, n_series):
+            info.append(f"{n_files} files total ({n_sense} sense current(s) x "
+                        f"{max(1, n_series)} field value(s))")
         tol_mT = state["field_settle_tolerance_mT"]
         if tol_mT <= 0:
             warnings.append("Field-settle tolerance is 0 — parking the magnet will wait the "
@@ -425,12 +446,17 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         elif tol_mT < 0.01:
             warnings.append(f"Field-settle tolerance {tol_mT:g} mT is below the 475's typical "
                              "reading noise — parking may stall until the settle timeout.")
-        total_points = n_sweep_points * max(1, n_series)
+        total_points = n_sweep_points * n_files
         settle_overhead = max(1, n_series) * state["field_settle_s"]
         info.append(f"Estimated total run time ≈ {format_duration(total_points * per_point_s + settle_overhead)}")
     else:
-        info.append("Magnet untouched — no field parked.")
-        info.append(f"Estimated total run time ≈ {format_duration(n_sweep_points * per_point_s)}")
+        n_sense = max(1, len(sense_list))
+        if n_sense > 1:
+            info.append(f"Magnet untouched — no field parked. {n_sense} sense currents → "
+                        f"{n_sense} files.")
+        else:
+            info.append("Magnet untouched — no field parked.")
+        info.append(f"Estimated total run time ≈ {format_duration(n_sweep_points * n_sense * per_point_s)}")
 
     # ── Temperature (MercuryiTC, optional) ──────────────────────────────────
     if state["enable_temperature"]:
@@ -456,8 +482,10 @@ def compute_filename_preview(state: dict) -> Optional[str]:
         state["sample"], state["device"], MEASUREMENT_TYPE,
         temperature_setpoint_K=state.get("temperature_setpoint_K"),
     )
-    suffix = (" (one file per magnet current)" if state.get("enable_field") and
-              len(state.get("field_current_list", [])) > 1 else "")
+    n_field = len(state.get("field_current_list", [])) if state.get("enable_field") else 0
+    n_sense = len(state.get("sense_current_list", []))
+    n_files = max(1, n_field) * max(1, n_sense)
+    suffix = f" (one file per run — {n_files} files)" if n_files > 1 else ""
     return f"{preview}_<timestamp>.csv{suffix}"
 
 
@@ -549,10 +577,9 @@ def _save_measurement_png(records: list[dict], png_path: Path,
     fig.tight_layout()
 
     lines: list[str] = []
-    if plan is not None:
-        sense_current_A = plan.header_extra.get("sense_current_A")
-        if sense_current_A is not None:
-            lines.append(f"Sense current: {format_si(sense_current_A, 'A')}")
+    sense_currents = sorted({r["sense_current_A"] for r in records if r.get("sense_current_A") is not None})
+    if len(sense_currents) == 1:
+        lines.append(f"Sense current: {format_si(sense_currents[0], 'A')}")
     if comment:
         lines.append(f"Comment: {textwrap.shorten(comment, width=90, placeholder='…')}")
     if lines:
@@ -717,9 +744,12 @@ class RunScreen(Screen):
         for series_idx, ctx in enumerate(self._run_contexts):
             iter_records = [r for r in self._records if r.get("series_index", 0) == series_idx]
             current_A = iter_records[0].get("magnet_current_A") if iter_records else None
+            sense_current_A = iter_records[0].get("sense_current_A") if iter_records else None
+            extra = {"sense_current_A": sense_current_A} if sense_current_A is not None else None
+            if current_A is not None:
+                extra = {**(extra or {}), "magnet_current_A": current_A}
             header_fields = build_header_fields(
-                self.plan, ctx, iter_records, status=status, comment=comment,
-                extra={"magnet_current_A": current_A} if current_A is not None else None,
+                self.plan, ctx, iter_records, status=status, comment=comment, extra=extra,
             )
             try:
                 # Never truncate an already-written raw file to an empty stub —
@@ -785,27 +815,36 @@ class RunScreen(Screen):
                 self._set_status_threadsafe("Connecting gaussmeter …")
                 gaussmeter = connect_gaussmeter(plan.gauss_cfg)
 
-            for series_idx, current_A in enumerate(plan.series_values):
+            _unset = object()
+            _parked_field_A = _unset
+            field_mT = None
+            for series_idx, (field_current_A, sense_current_A) in enumerate(plan.series_values):
                 if self._stop_event.is_set():
                     break
 
-                label = None
+                plan.src_cfg.sense_current_A = sense_current_A
+
+                label_parts = []
                 key_axis = None
-                field_mT = None
-                if current_A is not None:
-                    label = f"I_mag={current_A:g}A"
-                    key_axis = ("current_A", current_A)
-                    self._set_status_threadsafe(f"Parking magnet at {current_A:g} A …")
-                    set_magnet_current(magnet, plan.magnet_cfg, current_A,
-                                       gaussmeter, plan.gauss_cfg,
-                                       plan.field_settle_tolerance_mT, self._stop_event)
-                    time.sleep(plan.field_settle_s)
-                    field_mT = read_field_mT(gaussmeter, plan.gauss_cfg)
-                    log.info("Field parked: I_magnet=%.4f A  B=%.4f mT (measured)", current_A, field_mT)
+                if field_current_A is not None:
+                    label_parts.append(f"I_mag={field_current_A:g}A")
+                    key_axis = ("current_A", field_current_A)
+                    if field_current_A != _parked_field_A:
+                        self._set_status_threadsafe(f"Parking magnet at {field_current_A:g} A …")
+                        set_magnet_current(magnet, plan.magnet_cfg, field_current_A,
+                                           gaussmeter, plan.gauss_cfg,
+                                           plan.field_settle_tolerance_mT, self._stop_event)
+                        time.sleep(plan.field_settle_s)
+                        field_mT = read_field_mT(gaussmeter, plan.gauss_cfg)
+                        log.info("Field parked: I_magnet=%.4f A  B=%.4f mT (measured)",
+                                 field_current_A, field_mT)
+                        _parked_field_A = field_current_A
+                if len(plan.sense_currents_A) > 1:
+                    label_parts.append(f"I_sense={sense_current_A:g}A")
+                label = ", ".join(label_parts) or None
 
                 # A fresh RunContext (own run number, own file) EVERY
-                # iteration -- never reuse one across the magnet-current
-                # series.
+                # iteration -- never reuse one across the series.
                 ctx = allocate_run(
                     plan.data_root, plan.sample, plan.device, MEASUREMENT_TYPE,
                     temperature_setpoint_K=plan.temperature_setpoint_K,
@@ -816,16 +855,18 @@ class RunScreen(Screen):
                 plan.acq_cfg.output_file = str(ctx.raw_path)
                 write_csv = make_incremental_writer(
                     ctx.raw_path,
-                    lambda records, _ctx=ctx, _i=current_A, _b=field_mT: build_header_fields(
-                        plan, _ctx, records, status="in_progress", comment="",
-                        extra={"magnet_current_A": _i, "magnet_field_mT": _b} if _i is not None else None,
-                    ),
+                    lambda records, _ctx=ctx, _i=field_current_A, _b=field_mT, _s=sense_current_A:
+                        build_header_fields(
+                            plan, _ctx, records, status="in_progress", comment="",
+                            extra={"sense_current_A": _s, "magnet_current_A": _i, "magnet_field_mT": _b}
+                            if _i is not None else {"sense_current_A": _s},
+                        ),
                 )
 
                 points = [GatePoint(gate_voltage_V=float(v)) for v in plan.gate_voltages_V]
 
-                status = "Running gate sweep …" if current_A is None \
-                    else f"Running gate sweep (I_mag={current_A:g} A) …"
+                status = "Running gate sweep …" if not label_parts \
+                    else f"Running gate sweep ({', '.join(label_parts)}) …"
                 self._set_status_threadsafe(status)
                 iter_error: Optional[BaseException] = None
                 try:
@@ -833,7 +874,7 @@ class RunScreen(Screen):
                         source, voltmeter, gate, plan.src_cfg, plan.gate_cfg, plan.acq_cfg, points,
                         stop_event=self._stop_event,
                         on_point=self._make_on_point(series_idx, label),
-                        magnet_current_A=current_A, magnet_field_mT=field_mT,
+                        magnet_current_A=field_current_A, magnet_field_mT=field_mT,
                         temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg,
                         write_csv=write_csv,
                     )
@@ -845,10 +886,11 @@ class RunScreen(Screen):
                 iter_status = "error" if iter_error is not None \
                     else ("aborted" if self._stop_event.is_set() else "completed")
                 iter_records = [r for r in self._records if r.get("series_index", 0) == series_idx]
+                extra = {"sense_current_A": sense_current_A, "magnet_current_A": field_current_A,
+                          "magnet_field_mT": field_mT} if field_current_A is not None \
+                    else {"sense_current_A": sense_current_A}
                 header_fields = build_header_fields(
-                    plan, ctx, iter_records, status=iter_status, comment="",
-                    extra={"magnet_current_A": current_A, "magnet_field_mT": field_mT}
-                    if current_A is not None else None,
+                    plan, ctx, iter_records, status=iter_status, comment="", extra=extra,
                 )
                 write_record(ctx.raw_path, iter_records, header_fields)
                 finalize_index_row(self.plan.data_root, ctx.sample, ctx.run_number, header_fields)
@@ -981,8 +1023,11 @@ class DCGateSweepApp(App):
                     )
                     yield card(
                         "Sense current (Keithley 6221)",
-                        field("sense_current_A", "Fixed sense current (A)",
-                              DEFAULTS["sense_current_A"]),
+                        field("sense_current_values", "Sense current (A)",
+                              DEFAULTS["sense_current_values"], kind="text",
+                              hint="Single value, or comma-separated list — one complete "
+                                   "gate sweep runs per value, each saved to its own file "
+                                   "and plotted together."),
                     )
                     yield card(
                         "Field (Kepco magnet, optional)",
@@ -1235,6 +1280,13 @@ class DCGateSweepApp(App):
             except ValueError as exc:
                 state["field_parse_error"] = str(exc)
 
+        state["sense_current_list"] = []
+        state["sense_current_parse_error"] = None
+        try:
+            state["sense_current_list"] = parse_value_list(state["sense_current_values"])
+        except ValueError as exc:
+            state["sense_current_parse_error"] = str(exc)
+
         return state, errors
 
     # ── Reactivity ───────────────────────────────────────────────────────────
@@ -1317,7 +1369,7 @@ class DCGateSweepApp(App):
     def _build_plan(self, state: dict) -> MeasurementPlan:
         src_cfg = SourceConfig(
             visa_resource=state["source_visa_resource"],
-            sense_current_A=state["sense_current_A"],
+            sense_current_A=state["sense_current_list"][0],
             compliance_V=state["compliance_V"],
             source_delay_s=state["source_delay_s"],
         )
@@ -1370,14 +1422,14 @@ class DCGateSweepApp(App):
                 )
 
         header_extra = {
-            "sense_current_A": state["sense_current_A"],
+            "sense_current_A": state["sense_current_list"][0],
             "compliance_V": state["compliance_V"],
             "n_averages": state["n_averages"],
             "settling_time_s": state["settling_time_s"],
             "gate_sweep_V": [state["gate_min_V"], state["gate_max_V"], state["step_V"]],
         }
         series = ""
-        if len(field_currents_A or []) > 1:
+        if len(field_currents_A or [None]) * len(state["sense_current_list"]) > 1:
             series = (f"{state['sample']}_{state['device']}_{MEASUREMENT_TYPE}_"
                       f"{datetime.now():%Y%m%dT%H%M%S}")
 
@@ -1387,6 +1439,7 @@ class DCGateSweepApp(App):
             sample=state["sample"], device=state["device"],
             temperature_setpoint_K=state["temperature_setpoint_K"],
             cooldown=state["cooldown"], header_extra=header_extra, series=series,
+            sense_currents_A=state["sense_current_list"],
             magnet_cfg=magnet_cfg, gauss_cfg=gauss_cfg, field_currents_A=field_currents_A,
             field_settle_s=state["field_settle_s"],
             field_settle_tolerance_mT=state["field_settle_tolerance_mT"],

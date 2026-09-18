@@ -14,7 +14,8 @@ def _state(data_dir: Path, **overrides) -> dict:
         source_visa_resource="GPIB0::20::INSTR",
         voltmeter_visa_resource="GPIB0::7::INSTR",
         gate_visa_resource="GPIB0::25::INSTR",
-        sense_current_A=1e-6, compliance_V=2.0, source_delay_s=0.05, nplc=5,
+        sense_current_values="1e-6", sense_current_list=[1e-6], sense_current_parse_error=None,
+        compliance_V=2.0, source_delay_s=0.05, nplc=5,
         auto_range=True, settling_time_s=0.2, n_averages=5,
         device="HB3", cooldown="", temperature_setpoint_K=10.0,
         gate_min_V=-10.0, gate_max_V=10.0, step_V=0.5, bidirectional_sweep=True,
@@ -61,3 +62,10 @@ def test_config_mapping_matches_tui(tmp_path: Path) -> None:
     assert plan.gate_cfg.gate_voltage_limit_V == 20.0
     assert plan.magnet_cfg is not None and plan.gauss_cfg is not None
     assert plan.temp_cfg is None
+
+
+def test_series_values_nests_field_and_sense_currents(tmp_path: Path) -> None:
+    ensure_sample(tmp_path, "A", create=True)
+    plan = build_plan(_state(tmp_path, sense_current_values="1e-6, 2e-6",
+                             sense_current_list=[1e-6, 2e-6]))
+    assert plan.series_values == [(0.0, 1e-6), (0.0, 2e-6), (5.0, 1e-6), (5.0, 2e-6)]

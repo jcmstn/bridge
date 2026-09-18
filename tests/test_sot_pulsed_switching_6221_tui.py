@@ -20,7 +20,7 @@ def _state(**overrides) -> dict:
         pulse_current_start_A=1e-3, pulse_current_stop_A=10e-3, pulse_current_step_A=3e-3,
         amplitude_bidirectional=True,
         pulse_width_s=1e-3, pulse_compliance_V=5.0,
-        sense_current_A=1e-4, compliance_V=2.0, frequency_Hz=977.0, phasemarker_line=1,
+        sense_current_values="1e-4", compliance_V=2.0, frequency_Hz=977.0, phasemarker_line=1,
         harmonic=2, n_averages=50, settle_after_enable_s=1.0, lock_timeout_s=5.0,
         delay_after_pulse_s=1.0,
         magnet_current_A="1.5", field_theta_deg=85.0, field_phi_deg=None, field_settle_tolerance_mT=0.05,
@@ -43,6 +43,8 @@ def _state(**overrides) -> dict:
         tui._resolve_pulse_currents(base)
     base["magnet_currents_A"], base["magnet_currents_parse_error"] = \
         tui._resolve_magnet_currents(base)
+    base["sense_currents_A"], base["sense_currents_parse_error"] = \
+        tui._resolve_sense_currents(base)
     return base
 
 
@@ -108,12 +110,12 @@ def test_resolve_magnet_currents_list():
 
 
 def test_summary_blocks_zero_sense_current():
-    _, _, errors = tui.build_summary(_state(sense_current_A=0.0))
+    _, _, errors = tui.build_summary(_state(sense_current_values="0.0"))
     assert any("6221 AC current amplitude" in e for e in errors)
 
 
 def test_summary_blocks_read_current_over_safety_ceiling():
-    _, _, errors = tui.build_summary(_state(sense_current_A=0.1))   # 100 mA
+    _, _, errors = tui.build_summary(_state(sense_current_values="0.1"))   # 100 mA
     assert any("safety ceiling" in e for e in errors)
 
 
@@ -196,8 +198,22 @@ def test_build_plan_multiple_magnet_currents(tmp_path: Path):
                                   magnet_current_A="1.5, -1.5, 3"))
 
     assert plan.magnet_currents_A == [1.5, -1.5, 3.0]
-    assert plan.series_values == [1.5, -1.5, 3.0]
+    assert plan.series_values == [(1e-4, 1.5), (1e-4, -1.5), (1e-4, 3.0)]
     assert plan.total_points == 3 * 3
+
+
+def test_build_plan_multiple_sense_currents(tmp_path: Path):
+    app = tui.SOTPulsedSwitching6221App()
+    app.data_root = tmp_path
+    plan = app._build_plan(_state(pulse_current_start_A=1e-3, pulse_current_stop_A=5e-3,
+                                  pulse_current_step_A=2e-3, amplitude_bidirectional=False,
+                                  magnet_current_A="1.5, -1.5",
+                                  sense_current_values="1e-4, 2e-4"))
+
+    assert plan.sense_currents_A == [1e-4, 2e-4]
+    # sense current outer (needs a 6221 AC re-arm), magnet inner
+    assert plan.series_values == [(1e-4, 1.5), (1e-4, -1.5), (2e-4, 1.5), (2e-4, -1.5)]
+    assert plan.read_cfg.sense_current_A == plan.ac_cfg.amplitude_A == 1e-4
 
 
 def test_build_plan_temperature_cfg_gating(tmp_path: Path):

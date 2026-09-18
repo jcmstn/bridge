@@ -49,6 +49,7 @@ from textual.widgets import (
     Switch,
 )
 
+from dc.dc_sweep_utils import parse_value_list
 from mfli.mfli_dual_harmonic_6221 import _AC_CURRENT_CEILING_A, _AC_COMPLIANCE_CEILING_V
 from mfli.mfli_dual_harmonic_tui import _LogRelay, card, field, format_duration, format_si, switch_field
 from mfli.mfli_noise_spectrum import (
@@ -97,7 +98,7 @@ DEFAULTS: dict = {
     "daq_port": "8004",
     "ac_visa_resource": "GPIB0::20::INSTR",
     "frequency_Hz": "317.3",
-    "amplitude_A": "1e-4",
+    "amplitude_values": "1e-4",
     "ac_compliance_V": "2.0",
     "phasemarker_line": "1",
     "extref_lock_timeout_s": "5.0",
@@ -129,7 +130,6 @@ AUTOMODE_HINT = ("2=low bandwidth (most forgiving acquisition), 3=high bandwidth
 NUMERIC_FIELDS: dict = {
     "daq_port": int,
     "frequency_Hz": float,
-    "amplitude_A": float,
     "ac_compliance_V": float,
     "phasemarker_line": int,
     "extref_lock_timeout_s": float,
@@ -149,7 +149,7 @@ NUMERIC_FIELDS: dict = {
     "follower_pll_demod_index": int,
 }
 TEXT_FIELDS = ["leader_device", "follower_device", "daq_host", "ac_visa_resource",
-               "device", "cooldown", "data_dir"]
+               "amplitude_values", "device", "cooldown", "data_dir"]
 # Free-text, blank-allowed: parsed to Optional[float] by hand in parse_state()
 OPTIONAL_NUMERIC_FIELDS = ["thermal_R_ohm"]
 
@@ -165,6 +165,7 @@ class NoiseFloorPlan:
     leader: str
     follower: str
     ac_cfg: ACSourceConfig
+    amplitudes_A: List[float]
     leader_extref_cfg: ExtRefConfig
     follower_extref_cfg: ExtRefConfig
     extref_lock_timeout_s: float
@@ -179,8 +180,12 @@ class NoiseFloorPlan:
     data_root: Path = _DEFAULT_DATA_DIR
 
     @property
-    def total_steps(self) -> int:
+    def steps_per_amplitude(self) -> int:
         return len(self.demod_cfgs) * (2 if self.also_measure_off else 1)
+
+    @property
+    def total_steps(self) -> int:
+        return self.steps_per_amplitude * len(self.amplitudes_A)
 
 
 def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
@@ -202,15 +207,22 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         errors.append("Leader and follower device IDs must be different.")
 
     # ── Excitation (6221) ───────────────────────────────────────────────────
-    I = state["amplitude_A"]
-    if not 0 < I <= _AC_CURRENT_CEILING_A:
-        errors.append(
-            f"Excitation current must be in (0, {format_si(_AC_CURRENT_CEILING_A, 'A')}]; "
-            f"got {format_si(I, 'A')} — check for a mistyped exponent."
-        )
+    if state.get("amplitude_parse_error"):
+        errors.append(f"Excitation current list: {state['amplitude_parse_error']}")
     else:
-        info.append(f"Excitation current I = {format_si(I, 'A')} peak — match your real "
-                     "HARM6 operating point for this estimate to be meaningful.")
+        amp_list = state.get("amplitude_list", [])
+        over_limit = [i for i in amp_list if not 0 < i <= _AC_CURRENT_CEILING_A]
+        if over_limit:
+            errors.append(
+                f"Excitation current(s) {over_limit} must be in "
+                f"(0, {format_si(_AC_CURRENT_CEILING_A, 'A')}] — check for a mistyped exponent."
+            )
+        elif len(amp_list) > 1:
+            info.append(f"Excitation currents {amp_list} A peak — {len(amp_list)} complete "
+                        "noise-floor sessions, one file set each.")
+        elif amp_list:
+            info.append(f"Excitation current I = {format_si(amp_list[0], 'A')} peak — match "
+                         "your real HARM6 operating point for this estimate to be meaningful.")
     if not 0 < state["ac_compliance_V"] <= _AC_COMPLIANCE_CEILING_V:
         errors.append(
             f"6221 compliance must be in (0, {_AC_COMPLIANCE_CEILING_V:g}] V; "
@@ -244,8 +256,10 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
                      "floor with no Johnson-noise comparison line.")
 
     n_passes = 2 if state["also_measure_off"] else 1
-    est_s = state["duration_s"] * n_passes * 2  # 2 channels, sequential
-    info.append(f"{n_passes} pass(es) × 2 channels ≈ {format_duration(est_s)} total")
+    n_amps = max(1, len(state.get("amplitude_list", [])))
+    est_s = state["duration_s"] * n_passes * 2 * n_amps  # 2 channels, sequential
+    amp_note = f" × {n_amps} excitation current(s)" if n_amps > 1 else ""
+    info.append(f"{n_passes} pass(es) × 2 channels{amp_note} ≈ {format_duration(est_s)} total")
     if state["duration_s"] < 10:
         warnings.append(f"Duration {state['duration_s']:g} s is short — the lowest "
                          f"resolvable frequency is ~1/duration ≈ {1/state['duration_s']:.2g} Hz.")
@@ -268,7 +282,8 @@ def _automode_select(field_id: str) -> list:
 def compute_filename_preview(state: dict) -> Optional[str]:
     if not state.get("sample") or state["sample"] == NEW_SAMPLE_SENTINEL or not state.get("device"):
         return None
-    n_files = 2 * (2 if state["also_measure_off"] else 1)
+    n_amps = max(1, len(state.get("amplitude_list", [])))
+    n_files = 2 * (2 if state["also_measure_off"] else 1) * n_amps
     return f"{state['sample']}_NNNN_{state['device']}_{MEASUREMENT_TYPE}_<timestamp>.csv  (×{n_files} files)"
 
 
@@ -291,7 +306,10 @@ class RunScreen(Screen):
         self.plan = plan
         self._measurement_running = True
         self._log_handler: Optional[_LogRelay] = None
-        self._results: dict = {}
+        # Accumulated across every amplitude iteration -- ((cond, label), spec)
+        # paired with its already-saved RunContext, so the end-of-session
+        # status/comment prompt covers every file regardless of how many
+        # amplitude values were run.
         self._context_pairs: list = []
 
     def compose(self) -> ComposeResult:
@@ -320,7 +338,6 @@ class RunScreen(Screen):
         self.query_one("#status_line", Static).update(text)
 
     def _on_result(self, cond: str, label: str, spec: dict) -> None:
-        self._results[(cond, label)] = spec
         self.query_one("#progress", ProgressBar).advance(1)
         thermal_note = ""
         if self.plan.ref_cfg.thermal_R_ohm:
@@ -331,28 +348,26 @@ class RunScreen(Screen):
             "bold",
         )
 
-    def _on_finished(self, final_status: str) -> None:
-        self._measurement_running = False
-        self._set_status(final_status)
-        self.query_one("#back_btn", Button).disabled = False
-
-        if not self._results:
-            log.warning("No results collected — nothing to save.")
+    def _save_iteration(self, amp: float, iter_results: dict, iter_status: str) -> None:
+        """Save ONE amplitude's results (own run(s), own file(s)) -- called
+        right after that amplitude's measure_noise_floor() returns/raises,
+        matching the unconditional-per-iteration-finalize convention used
+        by every other multi-file suite in this codebase."""
+        if not iter_results:
             return
-
-        status = "error" if final_status.startswith("ERROR") else "completed"
         plan = self.plan
+        key_axis = ("current_A", amp) if len(plan.amplitudes_A) > 1 else None
         contexts = save_results(
-            self._results, sample=plan.sample, device=plan.device,
-            cooldown=plan.cooldown, series=plan.series, status=status,
-            data_root=plan.data_root,
+            iter_results, sample=plan.sample, device=plan.device,
+            cooldown=plan.cooldown, series=plan.series, status=iter_status,
+            data_root=plan.data_root, key_axis=key_axis,
         )
         # Zip in save_results()'s own iteration order (see its docstring) so
         # a later status/comment update can rebuild each run's full header
         # -- finalize_index_row() rewrites the whole index.csv row, so a
         # partial {"comment": ...} dict would blank out every other column.
-        self._context_pairs = list(zip(self._results.items(), contexts))
-        report_mains_peaks(self._results, plan.ref_cfg)
+        self._context_pairs.extend(zip(iter_results.items(), contexts))
+        report_mains_peaks(iter_results, plan.ref_cfg)
         try:
             first, last = contexts[0], contexts[-1]
             run_label = first.run_str if first is last else f"{first.run_str}-{last.run_str}"
@@ -360,10 +375,19 @@ class RunScreen(Screen):
                                   MEASUREMENT_TYPE, "combined", combined=True)
             import matplotlib
             matplotlib.use("Agg")
-            plot_results(self._results, plan.demod_cfgs, plan.ref_cfg, png_path)
-            self.write_log(f"Saved plot: {png_path}", "")
+            plot_results(iter_results, plan.demod_cfgs, plan.ref_cfg, png_path)
+            self.app.call_from_thread(self.write_log, f"Saved plot: {png_path}", "")
         except Exception:
             log.exception("Could not save noise-floor plot PNG")
+
+    def _on_finished(self, final_status: str) -> None:
+        self._measurement_running = False
+        self._set_status(final_status)
+        self.query_one("#back_btn", Button).disabled = False
+
+        if not self._context_pairs:
+            log.warning("No results collected — nothing to save.")
+            return
 
         self.app.push_screen(StatusCommentScreen(), self._on_status_comment)
 
@@ -406,16 +430,38 @@ class RunScreen(Screen):
             for cfg in plan.demod_cfgs:
                 configure_noise_demod(daq, cfg)
 
-            measure_noise_floor(
-                daq, plan.ac_cfg, plan.leader_extref_cfg, plan.follower_extref_cfg,
-                plan.demod_cfgs, plan.acq_cfg,
-                also_measure_off=plan.also_measure_off,
-                extref_lock_timeout_s=plan.extref_lock_timeout_s,
-                mds=mds,
-                on_status=self._set_status_threadsafe,
-                on_result=lambda cond, label, spec: self.app.call_from_thread(
-                    self._on_result, cond, label, spec),
-            )
+            multi = len(plan.amplitudes_A) > 1
+            for amp in plan.amplitudes_A:
+                plan.ac_cfg.amplitude_A = amp
+                if multi:
+                    self._set_status_threadsafe(f"Excitation current {amp:g} A …")
+
+                iter_results: dict = {}
+
+                def on_result(cond, label, spec, _r=iter_results):
+                    _r[(cond, label)] = spec
+                    self.app.call_from_thread(self._on_result, cond, label, spec)
+
+                iter_error: Optional[BaseException] = None
+                try:
+                    measure_noise_floor(
+                        daq, plan.ac_cfg, plan.leader_extref_cfg, plan.follower_extref_cfg,
+                        plan.demod_cfgs, plan.acq_cfg,
+                        also_measure_off=plan.also_measure_off,
+                        extref_lock_timeout_s=plan.extref_lock_timeout_s,
+                        mds=mds,
+                        on_status=self._set_status_threadsafe,
+                        on_result=on_result,
+                    )
+                except Exception as exc:
+                    iter_error = exc
+
+                iter_status = "error" if iter_error is not None else "completed"
+                self._save_iteration(amp, iter_results, iter_status)
+
+                if iter_error is not None:
+                    raise iter_error
+
             final = "Noise floor estimate complete."
         except Exception as exc:
             log.exception("Noise floor estimate failed")
@@ -500,9 +546,11 @@ class MFLINoiseSpectrumApp(App):
                         field("frequency_Hz", "Excitation frequency (Hz)",
                               DEFAULTS["frequency_Hz"],
                               validators=[Number(minimum=1e-3, failure_description="must be > 0")]),
-                        field("amplitude_A", "Excitation current (A, peak)",
-                              DEFAULTS["amplitude_A"],
-                              validators=[Number(minimum=1e-12, failure_description="must be > 0")]),
+                        field("amplitude_values", "Excitation current (A, peak)",
+                              DEFAULTS["amplitude_values"], kind="text",
+                              hint="Single value, or comma-separated list — one complete "
+                                   "noise-floor session runs per value, each saved to its "
+                                   "own file(s)."),
                     )
                     yield card(
                         "Reference & duration",
@@ -726,6 +774,14 @@ class MFLINoiseSpectrumApp(App):
         state["follower_automode"] = int(self.query_one("#follower_automode", Select).value)
         sample_value = self.query_one("#sample_select", Select).value
         state["sample"] = sample_value if sample_value not in (None, Select.BLANK) else ""
+
+        state["amplitude_list"] = []
+        state["amplitude_parse_error"] = None
+        try:
+            state["amplitude_list"] = parse_value_list(state["amplitude_values"])
+        except ValueError as exc:
+            state["amplitude_parse_error"] = str(exc)
+
         return state, errors
 
     # ── Reactivity ───────────────────────────────────────────────────────────
@@ -791,7 +847,7 @@ class MFLINoiseSpectrumApp(App):
     def _build_plan(self, state: dict) -> NoiseFloorPlan:
         ac_cfg = ACSourceConfig(
             visa_resource=state["ac_visa_resource"],
-            amplitude_A=state["amplitude_A"],
+            amplitude_A=state["amplitude_list"][0],
             frequency_Hz=state["frequency_Hz"],
             compliance_V=state["ac_compliance_V"],
             phasemarker_line=state["phasemarker_line"],
@@ -825,7 +881,8 @@ class MFLINoiseSpectrumApp(App):
         return NoiseFloorPlan(
             daq_host=state["daq_host"], daq_port=state["daq_port"],
             leader=state["leader_device"], follower=state["follower_device"],
-            ac_cfg=ac_cfg, leader_extref_cfg=leader_extref_cfg, follower_extref_cfg=follower_extref_cfg,
+            ac_cfg=ac_cfg, amplitudes_A=state["amplitude_list"],
+            leader_extref_cfg=leader_extref_cfg, follower_extref_cfg=follower_extref_cfg,
             extref_lock_timeout_s=state["extref_lock_timeout_s"],
             demod_cfgs=demod_cfgs, acq_cfg=acq_cfg, ref_cfg=ref_cfg,
             also_measure_off=state["also_measure_off"],

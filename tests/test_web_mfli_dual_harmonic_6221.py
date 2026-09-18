@@ -19,7 +19,8 @@ def _state(data_dir: Path, **overrides) -> dict:
         leader_device="dev7885", follower_device="dev7886",
         daq_host="localhost", daq_port=8004,
         ac_visa_resource="GPIB0::20::INSTR",
-        frequency_Hz=317.3, amplitude_A=1e-7, ac_compliance_V=2.0, phasemarker_line=1,
+        frequency_Hz=317.3, ac_compliance_V=2.0, phasemarker_line=1,
+        amplitude_values="1e-7", amplitude_list=[1e-7], amplitude_parse_error=None,
         time_constant_1f_s=0.3, order_1f=4, sinc_filter_1f=True,
         time_constant_2f_s=0.3, order_2f=4, sinc_filter_2f=True,
         differential=True, ac_coupling=True,
@@ -48,17 +49,26 @@ def _state(data_dir: Path, **overrides) -> dict:
     return base
 
 
-def test_build_plan_allocates_run_and_matches_filename_convention(tmp_path: Path) -> None:
+def test_build_plan_does_not_allocate_a_run_upfront(tmp_path: Path) -> None:
+    # allocate_run() now happens once per amplitude, inside run_fn() -- build_plan()
+    # itself must stay a pure dataclass-construction step (no filesystem side
+    # effects).
     ensure_sample(tmp_path, "A", create=True)
 
     plan1 = build_plan(_state(tmp_path))
-    assert plan1.run_ctx.run_number == 1
-    assert plan1.acq_cfg.output_file == str(plan1.run_ctx.raw_path)
-    assert Path(plan1.acq_cfg.output_file).name.startswith("A_0001_HB3_HARM6_T300K_")
+    assert plan1.acq_cfg.output_file == ""
     assert plan1.ac_cfg.amplitude_A == 1e-7
+    assert plan1.amplitudes_A == [1e-7]
+    assert (tmp_path / "A" / "index.csv").read_text().count("\n") <= 1  # header only, no run rows
 
-    plan2 = build_plan(_state(tmp_path))
-    assert plan2.run_ctx.run_number == 2
+
+def test_build_plan_multiple_amplitudes(tmp_path: Path) -> None:
+    ensure_sample(tmp_path, "A", create=True)
+    plan = build_plan(_state(tmp_path, amplitude_values="1e-7, 2e-7",
+                              amplitude_list=[1e-7, 2e-7]))
+    assert plan.amplitudes_A == [1e-7, 2e-7]
+    assert plan.ac_cfg.amplitude_A == 1e-7
+    assert plan.series.startswith("A_HB3_HARM6_")
 
 
 def test_build_plan_multi_row_sweep(tmp_path: Path) -> None:
