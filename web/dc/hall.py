@@ -20,6 +20,7 @@ color, mirroring web/dc/spin_valve.py's gate-voltage series.
 from __future__ import annotations
 
 import json
+import logging
 import textwrap
 from datetime import datetime
 from pathlib import Path
@@ -62,6 +63,8 @@ _SETTINGS_PATH = _DATA_DIR / "web_settings" / "dc_hall_web_settings.json"
 
 PAGE_TITLE = "DC Hall Measurement"
 SUITE = "DC"
+
+log = logging.getLogger("web.dc.hall")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -169,10 +172,11 @@ def series_label(I_sense: float, n_series: int) -> Optional[str]:
     return f"I={I_sense:g}A" if n_series > 1 else None
 
 
-def _save_combined_png(records: list[dict], png_path: Path,
-                        plan: Optional[MeasurementPlan] = None, comment: str = "") -> None:
-    """Headless (Agg) final plot into proc/, one colored trace per sense
-    current -- same look as dc_hall_measurement_tui.py's _save_measurement_png.
+def _save_measurement_png(records: list[dict], png_path: Path,
+                           plan: Optional[MeasurementPlan] = None, comment: str = "") -> None:
+    """Headless (Agg) final plot into proc/ of ONE run's points (one PNG per
+    sense current, like a manual run) -- same look as
+    dc_hall_measurement_tui.py's _save_measurement_png.
 
     `plan`/`comment` add a small "at a glance" text annotation (field
     direction, a single fixed sense current, the operator's comment) --
@@ -186,23 +190,16 @@ def _save_combined_png(records: list[dict], png_path: Path,
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    cmap = plt.get_cmap("tab10")
     fig, ax = plt.subplots(figsize=(7, 5))
 
     has_field = any(r.get("magnet_field_mT") is not None for r in records)
-    series_ids = sorted({r.get("series_index", 0) for r in records})
-    for idx in series_ids:
-        rows = [r for r in records if r.get("series_index", 0) == idx]
-        series_label = rows[0].get("series_label")
-        xs = [r["magnet_field_mT"] if has_field else r["point_index"] for r in rows]
-        for q in ("rxy", "rxx"):
-            if not any(q in active_quantities(r) for r in rows):
-                continue
-            ys = [r.get(f"{q}_resistance_ohm") for r in rows]
-            label = f"{QUANTITY_PLOT_LABELS[q]} {series_label}" if series_label \
-                else QUANTITY_PLOT_LABELS[q]
-            ax.plot(xs, ys, marker=".", linestyle=QUANTITY_LINESTYLES[q],
-                     color=cmap(idx % 10), label=label)
+    xs = [r["magnet_field_mT"] if has_field else r["point_index"] for r in records]
+    for q in ("rxy", "rxx"):
+        if not any(q in active_quantities(r) for r in records):
+            continue
+        ys = [r.get(f"{q}_resistance_ohm") for r in records]
+        ax.plot(xs, ys, marker=".", linestyle=QUANTITY_LINESTYLES[q],
+                 color="tab:blue", label=QUANTITY_PLOT_LABELS[q])
 
     ax.set_ylabel("Resistance (Ω)")
     ax.set_xlabel("Magnetic field (mT)" if has_field else "Point #")
@@ -215,8 +212,10 @@ def _save_combined_png(records: list[dict], png_path: Path,
     if plan is not None:
         if plan.field_theta_deg is not None:
             lines.append(field_direction_summary_line(plan.field_theta_deg, plan.field_phi_deg))
-        if len(plan.series_values) == 1:
-            lines.append(f"Sense current: {format_si(plan.series_values[0], 'A')}")
+        sense_currents = sorted({r["sense_current_A"] for r in records
+                                  if r.get("sense_current_A") is not None})
+        if len(sense_currents) == 1:
+            lines.append(f"Sense current: {format_si(sense_currents[0], 'A')}")
     if comment:
         lines.append(f"Comment: {textwrap.shorten(comment, width=90, placeholder='…')}")
     if lines:
@@ -559,29 +558,38 @@ def page() -> None:
     def on_log(text: str, level: int) -> None:
         log_area.push(text)
 
+    def _run_png_path(ctx: RunContext, data_root: str) -> Path:
+        return proc_path(Path(data_root), ctx.sample, ctx.run_str, ctx.device,
+                          MEASUREMENT_TYPE, "plot")
+
     async def _prompt_status_comment(plan: MeasurementPlan, run_contexts: list[RunContext],
                                       data_root: str, records: list[dict]) -> None:
+        # With several currents the runs before the last were implicitly
+        # "skipped" -- left at the outcome status run_fn wrote right after
+        # each one, with no comment. Only the last run, the one the operator
+        # is looking at, gets the status/comment they entered.
         result = await status_comment_dialog(page_client)
-        if result is None:
+        if result is None or not run_contexts:
             return
         status, comment = result
-        for series_idx, ctx in enumerate(run_contexts):
-            iter_records = [r for r in records if r.get("series_index", 0) == series_idx]
-            I_sense = iter_records[0].get("sense_current_A") if iter_records else None
-            header_fields = build_header_fields(
-                plan, ctx, iter_records, status=status, comment=comment,
-                extra={"sense_current_A": I_sense} if I_sense is not None else None,
-            )
+        series_idx = len(run_contexts) - 1
+        ctx = run_contexts[series_idx]
+        iter_records = [r for r in records if r.get("series_index", 0) == series_idx]
+        I_sense = iter_records[0].get("sense_current_A") if iter_records else None
+        header_fields = build_header_fields(
+            plan, ctx, iter_records, status=status, comment=comment,
+            extra={"sense_current_A": I_sense} if I_sense is not None else None,
+        )
+        try:
+            if iter_records or not ctx.raw_path.exists():
+                write_record(ctx.raw_path, iter_records, header_fields)
+            finalize_index_row(Path(data_root), ctx.sample, ctx.run_number, header_fields)
+        except Exception:
+            ui.notify("Could not save final status/comment.", type="negative")
+        if comment:
             try:
-                if iter_records or not ctx.raw_path.exists():
-                    write_record(ctx.raw_path, iter_records, header_fields)
-                finalize_index_row(Path(data_root), ctx.sample, ctx.run_number, header_fields)
-            except Exception:
-                ui.notify("Could not save final status/comment.", type="negative")
-        if comment and run_contexts:
-            try:
-                _save_combined_png(records, _combined_png_path(run_contexts, data_root),
-                                    plan=plan, comment=comment)
+                _save_measurement_png(iter_records, _run_png_path(ctx, data_root),
+                                       plan=plan, comment=comment)
             except Exception:
                 pass
 
@@ -711,23 +719,23 @@ def page() -> None:
                     safe_shutdown("MercuryiTC", lambda: shutdown_temperature_controller(temp_ctrl))
         return run_fn
 
-    def _combined_png_path(run_contexts: list[RunContext], data_root: str) -> Path:
-        first, last = run_contexts[0], run_contexts[-1]
-        run_str_label = first.run_str if first is last else f"{first.run_str}-{last.run_str}"
-        return proc_path(Path(data_root), first.sample, run_str_label, first.device,
-                          MEASUREMENT_TYPE, "combined", combined=True)
-
     def _finish_artifacts(records: list[dict], run_contexts: list[RunContext], data_root: str,
                            plan: MeasurementPlan) -> list[str]:
+        """One PNG per run -- as if each current had been started by hand,
+        no combined overlay."""
         output_paths = [str(c.raw_path) for c in run_contexts]
-        if not run_contexts:
-            return output_paths
-        png_path = _combined_png_path(run_contexts, data_root)
-        try:
-            _save_combined_png(records, png_path, plan=plan)
-            return output_paths + [str(png_path)]
-        except Exception:
-            return output_paths
+        for series_idx, ctx in enumerate(run_contexts):
+            png_path = _run_png_path(ctx, data_root)
+            try:
+                _save_measurement_png(
+                    [r for r in records if r.get("series_index", 0) == series_idx],
+                    png_path, plan=plan)
+            except Exception:
+                log.exception("Could not save measurement plot PNG for run %s", ctx.run_str)
+                continue
+            if png_path.exists():
+                output_paths.append(str(png_path))
+        return output_paths
 
     def on_start() -> None:
         state, parse_errors = parse_state()

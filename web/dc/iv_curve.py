@@ -10,7 +10,7 @@ DEFAULTS/NUMERIC_FIELDS/TEXT_FIELDS/build_summary()/parse_sensor_uids() so
 validation stays identical to the TUI.
 
 Optional gate-voltage list means multiple complete current sweeps run per
-Start click, one CSV per value plus one combined overlay PNG.
+Start click, one CSV and one PNG per value.
 
 Live view adds a second panel (dV/dI via np.gradient, recomputed on each
 drain tick) alongside the raw I-V trace.
@@ -19,6 +19,7 @@ drain tick) alongside the raw I-V trace.
 from __future__ import annotations
 
 import json
+import logging
 import textwrap
 from datetime import datetime
 from pathlib import Path
@@ -60,6 +61,8 @@ _SETTINGS_PATH = _DATA_DIR / "web_settings" / "dc_iv_curve_web_settings.json"
 
 PAGE_TITLE = "DC I-V Curve"
 SUITE = "DC"
+
+log = logging.getLogger("web.dc.iv_curve")
 
 
 def _load_settings() -> dict:
@@ -141,9 +144,10 @@ def series_label(gate_V: Optional[float]) -> Optional[str]:
     return f"Vg={gate_V:g}V" if gate_V is not None else None
 
 
-def _save_combined_png(records: list[dict], png_path: Path,
-                        plan: Optional[MeasurementPlan] = None, comment: str = "") -> None:
-    """Combined I-V + dV/dI overlay PNG, one color per gate-voltage series.
+def _save_measurement_png(records: list[dict], png_path: Path,
+                           plan: Optional[MeasurementPlan] = None, comment: str = "") -> None:
+    """I-V + dV/dI PNG of ONE run's points (one PNG per gate voltage, like a
+    manual run).
 
     `plan`/`comment` add a small "at a glance" text annotation (compliance
     voltage, the operator's comment) -- see dc_iv_curve_tui.py's
@@ -156,24 +160,17 @@ def _save_combined_png(records: list[dict], png_path: Path,
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    cmap = plt.get_cmap("tab10")
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(7, 8))
-    series_ids = sorted({r.get("series_index", 0) for r in records})
-    for idx in series_ids:
-        rows = sorted((r for r in records if r.get("series_index", 0) == idx),
-                      key=lambda r: r["point_index"])
-        label = rows[0].get("series_label")
-        I = np.array([r["current_A"] for r in rows])
-        V = np.array([r["voltage_V"] for r in rows])
-        ax1.plot(I, V, ".-", color=cmap(idx % 10), label=label)
-        if len(I) > 1:
-            ax2.plot(I, np.gradient(V, I), ".-", color=cmap(idx % 10), label=label)
+    rows = sorted(records, key=lambda r: r["point_index"])
+    I = np.array([r["current_A"] for r in rows])
+    V = np.array([r["voltage_V"] for r in rows])
+    ax1.plot(I, V, ".-", color="tab:blue")
+    if len(I) > 1:
+        ax2.plot(I, np.gradient(V, I), ".-", color="tab:blue")
     ax1.set_xlabel("Current (A)"); ax1.set_ylabel("Voltage (V)")
     ax1.set_title("I-V curve"); ax1.grid(alpha=0.4)
     ax2.set_xlabel("Current (A)"); ax2.set_ylabel("dV/dI (Ω)")
     ax2.set_title("Differential resistance (numerical dV/dI)"); ax2.grid(alpha=0.4)
-    if any(r.get("series_label") for r in records):
-        ax1.legend(loc="best", fontsize=8)
     fig.tight_layout()
 
     lines: list[str] = []
@@ -440,31 +437,40 @@ def page() -> None:
     def on_log(text: str, level: int) -> None:
         log_area.push(text)
 
+    def _run_png_path(ctx: RunContext, data_root: str) -> Path:
+        return proc_path(Path(data_root), ctx.sample, ctx.run_str, ctx.device,
+                          MEASUREMENT_TYPE, "plot")
+
     async def _prompt_status_comment(plan: MeasurementPlan, run_contexts: list[RunContext],
                                       data_root: str, records: list[dict]) -> None:
+        # With several gate voltages the runs before the last were implicitly
+        # "skipped" -- left at the outcome status run_fn wrote right after
+        # each one, with no comment. Only the last run, the one the operator
+        # is looking at, gets the status/comment they entered.
         result = await status_comment_dialog(page_client)
-        if result is None:
+        if result is None or not run_contexts:
             return
         status, comment = result
-        for series_idx, ctx in enumerate(run_contexts):
-            iter_records = [r for r in records if r.get("series_index", 0) == series_idx]
-            gate_V = iter_records[0].get("gate_voltage_V") if iter_records else None
-            header_fields = build_header_fields(
-                plan, ctx, iter_records, status=status, comment=comment,
-                extra={"gate_voltage_V": gate_V} if gate_V is not None else None,
-            )
+        series_idx = len(run_contexts) - 1
+        ctx = run_contexts[series_idx]
+        iter_records = [r for r in records if r.get("series_index", 0) == series_idx]
+        gate_V = iter_records[0].get("gate_voltage_V") if iter_records else None
+        header_fields = build_header_fields(
+            plan, ctx, iter_records, status=status, comment=comment,
+            extra={"gate_voltage_V": gate_V} if gate_V is not None else None,
+        )
+        try:
+            # Never truncate an already-written raw file to an empty stub —
+            # only a run that never wrote a point gets a header-only write.
+            if iter_records or not ctx.raw_path.exists():
+                write_record(ctx.raw_path, iter_records, header_fields)
+            finalize_index_row(Path(data_root), ctx.sample, ctx.run_number, header_fields)
+        except Exception:
+            ui.notify("Could not save final status/comment.", type="negative")
+        if comment:
             try:
-                # Never truncate an already-written raw file to an empty stub —
-                # only a run that never wrote a point gets a header-only write.
-                if iter_records or not ctx.raw_path.exists():
-                    write_record(ctx.raw_path, iter_records, header_fields)
-                finalize_index_row(Path(data_root), ctx.sample, ctx.run_number, header_fields)
-            except Exception:
-                ui.notify("Could not save final status/comment.", type="negative")
-        if comment and run_contexts:
-            try:
-                _save_combined_png(records, _combined_png_path(run_contexts, data_root),
-                                    plan=plan, comment=comment)
+                _save_measurement_png(iter_records, _run_png_path(ctx, data_root),
+                                       plan=plan, comment=comment)
             except Exception:
                 pass
 
@@ -571,23 +577,23 @@ def page() -> None:
                     safe_shutdown("MercuryiTC", lambda: shutdown_temperature_controller(temp_ctrl))
         return run_fn
 
-    def _combined_png_path(run_contexts: list[RunContext], data_root: str) -> Path:
-        first, last = run_contexts[0], run_contexts[-1]
-        run_str_label = first.run_str if first is last else f"{first.run_str}-{last.run_str}"
-        return proc_path(Path(data_root), first.sample, run_str_label, first.device,
-                          MEASUREMENT_TYPE, "combined", combined=True)
-
     def _finish_artifacts(records: list[dict], run_contexts: list[RunContext], data_root: str,
                            plan: MeasurementPlan) -> list[str]:
+        """One PNG per run -- as if each gate voltage had been started by hand,
+        no combined overlay."""
         output_paths = [str(c.raw_path) for c in run_contexts]
-        if not run_contexts:
-            return output_paths
-        png_path = _combined_png_path(run_contexts, data_root)
-        try:
-            _save_combined_png(records, png_path, plan=plan)
-            return output_paths + [str(png_path)]
-        except Exception:
-            return output_paths
+        for series_idx, ctx in enumerate(run_contexts):
+            png_path = _run_png_path(ctx, data_root)
+            try:
+                _save_measurement_png(
+                    [r for r in records if r.get("series_index", 0) == series_idx],
+                    png_path, plan=plan)
+            except Exception:
+                log.exception("Could not save measurement plot PNG for run %s", ctx.run_str)
+                continue
+            if png_path.exists():
+                output_paths.append(str(png_path))
+        return output_paths
 
     def on_start() -> None:
         state, parse_errors = parse_state()

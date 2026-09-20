@@ -145,3 +145,67 @@ def test_build_plan_multi_row_sweep(tmp_path, monkeypatch) -> None:
     ))
     assert len(plan.currents_A) == 37
     assert plan.header_extra["field_sweep_rows_A"] == [(-1.0, 1.0, 10), (1.0, 10.0, 10)]
+
+
+def _third_run_records() -> list[dict]:
+    """One run out of a multi-current series (series_index=2) -- what
+    RunScreen._save_run_png() hands to _save_measurement_png()."""
+    return [
+        {"point_index": i, "magnet_field_mT": None, "1f_R_V": 1e-3 * i, "2f_R_V": 2e-6 * i,
+         "series_index": 2, "series_label": "I=1e-06A", "excitation_current_A_peak": 1e-6}
+        for i in range(3)
+    ]
+
+
+def test_save_measurement_png_single_run_looks_like_a_manual_run(tmp_path) -> None:
+    # A run's PNG must not depend on which position it had in a multi-current
+    # series: 1f blue / follower orange, no legend, not the series-2 color.
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    figs = []
+    real_close = plt.close
+    plt.close = lambda fig=None: (figs.append(fig), real_close(fig))
+    try:
+        png = tmp_path / "run.png"
+        tui._save_measurement_png(_third_run_records(), png)
+    finally:
+        plt.close = real_close
+
+    assert png.exists()
+    ax1, ax2 = figs[0].axes
+    assert [ln.get_color() for ln in ax1.lines] == ["tab:blue"]
+    assert [ln.get_color() for ln in ax2.lines] == ["tab:orange"]
+    assert ax1.get_legend() is None
+
+
+def test_each_run_of_a_multi_current_series_gets_its_own_plot_png(tmp_path, monkeypatch) -> None:
+    # Several excitation currents behave like several manual runs: one
+    # <sample>_<run>_<device>_<type>_plot.png per run, never a combined one.
+    from types import SimpleNamespace
+
+    from instruments.data_naming import allocate_run
+
+    monkeypatch.setattr(tui, "_DEFAULT_DATA_DIR", tmp_path)
+    ensure_sample(tmp_path, "A", create=True)
+    app = tui.MFLIDualHarmonic6221App()
+    app.data_root = tmp_path
+    amps = [1e-7, 2e-7, 3e-7]
+    plan = app._build_plan(_state(amplitude_values="1e-7, 2e-7, 3e-7", amplitude_list=amps))
+
+    screen = SimpleNamespace(plan=plan, _png_path=None)
+    run_strs = []
+    for idx, amp in enumerate(amps):
+        ctx = allocate_run(tmp_path, "A", "HB3", tui.MEASUREMENT_TYPE, series=plan.series)
+        run_strs.append(ctx.run_str)
+        records = [{"point_index": i, "magnet_field_mT": None, "1f_R_V": 1e-3 * i,
+                    "2f_R_V": 2e-6 * i, "series_index": idx, "series_label": f"I={amp:g}A",
+                    "excitation_current_A_peak": amp} for i in range(3)]
+        tui.RunScreen._save_run_png(screen, ctx, records)
+
+    names = sorted(p.name for p in (tmp_path / "A" / "proc").glob("*.png"))
+    assert names == sorted(f"A_{r}_HB3_{tui.MEASUREMENT_TYPE}_plot.png" for r in run_strs)
+    assert len(set(run_strs)) == 3
+    assert not any("combined" in n for n in names)
+    assert screen._png_path.name.startswith(f"A_{run_strs[-1]}_")

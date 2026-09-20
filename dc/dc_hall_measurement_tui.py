@@ -601,8 +601,10 @@ def _save_measurement_png(records: list[dict], png_path: Path,
                            plan: Optional["MeasurementPlan"] = None, comment: str = "") -> None:
     """Save a static resistance-vs-field PNG to proc/, from whatever
     points were actually collected (including an aborted/partial run) —
-    one colored trace per sense current when more than one was used,
     solid for R_xy / dashed for R_xx when both were measured.
+
+    `records` is ONE run's points -- with several sense currents each run
+    is saved (and plotted) on its own, exactly like a manual run.
 
     `plan`/`comment` drive a small "at a glance" text annotation (field
     direction, a single fixed sense current, the operator's comment) for
@@ -617,23 +619,16 @@ def _save_measurement_png(records: list[dict], png_path: Path,
     matplotlib.use("Agg")  # headless — must not touch the TUI's terminal
     import matplotlib.pyplot as plt
 
-    cmap = plt.get_cmap("tab10")
     fig, ax = plt.subplots(figsize=(7, 5))
 
     has_field = any(r.get("magnet_field_mT") is not None for r in records)
-    series_ids = sorted({r.get("series_index", 0) for r in records})
-    for idx in series_ids:
-        rows = [r for r in records if r.get("series_index", 0) == idx]
-        series_label = rows[0].get("series_label")
-        xs = [r["magnet_field_mT"] if has_field else r["point_index"] for r in rows]
-        for q in ("rxy", "rxx"):
-            ys = [r.get(f"{q}_resistance_ohm") for r in rows]
-            if all(y is None or np.isnan(y) for y in ys):
-                continue
-            label = f"{QUANTITY_PLOT_LABELS[q]} {series_label}" if series_label \
-                else QUANTITY_PLOT_LABELS[q]
-            ax.plot(xs, ys, marker=".", linestyle=QUANTITY_LINESTYLES[q],
-                     color=cmap(idx % 10), label=label)
+    xs = [r["magnet_field_mT"] if has_field else r["point_index"] for r in records]
+    for q in ("rxy", "rxx"):
+        ys = [r.get(f"{q}_resistance_ohm") for r in records]
+        if all(y is None or np.isnan(y) for y in ys):
+            continue
+        ax.plot(xs, ys, marker=".", linestyle=QUANTITY_LINESTYLES[q],
+                 color="tab:blue", label=QUANTITY_PLOT_LABELS[q])
 
     ax.set_ylabel("Resistance (Ω)")
     ax.set_xlabel("Magnetic field (mT)" if has_field else "Point #")
@@ -646,8 +641,10 @@ def _save_measurement_png(records: list[dict], png_path: Path,
     if plan is not None:
         if plan.field_theta_deg is not None:
             lines.append(field_direction_summary_line(plan.field_theta_deg, plan.field_phi_deg))
-        if len(plan.series_values) == 1:
-            lines.append(f"Sense current: {format_si(plan.series_values[0], 'A')}")
+        sense_currents = sorted({r["sense_current_A"] for r in records
+                                  if r.get("sense_current_A") is not None})
+        if len(sense_currents) == 1:
+            lines.append(f"Sense current: {format_si(sense_currents[0], 'A')}")
     if comment:
         lines.append(f"Comment: {textwrap.shorten(comment, width=90, placeholder='…')}")
     if lines:
@@ -714,8 +711,8 @@ class RunScreen(Screen):
         # One RunContext per iteration of the sense-current series -- each
         # gets its own run number/file (see allocate_run() in do_run below).
         self._run_contexts: list[RunContext] = []
-        # Stashed by _on_finished so _on_status_comment can re-save the same
-        # PNG in place once the operator's comment is known.
+        # The LAST run's PNG, stashed by _save_run_png so _on_status_comment
+        # can re-save it in place once the operator's comment is known.
         self._png_path: Optional[Path] = None
 
     def compose(self) -> ComposeResult:
@@ -799,53 +796,53 @@ class RunScreen(Screen):
         self.query_one("#progress", ProgressBar).advance(1)
         self._set_status(f"Point {len(self._records)} / {self.plan.total_points} complete.")
 
+    def _save_run_png(self, ctx: RunContext, iter_records: list[dict]) -> None:
+        """One PNG per run (own run number), as if each sense current had
+        been started by hand -- no combined overlay."""
+        try:
+            png_path = proc_path(self.plan.data_root, ctx.sample, ctx.run_str, ctx.device,
+                                  MEASUREMENT_TYPE, "plot")
+            self._png_path = png_path
+            _save_measurement_png(iter_records, png_path, plan=self.plan)
+        except Exception:
+            log.exception("Could not save measurement plot PNG")
+
     def _on_finished(self, final_status: str) -> None:
         self._measurement_running = False
         self._set_status(final_status)
         self.query_one("#back_btn", Button).disabled = False
         self.query_one("#abort_btn", Button).disabled = True
-        try:
-            if self._run_contexts:
-                first, last = self._run_contexts[0], self._run_contexts[-1]
-                run_label = first.run_str if first is last else f"{first.run_str}-{last.run_str}"
-                png_path = proc_path(self.plan.data_root, self.plan.sample, run_label,
-                                      self.plan.device,
-                                      MEASUREMENT_TYPE, "combined", combined=True)
-                self._png_path = png_path
-                _save_measurement_png(self._records, png_path, plan=self.plan)
-        except Exception:
-            log.exception("Could not save measurement plot PNG")
-
-        # One status/comment prompt for the whole session -- applied to
-        # every file in the sense-current series (asking once per file
-        # would be needless friction; they're one physical measurement
-        # session).
         self.app.push_screen(StatusCommentScreen(), self._on_status_comment)
 
     def _on_status_comment(self, result: Optional[tuple[str, str]]) -> None:
-        if result is None:
+        # With several sense currents the runs before the last were
+        # implicitly "skipped" -- left at the outcome status do_run() wrote
+        # right after each one, with no comment. Only the last run, the one
+        # the operator is looking at, gets the status/comment they entered.
+        if result is None or not self._run_contexts:
             return
         status, comment = result
-        for series_idx, ctx in enumerate(self._run_contexts):
-            iter_records = [r for r in self._records if r.get("series_index", 0) == series_idx]
-            header_fields = build_header_fields(
-                self.plan, ctx, iter_records, status=status, comment=comment,
-                extra={"sense_current_A": iter_records[0].get("sense_current_A")} if iter_records else None,
-            )
-            try:
-                # Never truncate an already-written raw file to an empty stub —
-                # a run with data must always keep it; only a run that never
-                # wrote a point (ctx.raw_path doesn't exist yet) gets a fresh
-                # header-only write here.
-                if iter_records or not ctx.raw_path.exists():
-                    write_record(ctx.raw_path, iter_records, header_fields)
-                finalize_index_row(self.plan.data_root, ctx.sample, ctx.run_number, header_fields)
-            except Exception:
-                log.exception("Could not save final status/comment for run %d", ctx.run_number)
+        series_idx = len(self._run_contexts) - 1
+        ctx = self._run_contexts[series_idx]
+        iter_records = [r for r in self._records if r.get("series_index", 0) == series_idx]
+        header_fields = build_header_fields(
+            self.plan, ctx, iter_records, status=status, comment=comment,
+            extra={"sense_current_A": iter_records[0].get("sense_current_A")} if iter_records else None,
+        )
+        try:
+            # Never truncate an already-written raw file to an empty stub —
+            # a run with data must always keep it; only a run that never
+            # wrote a point (ctx.raw_path doesn't exist yet) gets a fresh
+            # header-only write here.
+            if iter_records or not ctx.raw_path.exists():
+                write_record(ctx.raw_path, iter_records, header_fields)
+            finalize_index_row(self.plan.data_root, ctx.sample, ctx.run_number, header_fields)
+        except Exception:
+            log.exception("Could not save final status/comment for run %d", ctx.run_number)
 
         if comment and self._png_path is not None:
             try:
-                _save_measurement_png(self._records, self._png_path, plan=self.plan, comment=comment)
+                _save_measurement_png(iter_records, self._png_path, plan=self.plan, comment=comment)
             except Exception:
                 log.exception("Could not re-save measurement plot PNG with comment")
 
@@ -971,6 +968,7 @@ class RunScreen(Screen):
                 )
                 write_record(ctx.raw_path, iter_records, header_fields)
                 finalize_index_row(plan.data_root, ctx.sample, ctx.run_number, header_fields)
+                self._save_run_png(ctx, iter_records)
 
                 if iter_error is not None:
                     raise iter_error

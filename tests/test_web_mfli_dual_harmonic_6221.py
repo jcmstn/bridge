@@ -80,3 +80,33 @@ def test_build_plan_multi_row_sweep(tmp_path: Path) -> None:
     ))
     assert len(plan.currents_A) == 37
     assert plan.header_extra["field_sweep_rows_A"] == [(-1.0, 1.0, 10), (1.0, 10.0, 10)]
+
+
+def test_save_measurement_png_single_run_looks_like_a_manual_run(tmp_path) -> None:
+    # Same contract as the TUI's _save_measurement_png: one run's records,
+    # colored by quantity (1f blue / follower orange), never by series index.
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from web.mfli.dual_harmonic_6221 import _save_measurement_png
+
+    records = [
+        {"point_index": i, "magnet_field_mT": None, "1f_R_V": 1e-3 * i, "2f_R_V": 2e-6 * i,
+         "series_index": 2, "series_label": "I=1e-06A", "excitation_current_A_peak": 1e-6}
+        for i in range(3)
+    ]
+    figs = []
+    real_close = plt.close
+    plt.close = lambda fig=None: (figs.append(fig), real_close(fig))
+    try:
+        png = tmp_path / "run.png"
+        _save_measurement_png(records, png)
+    finally:
+        plt.close = real_close
+
+    assert png.exists()
+    ax1, ax2 = figs[0].axes
+    assert [ln.get_color() for ln in ax1.lines] == ["tab:blue"]
+    assert [ln.get_color() for ln in ax2.lines] == ["tab:orange"]
+    assert ax1.get_legend() is None
