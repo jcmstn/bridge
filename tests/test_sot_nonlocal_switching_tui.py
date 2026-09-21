@@ -86,10 +86,40 @@ def test_sense_current_must_stay_below_the_smallest_pulse(tmp_path):
     assert not any("read disturb" in w for w in warnings)
 
 
-def test_summary_blocks_single_reversal_pair_and_bad_nplc(tmp_path):
-    _, _, errors = tui.build_summary(_state(tmp_path, n_reversals=1, nplc=100.0))
-    assert any("reversal pairs" in e for e in errors)
+def test_summary_blocks_single_average_and_bad_nplc(tmp_path):
+    _, _, errors = tui.build_summary(_state(tmp_path, n_averages=1, nplc=100.0))
+    assert any("Averages per read" in e for e in errors)
     assert any("NPLC" in e for e in errors)
+
+
+def test_reversal_toggle_default_on_and_off_warns_about_the_uncancelled_offset(tmp_path):
+    state = _state(tmp_path)
+    assert state["reversal_enabled"] is True
+    _, warnings, errors = tui.build_summary(state)
+    assert not errors and not any("reversal is OFF" in w for w in warnings)
+
+    _, warnings, errors = tui.build_summary(_state(tmp_path, reversal_enabled=False))
+    assert not errors
+    off = next(w for w in warnings if "reversal is OFF" in w)
+    assert "+I_sense" in off and "NOT cancelled" in off and "V_even" in off
+    _, warnings, _ = tui.build_summary(_state(tmp_path, reversal_enabled=False, sense_current_A=-1e-4))
+    assert any("−I_sense" in w for w in warnings)
+
+
+def test_sense_current_is_signed_but_never_zero_and_its_size_is_still_guarded(tmp_path):
+    _, _, errors = tui.build_summary(_state(tmp_path, sense_current_A=-1e-4))
+    assert errors == []                                          # a negative fixed read polarity is fine
+    _, _, errors = tui.build_summary(_state(tmp_path, sense_current_A=0.0))
+    assert any("non-zero" in e for e in errors)
+    _, _, errors = tui.build_summary(_state(tmp_path, sense_current_A=-1e-3))   # |I| == first pulse
+    assert any("smallest pulse" in e for e in errors)
+
+
+def test_plain_read_is_estimated_faster_than_the_reversal_read(tmp_path):
+    def eta(**kw):
+        info, _, _ = tui.build_summary(_state(tmp_path, **kw))
+        return next(i for i in info if i.startswith("Estimated run time"))
+    assert eta(reversal_enabled=False) != eta(reversal_enabled=True)
 
 
 def test_reference_levels_both_or_neither_and_different(tmp_path):
@@ -162,12 +192,21 @@ def test_build_plan_shapes(tmp_path):
     assert plan.series_values == [None] and not plan.uses_magnet
     assert plan.total_points == 3 + 1                       # + the baseline read
     assert plan.pulse_cfg.width_s == 1e-3 and plan.pulse_cfg.compliance_V == 5.0
-    assert plan.read_cfg.sense_current_A == 1e-4 and plan.read_cfg.n_reversals == 5
+    assert plan.read_cfg.sense_current_A == 1e-4 and plan.read_cfg.n_averages == 5
+    assert plan.read_cfg.reversal_enabled is True
     assert plan.read_cfg.R_P_ohm is None and plan.read_cfg.R_AP_ohm is None
     assert plan.volt_cfg.visa_resource == "GPIB0::7::INSTR" and plan.volt_cfg.nplc == 5
     assert plan.source_visa == "GPIB0::20::INSTR"
     assert plan.temp_cfg is None
     assert plan.data_root == tmp_path
+
+
+def test_build_plan_carries_the_reversal_toggle_into_the_read_and_the_header(tmp_path):
+    app = tui.NonlocalSwitchingApp()
+    app.data_root = tmp_path
+    plan = app._build_plan(_state(tmp_path, reversal_enabled=False, n_averages=7))
+    assert plan.read_cfg.reversal_enabled is False and plan.read_cfg.n_averages == 7
+    assert plan.header_extra["reversal_enabled"] is False and plan.header_extra["n_averages"] == 7
 
 
 def test_build_plan_one_run_per_initial_state(tmp_path):
@@ -202,6 +241,24 @@ def test_header_fields_carry_the_switching_current_and_init_state(tmp_path):
     assert tui._run_extra(plan, None, {})["sweep_magnet_current_A"] is None
 
 
+def test_measurement_png_drops_the_v_even_panel_when_reversal_is_off(tmp_path):
+    import matplotlib.pyplot as plt
+
+    def panels(recs):
+        figs, real_close = [], plt.close
+        plt.close = lambda fig=None: (figs.append(fig), real_close(fig))
+        try:
+            tui._save_measurement_png(recs, tmp_path / "r.png")
+        finally:
+            plt.close = real_close
+        return len(figs[0].axes)
+
+    rec = {"pulse_current_A": 1e-3, "nl_resistance_ohm": 0.1, "sense_current_A": 1e-4,
+           "switched": None, "init_magnet_current_A": None}
+    assert panels([{**rec, "voltage_even_V": 2e-6, "reversal_enabled": True}]) == 2
+    assert panels([{**rec, "voltage_even_V": None, "reversal_enabled": False}]) == 1
+
+
 def test_measurement_png_annotates_the_runs_own_values(tmp_path):
     recs = [{"pulse_current_A": 0.0, "nl_resistance_ohm": -0.5, "voltage_even_V": 2e-6,
              "sense_current_A": 1e-4, "switched": None, "init_magnet_current_A": 5.0},
@@ -218,7 +275,8 @@ def test_measurement_png_annotates_the_runs_own_values(tmp_path):
 # RunScreen.do_run end to end — fake 6221/2182A/magnet in a real Textual pilot
 # ─────────────────────────────────────────────────────────────────────────────
 
-def test_run_screen_saves_one_run_per_initial_state(tmp_path, monkeypatch):
+@pytest.mark.parametrize("reversal", [True, False])
+def test_run_screen_saves_one_run_per_initial_state(tmp_path, monkeypatch, reversal):
     import asyncio
 
     import pandas as pd
@@ -258,7 +316,8 @@ def test_run_screen_saves_one_run_per_initial_state(tmp_path, monkeypatch):
     app_for_plan.data_root = tmp_path
     plan = app_for_plan._build_plan(_state(
         tmp_path, pulse_current_start_A=1e-3, pulse_current_stop_A=5e-3, pulse_current_step_A=2e-3,
-        init_magnet_currents="5, -5", delay_after_pulse_s=0.0, source_delay_s=0.0, n_reversals=3,
+        init_magnet_currents="5, -5", delay_after_pulse_s=0.0, source_delay_s=0.0, n_averages=3,
+        reversal_enabled=reversal,
         pulse_width_s=1e-4, R_P_ohm=-0.5, R_AP_ohm=0.5))
 
     screen = tui.RunScreen(plan)
@@ -281,11 +340,14 @@ def test_run_screen_saves_one_run_per_initial_state(tmp_path, monkeypatch):
     raws = sorted((tmp_path / "A" / "raw").glob("*.csv"))
     assert len(raws) == 2 and all("_NLSW_" in p.name for p in raws)
     first, second = (read_raw(p) for p in raws)
+    off = 0.0 if reversal else 0.02          # plain read keeps the fake's 2 uV thermal offset (2e-6 / 1e-4 A)
     # init +5: baseline at P, switches at 3 mA-or-above (the 3 mA step)
-    assert first["nl_resistance_ohm"].round(3).tolist() == [-0.5, -0.5, 0.5, 0.5]
+    assert first["nl_resistance_ohm"].round(3).tolist() == [-0.5 + off, -0.5 + off, 0.5 + off, 0.5 + off]
     assert first["init_magnet_current_A"].tolist() == [5.0] * 4
+    assert first["reversal_enabled"].astype(str).eq(str(reversal)).all()
+    assert (first["voltage_even_V"].notna().all() if reversal else first["voltage_even_V"].isna().all())
     # init -5: already at the top state, nothing to switch
-    assert second["nl_resistance_ohm"].round(3).tolist() == [0.5] * 4
+    assert second["nl_resistance_ohm"].round(3).tolist() == [0.5 + off] * 4
     assert (second["switched"] != True).all()  # noqa: E712 - object column of True/False/blank
 
     index = pd.read_csv(tmp_path / "A" / "index.csv")

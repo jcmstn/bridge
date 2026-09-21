@@ -41,10 +41,11 @@ def test_web_build_plan_takes_the_data_root_from_the_page(tmp_path):
              for k, v in tui.DEFAULTS.items()}
     state.update(device="HB3", sample="A", data_dir=str(tmp_path), enable_temperature=False,
                  init_magnet_currents="5, -5", pulse_current_start_A=-2e-3,
-                 pulse_current_stop_A=2e-3, pulse_current_step_A=2e-3)
+                 pulse_current_stop_A=2e-3, pulse_current_step_A=2e-3, reversal_enabled=False)
     plan = page_mod.build_plan(page_mod.resolve_state(state), tmp_path)
 
     assert plan.data_root == tmp_path
     assert plan.series_values == [5.0, -5.0]
     assert plan.pulse_currents_A == pytest.approx([-2e-3, 0.0, 2e-3], abs=1e-12)
     assert plan.total_points == (3 + 1) * 2
+    assert plan.read_cfg.reversal_enabled is False

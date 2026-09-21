@@ -86,7 +86,7 @@ NONLOCAL_SCHEMATIC = """\
            from the detector (the current returns through it). Triax OUTPUT LOW
            FLOATING — the program sets it.
     WAVE square, ONE cycle: 0 → ±I → 0 (one lobe, never a ± pair) = the write pulse,
-    then plain DC ±I_sense (current reversal) = the read.
+    then plain DC I_sense (±I current reversal by default, switchable) = the read.
   KEITHLEY 2182A  ch1 ──▶ detector magnet electrode / reference electrode past the
                           magnet (V_NL). ch2 unused (its LO is bonded to ch1 LO).
 

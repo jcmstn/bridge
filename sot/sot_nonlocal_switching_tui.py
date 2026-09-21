@@ -9,7 +9,8 @@ Nonlocal spin-current switching with only a Keithley 6221 and 2182A: an
 optional external-field initialization (Kepco magnet + Lake Shore 475; one
 run per initial-state current), then a sweep of injector pulses — each ONE
 lobe 0 → ±I → 0 (6221 WAVE square, one cycle, never a ± pair) — every one
-followed by a DC current-reversal nonlocal read on the 2182A. Type NLSW. See
+followed by a DC nonlocal read on the 2182A (current-reversal averaged, or one fixed
+polarity — switchable). Type NLSW. See
 sot/sot_nonlocal_switching.py's module docstring — wiring, protocol, the
 literature this is modelled on and the artifact checklist — before running
 this on a real device.
@@ -104,7 +105,8 @@ NLSW_DESCRIPTION = (
     "the 6221 fires ONE hardware-timed pulse through the injector (WAVE square, one cycle: "
     "0 → +I → 0 or 0 → −I → 0 — a single lobe of either sign, never a ± pair), waits, and "
     "reads the nonlocal resistance across detector magnet / reference electrode with a small "
-    "DC ±I_sense current-reversal average on the 2182A. A step in R_NL that stays is a "
+    "DC I_sense on the 2182A — current-reversal averaged by default, or (switch off) one fixed "
+    "polarity so the read's own spin current never alternates. A step in R_NL that stays is a "
     "switching event (V_even tracks Joule heating / thermal EMF). Sweep one polarity upward "
     "from a field-initialized state — then only one initial state can switch, so run the "
     "opposite one as the control — or sweep −I → +I → −I for a hysteresis loop. "
@@ -123,7 +125,8 @@ DEFAULTS: dict = {
     # nonlocal read (6221 DC ± / 2182A)
     "sense_current_A": "1e-4",
     "compliance_V": "2.0",
-    "n_reversals": "5",
+    "reversal_enabled": True,
+    "n_averages": "5",
     "source_delay_s": "0.1",
     "delay_after_pulse_s": "1.0",
     "nplc": "5",
@@ -162,7 +165,7 @@ NUMERIC_FIELDS: dict = {
     "pulse_compliance_V": float,
     "sense_current_A": float,
     "compliance_V": float,
-    "n_reversals": int,
+    "n_averages": int,
     "source_delay_s": float,
     "delay_after_pulse_s": float,
     "nplc": float,
@@ -186,7 +189,7 @@ TEMPERATURE_FIELD_IDS = ["temperature_visa_resource", "temperature_sensor_uids"]
 # Every Switch id on the form. Hardcoded in collect_raw / _load_settings /
 # parse_state -- they must move together, and parse_state runs on every
 # keystroke, so a stale entry here is an immediate crash.
-SWITCH_FIELD_IDS = ("enable_temperature", "amplitude_bidirectional")
+SWITCH_FIELD_IDS = ("enable_temperature", "amplitude_bidirectional", "reversal_enabled")
 
 
 def parse_sensor_uids(raw: str) -> tuple:
@@ -402,11 +405,11 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
                 "6221 clips silently.")
 
     # nonlocal read
-    sense = state["sense_current_A"]
-    if sense <= 0:
-        errors.append("Sense current must be > 0 A.")
+    sense = abs(state["sense_current_A"])
+    if sense == 0:
+        errors.append("Sense current must be non-zero.")
     elif sense > _READ_CURRENT_CEILING_A:
-        errors.append(f"Sense current {sense:g} A exceeds the "
+        errors.append(f"Sense current {state['sense_current_A']:g} A exceeds the "
                       f"{format_si(_READ_CURRENT_CEILING_A, 'A')} safety ceiling — the nonlocal "
                       "read needs µA–mA; check for a mistyped exponent.")
     nonzero = [abs(a) for a in amps if abs(a) > 1e-9]
@@ -423,9 +426,15 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     elif state["compliance_V"] > _READ_COMPLIANCE_CEILING_V:
         errors.append(f"Read compliance {state['compliance_V']:g} V exceeds the "
                       f"{_READ_COMPLIANCE_CEILING_V:g} V safety ceiling.")
-    if state["n_reversals"] < 2:
-        errors.append("Current-reversal pairs per read must be ≥ 2 (the SEM behind 'switched' "
-                      "needs two).")
+    if state["n_averages"] < 2:
+        errors.append("Averages per read must be ≥ 2 (± pairs with reversal, plain samples "
+                      "without) — the SEM behind 'switched' needs two.")
+    if not state["reversal_enabled"]:
+        pol = "+" if state["sense_current_A"] > 0 else "−"
+        warnings.append(f"Current reversal is OFF: one fixed read polarity ({pol}I_sense), plain "
+                        "average. Thermal-EMF offsets are NOT cancelled (R_NL carries an offset "
+                        "that can drift — steps in it still show) and V_even, the heating "
+                        "proxy, is not recorded. Measure R_P / R_AP with the same setting.")
     if state["source_delay_s"] < 0:
         errors.append("Settle after polarity flip must be ≥ 0 s.")
     if state["delay_after_pulse_s"] < 0:
@@ -476,7 +485,10 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     # size / time
     n = max(1, len(amps))
     n_files = max(1, len(real))
-    read_s = state["n_reversals"] * 2 * (state["source_delay_s"] + state["nplc"] / 50.0 + 0.05)
+    one_read_s = state["nplc"] / 50.0 + 0.05
+    read_s = (state["n_averages"] * 2 * (state["source_delay_s"] + one_read_s)
+              if state["reversal_enabled"]
+              else state["source_delay_s"] + state["n_averages"] * one_read_s)
     per_point_s = 2 * state["pulse_width_s"] + state["delay_after_pulse_s"] + read_s + 0.3
     info.append(f"{n} pulses + a baseline read"
                 + (f", × {n_files} files = {(n + 1) * n_files} total points" if n_files > 1 else ""))
@@ -509,7 +521,7 @@ def compute_filename_preview(state: dict) -> Optional[str]:
 
 # ── live plot ──────────────────────────────────────────────────────────────
 
-def _live_plot_worker(queue: "mp.Queue") -> None:
+def _live_plot_worker(queue: "mp.Queue", reversal_enabled: bool = True) -> None:
     import matplotlib.pyplot as plt
     from matplotlib.animation import FuncAnimation
 
@@ -520,7 +532,7 @@ def _live_plot_worker(queue: "mp.Queue") -> None:
         pass
     ax_r.set_ylabel("R_NL (mΩ)")
     ax_r.set_title("Live — nonlocal resistance vs pulse current")
-    ax_e.set_ylabel("V_even (µV)")
+    ax_e.set_ylabel("V_even (µV)" if reversal_enabled else "V_even (n/a — reversal off)")
     ax_e.set_xlabel("Pulse current (mA)")
     for ax in (ax_r, ax_e):
         ax.grid(True, alpha=0.3)
@@ -550,7 +562,8 @@ def _live_plot_worker(queue: "mp.Queue") -> None:
             xs, yr, ye = data[idx]
             xs.append(rec["pulse_current_A"] * 1e3)
             yr.append(rec["nl_resistance_ohm"] * 1e3)
-            ye.append(rec["voltage_even_V"] * 1e6)
+            v_even = rec.get("voltage_even_V")
+            ye.append(float("nan") if v_even is None else v_even * 1e6)
             updated.add(idx)
         if updated:
             for idx in updated:
@@ -584,16 +597,20 @@ def _save_measurement_png(records: list[dict], png_path: Path, comment: str = ""
     import matplotlib.pyplot as plt
 
     x = [r["pulse_current_A"] * 1e3 for r in records]
-    fig, (ax_r, ax_e) = plt.subplots(2, 1, sharex=True, figsize=(7, 7))
+    has_even = any(r.get("voltage_even_V") is not None for r in records)   # blank with reversal off
+    fig, axes = plt.subplots(2 if has_even else 1, 1, sharex=True, figsize=(7, 7 if has_even else 4.5))
+    axes = [axes] if not has_even else list(axes)
+    ax_r = axes[0]
     ax_r.plot(x, [r["nl_resistance_ohm"] * 1e3 for r in records],
-              "o-", ms=4, lw=1, alpha=0.6, color="tab:blue")
-    ax_e.plot(x, [r["voltage_even_V"] * 1e6 for r in records],
               "o-", ms=4, lw=1, alpha=0.6, color="tab:blue")
     ax_r.set_ylabel("R_NL (mΩ)")
     ax_r.set_title("Nonlocal resistance vs pulse current")
-    ax_e.set_ylabel("V_even (µV)")
-    ax_e.set_xlabel("Pulse current (mA)")
-    for ax in (ax_r, ax_e):
+    if has_even:
+        axes[1].plot(x, [r["voltage_even_V"] * 1e6 for r in records],
+                     "o-", ms=4, lw=1, alpha=0.6, color="tab:blue")
+        axes[1].set_ylabel("V_even (µV)")
+    axes[-1].set_xlabel("Pulse current (mA)")
+    for ax in axes:
         ax.grid(alpha=0.3)
     fig.tight_layout()
 
@@ -604,7 +621,9 @@ def _save_measurement_png(records: list[dict], png_path: Path, comment: str = ""
         lines.append(f"Initialized with magnet current {format_si(init, 'A')}")
     sense = sorted({r["sense_current_A"] for r in records if r.get("sense_current_A") is not None})
     if len(sense) == 1:
-        lines.append(f"Sense current: {format_si(sense[0], 'A')}")
+        lines.append(f"Sense current: {format_si(sense[0], 'A')}"
+                     + ("" if records[0].get("reversal_enabled", True)
+                        else " (fixed polarity, no current reversal)"))
     switched = switch_currents_A(records)
     lines.append("Switching current(s): " + ", ".join(format_si(i, "A") for i in switched)
                  if switched else "No switching detected")
@@ -642,7 +661,8 @@ def build_plan(state: dict, data_root: Path) -> MeasurementPlan:
         width_s=state["pulse_width_s"], compliance_V=state["pulse_compliance_V"])
     read_cfg = ReadConfig(
         sense_current_A=state["sense_current_A"], compliance_V=state["compliance_V"],
-        n_reversals=state["n_reversals"], source_delay_s=state["source_delay_s"],
+        reversal_enabled=state["reversal_enabled"], n_averages=state["n_averages"],
+        source_delay_s=state["source_delay_s"],
         delay_after_pulse_s=state["delay_after_pulse_s"], switch_sigma=state["switch_sigma"],
         R_P_ohm=state["R_P_ohm"], R_AP_ohm=state["R_AP_ohm"])
     volt_cfg = VoltmeterConfig(
@@ -672,7 +692,8 @@ def build_plan(state: dict, data_root: Path) -> MeasurementPlan:
         "pulse_compliance_V": state["pulse_compliance_V"],
         "delay_after_pulse_s": state["delay_after_pulse_s"],
         "sense_current_A": state["sense_current_A"],
-        "n_reversals": state["n_reversals"],
+        "reversal_enabled": state["reversal_enabled"],
+        "n_averages": state["n_averages"],
         "source_delay_s": state["source_delay_s"],
         "nplc": state["nplc"],
         "switch_sigma": state["switch_sigma"],
@@ -882,7 +903,8 @@ class RunScreen(Screen):
 
     def _start_live_plot(self) -> None:
         try:
-            self._plot_queue, self._plot_process = start_live_plot(_live_plot_worker)
+            self._plot_queue, self._plot_process = start_live_plot(
+                _live_plot_worker, self.plan.read_cfg.reversal_enabled)
         except Exception:
             log.exception("Could not start live plot window")
             self._plot_queue = self._plot_process = None
@@ -921,7 +943,7 @@ class RunScreen(Screen):
             f"{record['nl_resistance_ohm'] * 1e3:.4f}",
             f"{dr * 1e3:+.4f}" if dr is not None else "—",
             "—" if sw is None else ("YES" if sw else "no"),
-            f"{record['voltage_even_V'] * 1e6:.3f}",
+            f"{record['voltage_even_V'] * 1e6:.3f}" if record.get("voltage_even_V") is not None else "—",
             f"{t1:.3f}" if t1 is not None else "—",
         )
         table.move_cursor(row=table.row_count - 1, scroll=True)
@@ -1012,7 +1034,7 @@ class RunScreen(Screen):
 
 class NonlocalSwitchingApp(App):
     TITLE = "Nonlocal spin-current switching"
-    SUB_TITLE = "6221 single-lobe pulse · DC reversal nonlocal read (2182A) · field-initialized"
+    SUB_TITLE = "6221 single-lobe pulse · DC nonlocal read (2182A) · field-initialized"
 
     data_root: Path = _DEFAULT_DATA_DIR
 
@@ -1109,10 +1131,17 @@ class NonlocalSwitchingApp(App):
                               validators=[Number(minimum=0.0, failure_description="must be ≥ 0")],
                               hint="Wait between pulse end and the read."),
                         field("sense_current_A", "Sense current (A)", DEFAULTS["sense_current_A"],
-                              hint="Kimura/Otani: 100 µA. Keep well below the switching current."),
+                              hint="Kimura/Otani: 100 µA. Keep well below the switching current. "
+                                   "Signed: with reversal off the sign is the fixed read polarity."),
                         field("compliance_V", "Read compliance (V)", DEFAULTS["compliance_V"]),
-                        field("n_reversals", "Current-reversal pairs per read",
-                              DEFAULTS["n_reversals"], kind="integer",
+                        switch_field("reversal_enabled", "Reverse the sense current each read (+I/−I)",
+                                     DEFAULTS["reversal_enabled"]),
+                        Label("Off = one fixed polarity, plain average: the read's own spin current "
+                              "never alternates in sign. Thermal-EMF offsets are then NOT cancelled "
+                              "and V_even is not recorded.", classes="hint"),
+                        field("n_averages", "Averages per read",
+                              DEFAULTS["n_averages"], kind="integer",
+                              hint="± pairs with reversal, plain samples without.",
                               validators=[Number(minimum=2, failure_description="must be ≥ 2")]),
                         field("source_delay_s", "Settle after polarity flip (s)",
                               DEFAULTS["source_delay_s"],

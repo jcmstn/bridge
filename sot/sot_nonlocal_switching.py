@@ -10,8 +10,9 @@ Does a pure spin current switch the detector magnet of a nonlocal spin
 valve?  Physics is spin-transfer torque from a pure spin current (the charge
 current never flows under the magnet), not SOT. Modelled on the Kimura/Otani
 nonlocal switching experiments (single ~1 ms injector pulse, then read the
-nonlocal resistance with a small sense current) with a DC reversal read in
-place of their AC lock-in sense current.
+nonlocal resistance with a small sense current) with a DC read in place of
+their AC lock-in sense current — current-reversal averaged by default, or one
+fixed polarity (`ReadConfig.reversal_enabled`, see READ below).
 
 Method
 ------
@@ -28,12 +29,18 @@ Method
      it pushes the magnet toward P or toward AP.
   2. WAIT   — `delay_after_pulse_s` (Joule heat and Peltier/thermal EMFs
      decay, the 2182A recovers).
-  3. READ   — the SAME injector pair, small DC +/-I_sense, current-reversal
-     averaged (`acquire_reversal_averaged_voltage`) on the 2182A across
-     detector magnet / reference electrode past the magnet. V_odd/I_sense =
-     R_NL, the nonlocal resistance: two levels (P / AP) for a two-state
-     magnet. V_even (thermal EMF, Joule heating, rectification) is recorded
-     next to it as the artifact proxy.
+  3. READ   — the SAME injector pair, small DC I_sense, on the 2182A across
+     detector magnet / reference electrode past the magnet. V/I_sense = R_NL,
+     the nonlocal resistance: two levels (P / AP) for a two-state magnet.
+     `reversal_enabled=True` (default): +/-I_sense current-reversal averaged
+     (`acquire_reversal_averaged_voltage`); V_odd/I_sense is R_NL and V_even
+     (thermal EMF, Joule heating, rectification) is recorded next to it as
+     the artifact proxy. `reversal_enabled=False`: I_sense is held at ONE fixed
+     polarity (its sign) and read with a plain average — the weak spin current
+     the read itself drives then never alternates in sign between reversals.
+     Cost: the thermal-EMF offset is NOT cancelled (R_NL carries it; steps in
+     R_NL still show), and V_even is not recorded (`voltage_even_V` blank).
+     Measure the P/AP reference loop (`dc_spin_valve`) with the same setting.
   A read-only baseline row (no pulse) is prepended: it shows the state the
   initialization left. Each row carries R_NL, delta_R vs the previous row and
   `switched` (|delta_R| above `switch_sigma` x combined SEM — and, if
@@ -102,6 +109,8 @@ Artifact checklist — what the columns can and cannot rule out
     injector-to-magnet distance and a control device without the spin path do.
   * Read disturb: the sense current is itself a (weak) spin current. It must
     be << the smallest pulse; `_check_read_safety` refuses >= it, warns > 20%.
+    With reversal ON it alternates sign within a read; with reversal OFF it
+    always pushes the same way (pick the sign that stabilizes the state).
   * Compliance: if I_pulse x R_injector exceeds `compliance_V` the 6221 clips
     silently. Choose compliance_V above I_max x R_inj with margin.
   * Energy: pulse energy is I^2 R t. Start well below the expected switching
@@ -139,7 +148,7 @@ from typing import Callable, List, Optional
 import pandas as pd
 from pymeasure.instruments.keithley import Keithley2182, Keithley6221
 
-from instruments.keithley2182 import VoltmeterConfig, connect_voltmeter
+from instruments.keithley2182 import VoltmeterConfig, acquire_averaged_voltage, connect_voltmeter
 from instruments.keithley6221 import (
     PulseWaveConfig,
     acquire_reversal_averaged_voltage,
@@ -197,11 +206,14 @@ class WritePulseConfig:
 
 @dataclass
 class ReadConfig:
-    """The DC current-reversal nonlocal read, plus the wait before it."""
-    sense_current_A: float     = 1e-4    # read current magnitude [A] — must stay << the smallest pulse
+    """The DC nonlocal read, plus the wait before it."""
+    sense_current_A: float     = 1e-4    # read current [A], |I| must stay << the smallest pulse; the
+                                          # sign only matters with reversal off (the fixed read polarity)
     compliance_V: float        = 2.0
-    n_reversals: int           = 5       # +I/-I pairs averaged per read (>= 2: SEM needs two)
-    source_delay_s: float      = 0.1     # settle after each polarity flip, before the 2182A read [s]
+    reversal_enabled: bool     = True    # True: +I/-I pairs (offset-cancelled, V_even recorded);
+                                          # False: one fixed polarity, plain average
+    n_averages: int            = 5       # reversal on: +I/-I pairs; off: plain samples (>= 2: SEM needs two)
+    source_delay_s: float      = 0.1     # settle after each polarity flip / after setting the level [s]
     delay_after_pulse_s: float = 1.0     # wait between pulse end and read [s]
     switch_sigma: float        = 5.0     # `switched` = |delta_R| > switch_sigma x combined SEM
     R_P_ohm: Optional[float]   = None    # nonlocal-R levels from a field-swept reference loop
@@ -235,29 +247,30 @@ def _check_pulse_currents(points: List[PulsePoint]) -> None:
 
 
 def _check_read_safety(read_cfg: ReadConfig, points: List[PulsePoint]) -> None:
-    if not 0 < read_cfg.sense_current_A <= _READ_CURRENT_CEILING_A:
+    if not 0 < abs(read_cfg.sense_current_A) <= _READ_CURRENT_CEILING_A:
         raise ValueError(
-            f"sense_current_A must be in (0, {_READ_CURRENT_CEILING_A} A]; got "
+            f"|sense_current_A| must be in (0, {_READ_CURRENT_CEILING_A} A]; got "
             f"{read_cfg.sense_current_A} A — check for a mistyped exponent.")
     if not 0 < read_cfg.compliance_V <= _READ_COMPLIANCE_CEILING_V:
         raise ValueError(
             f"compliance_V must be in (0, {_READ_COMPLIANCE_CEILING_V} V]; got "
             f"{read_cfg.compliance_V} V.")
-    if read_cfg.n_reversals < 2:
-        raise ValueError("n_reversals must be >= 2 (the SEM behind `switched` needs two pairs).")
+    if read_cfg.n_averages < 2:
+        raise ValueError("n_averages must be >= 2 (the SEM behind `switched` needs two pairs/samples).")
     if read_cfg.delay_after_pulse_s < 0:
         raise ValueError("delay_after_pulse_s must be >= 0.")
     r_p, r_ap = read_cfg.R_P_ohm, read_cfg.R_AP_ohm
     if (r_p is None) != (r_ap is None) or (r_p is not None and r_p == r_ap):
         raise ValueError("Give both R_P_ohm and R_AP_ohm (different), or neither.")
     pulses = [abs(pt.pulse_current_A) for pt in points if abs(pt.pulse_current_A) > _NO_PULSE_A]
-    if pulses and read_cfg.sense_current_A >= min(pulses):
+    i_sense = abs(read_cfg.sense_current_A)
+    if pulses and i_sense >= min(pulses):
         raise ValueError(
-            f"sense_current_A ({read_cfg.sense_current_A} A) must be below the smallest "
+            f"|sense_current_A| ({i_sense} A) must be below the smallest "
             f"pulse ({min(pulses)} A) — the read itself would switch the magnet.")
-    if pulses and read_cfg.sense_current_A > 0.2 * min(pulses):
+    if pulses and i_sense > 0.2 * min(pulses):
         log.warning("Sense current is %.0f%% of the smallest pulse — read disturb possible.",
-                    100 * read_cfg.sense_current_A / min(pulses))
+                    100 * i_sense / min(pulses))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -353,7 +366,7 @@ def run_measurement(
     output_file: str = "nonlocal_switching.csv",
 ) -> pd.DataFrame:
     """Baseline read, then per point: (output off) -> WAVE pulse -> wait ->
-    DC reversal read -> (output off). One row per point; CSV rewritten in
+    DC read -> (output off). One row per point; CSV rewritten in
     full every row. The 6221 output is always left off. The caller has already
     initialized the magnet state (`initialize_with_field` or by hand).
 
@@ -404,14 +417,24 @@ def run_measurement(
                     break
 
             _dc_read_on(source, read_cfg.compliance_V)
-            rv = acquire_reversal_averaged_voltage(
-                source, voltmeter, read_cfg.sense_current_A, read_cfg.n_reversals,
-                stop_event, source_delay_s=read_cfg.source_delay_s)
+            if read_cfg.reversal_enabled:
+                rv = acquire_reversal_averaged_voltage(
+                    source, voltmeter, read_cfg.sense_current_A, read_cfg.n_averages,
+                    stop_event, source_delay_s=read_cfg.source_delay_s)
+            else:
+                # ONE fixed polarity: the sense current never changes sign, so the weak
+                # spin current it drives never alternates. Plain average — the thermal-EMF
+                # offset is not cancelled and V_even does not exist.
+                source.source_current = read_cfg.sense_current_A
+                _interruptible_sleep(read_cfg.source_delay_s, stop_event)
+                av = acquire_averaged_voltage(voltmeter, read_cfg.n_averages, stop_event)
+                rv = {"mean": av["mean"], "sem": av["sem"], "even_mean": None, "even_sem": None,
+                      "n_reversals": read_cfg.n_averages}
             _output_off(source)
 
-            i_read = read_cfg.sense_current_A
+            i_read = read_cfg.sense_current_A            # signed: R = V/I is sign-invariant
             r = rv["mean"] / i_read
-            r_sem = rv["sem"] / i_read
+            r_sem = rv["sem"] / abs(i_read)
             t1_K, t2_K = read_temperature(temp_ctrl, temp_cfg) if temp_cfg is not None else (None, None)
 
             record = {
@@ -422,7 +445,8 @@ def run_measurement(
                 "pulse_width_s":          pulse_cfg.width_s if fired else None,
                 "pulse_width_measured_s": pinfo["pulse_width_measured_s"] if fired else None,
                 "sense_current_A":        i_read,
-                "n_reversals":            rv["n_reversals"],
+                "reversal_enabled":       read_cfg.reversal_enabled,
+                "n_averages":             rv["n_reversals"],
                 "voltage_V":              rv["mean"],
                 "voltage_sem_V":          rv["sem"],
                 "voltage_even_V":         rv["even_mean"],
@@ -449,9 +473,10 @@ def run_measurement(
                 Path(output_file).parent.mkdir(parents=True, exist_ok=True)
                 pd.DataFrame(records).to_csv(output_file, index=False)
 
-            log.info("pt %d/%d  I_pulse=%.4g A  R_NL=%.5g ± %.2g Ω  dR=%s  switched=%s  V_even=%.3e V",
+            log.info("pt %d/%d  I_pulse=%.4g A  R_NL=%.5g ± %.2g Ω  dR=%s  switched=%s  V_even=%s",
                      idx, len(plan) - 1, record["pulse_current_A"], r, r_sem,
-                     record["delta_R_ohm"], record["switched"], rv["even_mean"])
+                     record["delta_R_ohm"], record["switched"],
+                     "n/a" if rv["even_mean"] is None else f"{rv['even_mean']:.3e} V")
     finally:
         _output_off(source)
 
@@ -466,15 +491,17 @@ def run_measurement(
 
 def plot_results(df: pd.DataFrame) -> None:
     """R_NL vs pulse current (a step = switching) above V_even vs the same
-    axis (a bump that follows the pulse = heating). Colour = order in time."""
+    axis (a bump that follows the pulse = heating; blank with reversal off).
+    Colour = order in time."""
     import matplotlib.pyplot as plt
 
     fig, (ax_r, ax_e) = plt.subplots(2, 1, sharex=True, figsize=(6, 7))
     x = df["pulse_current_A"] * 1e3
     for ax, col, lab in ((ax_r, "nl_resistance_ohm", "R_NL (Ω)"),
                          (ax_e, "voltage_even_V", "V_even (V)")):
-        ax.plot(x, df[col], "-", lw=0.5, color="gray")
-        sc = ax.scatter(x, df[col], c=df["point_index"], cmap="viridis", zorder=3)
+        y = pd.to_numeric(df[col], errors="coerce")      # V_even is blank with reversal off
+        ax.plot(x, y, "-", lw=0.5, color="gray")
+        sc = ax.scatter(x, y, c=df["point_index"], cmap="viridis", zorder=3)
         ax.set_ylabel(lab)
     ax_e.set_xlabel("pulse current (mA)")
     fig.colorbar(sc, ax=[ax_r, ax_e], label="point #")
@@ -486,8 +513,8 @@ def main() -> None:
     initialized (external field, by hand) — the TUI (nonlocal_switching_tui.py) does it for you and
     saves into the data convention (type NLSW)."""
     pulse_cfg = WritePulseConfig(width_s=1e-3, compliance_V=5.0)
-    read_cfg = ReadConfig(sense_current_A=1e-4, compliance_V=2.0, n_reversals=5,
-                          delay_after_pulse_s=1.0)   # + R_P_ohm / R_AP_ohm from a dc_spin_valve loop
+    read_cfg = ReadConfig(sense_current_A=1e-4, compliance_V=2.0, n_averages=5,
+                          delay_after_pulse_s=1.0)   # reversal_enabled=False: one fixed read polarity   # + R_P_ohm / R_AP_ohm from a dc_spin_valve loop
 
     # ── pick ONE protocol (see module docstring) ─────────────────────────────
     pulses_A = linear_sweep(1e-3, 10e-3, 0.5e-3, bidirectional=False)   # ascending, one polarity

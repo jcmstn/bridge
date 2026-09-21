@@ -29,6 +29,7 @@ class _Fake6221:
         self.enabled = False
         self.output_low_grounded = False
         self._i = 0.0
+        self.current_log: list[float] = []          # every DC level written (reads + the 0 A parking)
         self.waveform_offset = 0.0
         self.waveform_amplitude = 0.0
         self.pulse_levels: list[tuple[float, float]] = []
@@ -42,6 +43,7 @@ class _Fake6221:
         if self.armed:
             raise RuntimeError("+413 Not allowed with mode arm")
         self._i = v
+        self.current_log.append(v)
 
     @property
     def source_enabled(self):      # the one-cycle wave is already over at the first poll
@@ -76,8 +78,8 @@ class _FakeVoltmeter:
 
 def _run(points, **read_kw):
     src = _Fake6221()
-    read_cfg = ns.ReadConfig(sense_current_A=1e-4, n_reversals=3, source_delay_s=0,
-                             delay_after_pulse_s=0, **read_kw)
+    read_kw = {"sense_current_A": 1e-4, **read_kw}
+    read_cfg = ns.ReadConfig(n_averages=3, source_delay_s=0, delay_after_pulse_s=0, **read_kw)
     df = ns.run_measurement(src, _FakeVoltmeter(src), ns.WritePulseConfig(width_s=1e-4),
                             read_cfg, [ns.PulsePoint(i) for i in points], write_csv=_NULL_WRITER)
     return src, df
@@ -101,6 +103,38 @@ def test_pulses_are_single_lobes_of_either_sign_and_switch_the_state():
     assert df["voltage_even_V"].round(7).eq(2e-6).all()
     # output left off and zeroed
     assert src.enabled is False and src.source_current == 0.0 and src.armed is False
+
+
+def test_reversal_on_alternates_the_sense_current_and_cancels_the_offset():
+    src, df = _run([5e-3])
+    assert min(src.current_log) < 0 < max(src.current_log)        # +I and -I both driven
+    assert df["reversal_enabled"].all() and df["voltage_even_V"].notna().all()
+    assert df["nl_resistance_ohm"].round(3).tolist() == [-0.5, 0.5]   # V_odd: offset gone
+
+
+def test_reversal_off_holds_one_polarity_skips_v_even_and_still_sees_the_step():
+    src, df = _run([1e-3, 5e-3], reversal_enabled=False)
+
+    assert min(src.current_log) >= 0                               # the sense current never changes sign
+    assert max(src.current_log) == 1e-4
+    assert not df["reversal_enabled"].any()
+    assert df["voltage_even_V"].isna().all() and df["voltage_even_sem_V"].isna().all()
+    assert (df["n_averages"] == 3).all()
+    # plain average: the 2 uV thermal offset is NOT cancelled (2e-6 / 1e-4 = 0.02 ohm) ...
+    assert df["nl_resistance_ohm"].round(3).tolist() == [-0.48, -0.48, 0.52]
+    # ... but the P<->AP step is untouched, so `switched` still fires
+    assert df["switched"].tolist() == [None, False, True]
+    assert ns.switch_currents_A(df.to_dict("records")) == [5e-3]
+
+
+def test_reversal_off_negative_sense_reads_at_a_fixed_negative_polarity():
+    src, df = _run([1e-3, 5e-3], reversal_enabled=False, sense_current_A=-1e-4)
+
+    assert max(src.current_log) <= 0 and min(src.current_log) == -1e-4
+    # R = V/I is sign-invariant; only the (uncancelled) offset flips sign: 2e-6 / -1e-4 = -0.02 ohm
+    assert df["nl_resistance_ohm"].round(3).tolist() == [-0.52, -0.52, 0.48]
+    assert (df["nl_resistance_sem_ohm"] > 0).all()                # never a negative error bar
+    assert df["switched"].tolist() == [None, False, True]
 
 
 def test_reference_levels_require_half_the_swing_to_count_as_switched():
@@ -156,7 +190,8 @@ def test_initialize_with_field_ramps_to_init_then_hold(monkeypatch):
     ([ns.PulsePoint(float("nan"))], {}),
     ([ns.PulsePoint(5e-4)], {"sense_current_A": 5e-4}),          # read >= smallest pulse
     ([ns.PulsePoint(-5e-4)], {"sense_current_A": 5e-4}),         # ... also for a negative pulse
-    ([ns.PulsePoint(5e-3)], {"n_reversals": 1}),
+    ([ns.PulsePoint(5e-3)], {"n_averages": 1}),
+    ([ns.PulsePoint(5e-4)], {"sense_current_A": -5e-4}),         # |sense| >= smallest pulse, either sign
     ([ns.PulsePoint(5e-3)], {"R_P_ohm": 1.0}),                   # only one reference level
     ([ns.PulsePoint(5e-3)], {"sense_current_A": 0.5}),           # over the read ceiling
 ])

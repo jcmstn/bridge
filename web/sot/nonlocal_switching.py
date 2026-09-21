@@ -126,16 +126,25 @@ def page() -> None:
                         "Pulse voltage compliance (V)", float(d("pulse_compliance_V")),
                         hint="Above I_max × R_injector, or the pulse clips silently.")
 
-                with param_card("Nonlocal read (6221 DC ± / 2182A)"):
+                with param_card("Nonlocal read (6221 DC / 2182A)"):
                     inputs["delay_after_pulse_s"] = num_field(
                         "Delay after pulse (s)", float(d("delay_after_pulse_s")),
                         hint="Wait between pulse end and the read.")
                     inputs["sense_current_A"] = num_field(
                         "Sense current (A)", float(d("sense_current_A")),
-                        hint="Kimura/Otani: 100 µA. Keep well below the switching current.")
+                        hint="Kimura/Otani: 100 µA. Keep well below the switching current. "
+                             "Signed: with reversal off the sign is the fixed read polarity.")
                     inputs["compliance_V"] = num_field("Read compliance (V)", float(d("compliance_V")))
-                    inputs["n_reversals"] = num_field(
-                        "Current-reversal pairs per read", float(d("n_reversals")), integer=True)
+                    switches["reversal_enabled"] = bool_switch(
+                        "Reverse the sense current each read (+I/−I)", d("reversal_enabled"))
+                    ui.label(
+                        "Off = one fixed polarity, plain average: the read's own spin current never "
+                        "alternates in sign. Thermal-EMF offsets are then NOT cancelled and V_even "
+                        "is not recorded."
+                    ).classes("text-xs text-grey-6 -mt-1 mb-1")
+                    inputs["n_averages"] = num_field(
+                        "Averages per read", float(d("n_averages")), integer=True,
+                        hint="± pairs with reversal, plain samples without.")
                     inputs["source_delay_s"] = num_field(
                         "Settle after polarity flip (s)", float(d("source_delay_s")))
                     inputs["nplc"] = num_field("2182A integration (NPLC)", float(d("nplc")))
@@ -323,8 +332,9 @@ def page() -> None:
         x = record["pulse_current_A"] * 1e3
         fig.data[ri].x = fig.data[ri].x + (x,)
         fig.data[ri].y = fig.data[ri].y + (record["nl_resistance_ohm"] * 1e3,)
-        fig.data[ri + 1].x = fig.data[ri + 1].x + (x,)
-        fig.data[ri + 1].y = fig.data[ri + 1].y + (record["voltage_even_V"] * 1e6,)
+        if record.get("voltage_even_V") is not None:        # blank with reversal off
+            fig.data[ri + 1].x = fig.data[ri + 1].x + (x,)
+            fig.data[ri + 1].y = fig.data[ri + 1].y + (record["voltage_even_V"] * 1e6,)
         plot.update()
         init = record.get("init_magnet_current_A")
         dr = record.get("delta_R_ohm")
@@ -337,7 +347,7 @@ def page() -> None:
             "R": f"{record['nl_resistance_ohm'] * 1e3:.4f}",
             "dR": f"{dr * 1e3:+.4f}" if dr is not None else "—",
             "sw": "—" if sw is None else ("YES" if sw else "no"),
-            "Ve": f"{record['voltage_even_V'] * 1e6:.3f}",
+            "Ve": f"{record['voltage_even_V'] * 1e6:.3f}" if record.get("voltage_even_V") is not None else "—",
             "T1": f"{t1:.3f}" if t1 is not None else "—",
         })
         table.update()

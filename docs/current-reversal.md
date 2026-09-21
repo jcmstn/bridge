@@ -33,7 +33,7 @@ path) is on every row. `sem` is `nan` when only one pair/sample was collected
 (an aborted point) — one sample gives no scatter to estimate from.
 
 The plain-average path (`acquire_averaged_voltage`, used by the I–V and
-gate-sweep programs and by `dc_spin_valve.py` when reversal is switched off)
+gate-sweep programs and by `dc_spin_valve.py` / `sot_nonlocal_switching.py` when reversal is switched off)
 follows the same convention: `voltage_sem_V` is sample-stdev / `sqrt(n)` over
 the `n_averages` readings.
 
