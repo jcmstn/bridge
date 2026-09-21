@@ -91,7 +91,15 @@ from instruments.data_naming import (
     proc_path,
     write_record,
 )
+from instruments.keithley6221 import ac_source_restart_s, wave_pulse_s
+from instruments.kepco_magnet import magnet_move_s
+from instruments.lakeshore475 import read_field_s
 from instruments.live_plot import start_live_plot
+from instruments.mfli_daq import acquire_s
+from instruments.run_time import (
+    ARM_S, GPIB_TXN_S, LOCK_TYP_S, PER_FILE_S, PER_RUN_S, POINT_OVERHEAD_S, TEMP_READ_S,
+    RunCost, progress_step, progress_total,
+)
 from instruments.tui_sample_picker import (
     NEW_SAMPLE_SENTINEL,
     NewSampleScreen,
@@ -296,15 +304,44 @@ def format_si(value: float, unit: str) -> str:
     return f"{value:.3e} {unit}"
 
 
-def format_duration(seconds: float) -> str:
-    seconds = max(0.0, seconds)
-    m, s = divmod(int(round(seconds)), 60)
-    h, m = divmod(m, 60)
-    if h:
-        return f"{h}h {m}m {s}s"
-    if m:
-        return f"{m}m {s}s"
-    return f"{s}s"
+def run_costs(state: dict) -> RunCost:
+    """Modelled cost of the whole run, one entry per point in loop order
+    (one complete pulse-current sweep per file: sense current outer x assist
+    current inner, like MeasurementPlan.series_values). Also drives the run
+    screen's progress bar, so estimate and live ETA cannot disagree."""
+    pulses = state.get("pulse_current_list", [])
+    series = list(itertools.product(state.get("sense_currents_A", []),
+                                    state.get("magnet_currents_A", [])))
+    rc = RunCost(len(pulses) * max(1, len(series)))
+    magnet = MagnetConfig(ramp_step_A=state["ramp_step_A"], ramp_delay_s=state["ramp_delay_s"])
+    gauss = GaussmeterConfig(n_averages=state["gaussmeter_n_averages"],
+                             read_delay_s=state["gaussmeter_read_delay_s"])
+    has_temp = state["enable_temperature"] and bool(parse_sensor_uids(state["temperature_sensor_uids"]))
+    lock_typ = min(LOCK_TYP_S, state["lock_timeout_s"])   # the lock wait returns at the first lock
+    # run_measurement(): AC off (2 writes) -> fire_wave_pulse (its own ARM) -> wait -> AC on
+    # (compliance, enable, ARM, START = 4 writes + a second ARM) -> PLL lock -> settle -> one
+    # acquire -> AC off (2) -> frequency read-back (1) -> temperature -> CSV rewrite
+    rc.each("post-pulse wait", state["delay_after_pulse_s"])
+    rc.each("6221 pulse", wave_pulse_s(state["pulse_width_s"]))
+    rc.each("6221 re-arm", ARM_S)
+    rc.each("PLL lock", lock_typ, worst_extra=max(0.0, state["lock_timeout_s"] - lock_typ))
+    rc.each("settle", state["settle_after_enable_s"])
+    rc.each("MFLI read", acquire_s(state["filter_time_constant_s"], state["n_averages"],
+                                   max(state["sample_rate_Hz"], 1.0)))
+    rc.each("overhead", 9 * GPIB_TXN_S + POINT_OVERHEAD_S + (TEMP_READ_S if has_temp else 0.0))
+    prev = 0.0                                       # magnet starts at 0 A
+    for k, (_I_sense, I_mag) in enumerate(series):
+        first = k * len(pulses)                        # this file's first point
+        rc.at("6221 rebuild", ac_source_restart_s(), first)    # do_run(): shutdown + connect_ac_source every file
+        typ, worst = magnet_move_s(abs(I_mag - prev), magnet)  # set_magnet_current() every file, no parking guard
+        rc.at("magnet", typ, first, worst_extra=worst - typ)
+        prev = I_mag
+        rc.at("field read", read_field_s(gauss), first)        # run_measurement() reads the field once
+        rc.at("per-file", PER_FILE_S, first)
+    rc.at("per-run", PER_RUN_S, 0)
+    if series:                                       # shutdown_magnet() ramps back to 0 A
+        rc.tail("ramps", magnet_move_s(abs(series[-1][1]), magnet, with_field=False)[0])
+    return rc
 
 
 # ── plan ────────────────────────────────────────────────────────────────────
@@ -334,6 +371,7 @@ class MeasurementPlan:
     series: str
     temp_cfg: Optional[TemperatureControllerConfig] = None
     data_root: Path = _DEFAULT_DATA_DIR
+    run_cost: Optional[RunCost] = None      # modelled seconds per point (progress bar + ETA)
 
     @property
     def series_values(self) -> List[tuple[float, float]]:
@@ -521,17 +559,11 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     n_currents = max(1, len(currents))
     n_sense = max(1, len(sense_currents))
     n_files = n_currents * n_sense
-    tc = state["filter_time_constant_s"]
-    acquire_window_s = max(0.1, 3.0 * tc,
-                           state["n_averages"] * 1.5 / max(state["sample_rate_Hz"], 1.0))
-    per_point_s = (state["pulse_width_s"] + state["delay_after_pulse_s"] + state["lock_timeout_s"]
-                   + state["settle_after_enable_s"] + acquire_window_s + 0.2)
     info.append(f"{n} amplitudes, one pulse each"
                 + (f", × {n_files} files ({n_currents} assist current(s) x {n_sense} sense "
                    f"current(s)) = {n * n_files} total points"
                    if n_files > 1 else ""))
-    info.append(f"Estimated run time ≈ {format_duration(n * n_files * per_point_s)} "
-                f"(worst case — assumes the full lock timeout every point)")
+    info.extend(run_costs(state).lines("Estimated run time"))
     info.append(f"For P(V) / I50 statistics, re-run this sweep several times.")
     if sense_currents:
         info.append(f"AC excitation: {format_si(sense_currents[0], 'A')} peak @ "
@@ -735,7 +767,8 @@ class RunScreen(Screen):
         yield Static("Starting …", id="status_line")
         with Horizontal(id="progress_row"):
             yield Static("", id="run_label")
-            yield ProgressBar(id="progress", total=self.plan.total_points, show_eta=False)
+            yield ProgressBar(id="progress", total=progress_total(self.plan.run_cost, self.plan.total_points),
+                              show_eta=True)
         yield DataTable(id="results_table", zebra_stripes=True, cursor_type="row")
         yield RichLog(id="log", max_lines=5000, markup=False, wrap=True)
         with Horizontal(id="runactionbar"):
@@ -801,7 +834,8 @@ class RunScreen(Screen):
             f"{t1:.3f}" if t1 is not None else "—",
         )
         table.move_cursor(row=table.row_count - 1, scroll=True)
-        self.query_one("#progress", ProgressBar).advance(1)
+        self.query_one("#progress", ProgressBar).advance(
+            progress_step(self.plan.run_cost, len(self._records) - 1))
         self._set_status(f"Point {len(self._records)} / {self.plan.total_points}.")
 
     def _make_on_point(self, series_index: int, series_label: Optional[str]):
@@ -1523,7 +1557,7 @@ class SOTPulsedSwitching6221App(App):
             sample=state["sample"], device=state["device"],
             temperature_setpoint_K=state["temperature_setpoint_K"],
             cooldown=state["cooldown"], header_extra=header_extra, series="",
-            temp_cfg=temp_cfg,
+            temp_cfg=temp_cfg, run_cost=run_costs(state),
         )
 
 

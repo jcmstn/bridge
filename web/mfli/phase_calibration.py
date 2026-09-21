@@ -41,7 +41,7 @@ from mfli.mfli_phase_calibration import (
 from mfli.mfli_phase_calibration_tui import (
     DEFAULTS, NUMERIC_FIELDS, TEXT_FIELDS, LIST_FIELDS,
     MEASUREMENT_TYPE, CalibrationPlan, build_header_fields, build_summary, parse_sensor_uids,
-    compute_filename_preview, format_si,
+    compute_filename_preview, format_si, run_costs,
 )
 from instruments.data_naming import (
     TEST_SAMPLE, allocate_run, finalize_index_row, make_incremental_writer,
@@ -162,6 +162,7 @@ def build_plan(state: dict) -> CalibrationPlan:
         amplitude_check_cfg=amplitude_check_cfg, frequency_check_cfg=frequency_check_cfg,
         output_csv=output_csv, run_ctx=run_ctx, temperature_setpoint_K=state["temperature_setpoint_K"],
         cooldown=state["cooldown"], header_extra=header_extra, temp_cfg=temp_cfg,
+        run_cost=run_costs(state),
     )
 
 
@@ -656,7 +657,7 @@ def page() -> None:
             on_record=on_record, on_status=on_status, on_log=on_log,
             on_finished=make_on_finished(plan),
             sample=plan.run_ctx.sample, device=plan.run_ctx.device,
-            run_number=plan.run_ctx.run_number,
+            run_number=plan.run_ctx.run_number, run_cost=plan.run_cost,
         )
         if not rc.try_start():
             ui.notify("Another measurement is already running — see the banner above.", type="warning")

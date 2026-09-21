@@ -149,6 +149,7 @@ from mfli.mfli_dual_harmonic import (
     get_demod_phase_deg,
     null_follower_reference_via_1f,
 )
+from instruments.run_time import GPIB_TXN_S, LOCK_TYP_S
 
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 
@@ -310,6 +311,15 @@ def wait_for_reference_lock(daq: "zi.ziDAQServer", cfg: ExtRefConfig,
             return False
         time.sleep(0.05)
     return False
+
+
+def extref_lock_s(lock_timeout_s: float) -> tuple[float, float]:
+    """Modelled (typical, worst-case) wall time of arming BOTH devices' ExtRef
+    PLLs: per device, configure_external_reference() is 12 LabOne transactions
+    and wait_for_reference_lock() returns at the first lock -- run_time.LOCK_TYP_S
+    typically, the full `lock_timeout_s` if the marker never locks."""
+    setup = 2 * 12 * GPIB_TXN_S
+    return setup + 2 * LOCK_TYP_S, setup + 2 * lock_timeout_s
 
 
 def check_reference_locked(daq: "zi.ziDAQServer", cfg: ExtRefConfig) -> Optional[bool]:

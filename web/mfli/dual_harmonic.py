@@ -40,7 +40,7 @@ from mfli.mfli_dual_harmonic import (
 from mfli.mfli_dual_harmonic_tui import (
     DEFAULTS, NUMERIC_FIELDS, TEXT_FIELDS, OPTIONAL_NUMERIC_FIELDS,
     MEASUREMENT_TYPE, MeasurementPlan, build_header_fields, build_summary,
-    compute_filename_preview, format_si, parse_sensor_uids,
+    compute_filename_preview, format_si, parse_sensor_uids, run_costs,
 )
 from instruments.data_naming import (
     TEST_SAMPLE, allocate_run, finalize_index_row, make_incremental_writer,
@@ -175,6 +175,7 @@ def build_plan(state: dict) -> MeasurementPlan:
         phase_cal_max_iterations=int(state["phase_cal_max_iterations"]), geometry_cfg=geometry_cfg,
         run_ctx=run_ctx, temperature_setpoint_K=state["temperature_setpoint_K"],
         cooldown=state["cooldown"], header_extra=header_extra,
+        run_cost=run_costs(state, currents_A),
     )
 
 
@@ -725,7 +726,7 @@ def page() -> None:
             on_record=on_record, on_status=on_status, on_log=on_log,
             on_finished=make_on_finished(plan),
             sample=plan.run_ctx.sample, device=plan.run_ctx.device,
-            run_number=plan.run_ctx.run_number,
+            run_number=plan.run_ctx.run_number, run_cost=plan.run_cost,
         )
         if not rc.try_start():
             ui.notify("Another measurement is already running — see the banner above.", type="warning")

@@ -89,6 +89,8 @@ from mfli.mfli_dual_harmonic import (
     sync_follower_oscillator,
 )
 from dc.dc_sweep_utils import build_segmented_sweep
+from instruments.mfli_daq import acquire_s
+from instruments.run_time import GPIB_TXN_S, PHASE_NULL_ITER_TYP
 
 logging.basicConfig(
     level=logging.INFO,
@@ -467,6 +469,41 @@ def run_frequency_check(
     return FrequencyCheckResult(points=points, df=df, slope_deg_per_Hz=float(slope),
                                  r_squared=r_squared, equivalent_delay_s=equivalent_delay_s,
                                  linear_flag=linear_flag, note=note)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Run-time model  ── beside the loops it mirrors (auto_null_phase() etc.)
+# ─────────────────────────────────────────────────────────────────────────────
+
+CONFIGURE_OUTPUT_TXNS = 9   # configure_output(): ziDiscovery find + get, 6 node writes, sync
+
+
+def null_phase_s(time_constant_s: float, sample_rate_Hz: float, n_averages: int,
+                 max_iterations: int, settle_s: Optional[float] = None) -> Tuple[float, float]:
+    """Modelled (typical, worst) wall time of ``auto_null_phase()``: one getDouble,
+    `iters` acquisitions, and between them a phase write (+ sync) and a
+    ``settle_s`` sleep (default 5·TC, as in auto_null_phase). Typical uses
+    run_time.PHASE_NULL_ITER_TYP rounds (capped at the form's maximum); worst
+    is `max_iterations`."""
+    settle = 5.0 * time_constant_s if settle_s is None else settle_s
+    acq = acquire_s(time_constant_s, n_averages, sample_rate_Hz)
+
+    def total(iters: int) -> float:
+        iters = max(1, int(iters))
+        return GPIB_TXN_S + iters * acq + (iters - 1) * (2 * GPIB_TXN_S + settle)
+
+    return total(min(PHASE_NULL_ITER_TYP, max_iterations)), total(max_iterations)
+
+
+def null_follower_s(time_constant_s: float, sample_rate_Hz: float, n_averages: int,
+                    max_iterations: int) -> Tuple[float, float]:
+    """Modelled (typical, worst) wall time of ``null_follower_reference_via_1f()``:
+    the null itself plus its harmonic switch / phase restore round trips and the
+    two 5·TC settle sleeps around it."""
+    settle = 5.0 * time_constant_s
+    typ, worst = null_phase_s(time_constant_s, sample_rate_Hz, n_averages, max_iterations, settle)
+    overhead = 7 * GPIB_TXN_S + 2 * settle
+    return typ + overhead, worst + overhead
 
 
 # ─────────────────────────────────────────────────────────────────────────────

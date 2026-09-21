@@ -141,3 +141,17 @@ def safe_shutdown(label: str, fn: Callable[[], None]) -> None:
         fn()
     except Exception:
         log.exception("Error while shutting down %s", label)
+
+
+def field_hops(currents_A, n_series: int) -> list[float]:
+    """|ΔI| the magnet moves BEFORE each point of `n_series` back-to-back
+    sweeps of `currents_A` (series-major, the loop order): the very first
+    point starts from 0 A, and every later series' first point returns from
+    the previous sweep's last current. Feeds the run-time estimate."""
+    hops: list[float] = []
+    prev = 0.0
+    for _ in range(n_series):
+        for current in currents_A:
+            hops.append(abs(float(current) - prev))
+            prev = float(current)
+    return hops

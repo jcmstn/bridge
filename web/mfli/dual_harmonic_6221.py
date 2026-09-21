@@ -40,7 +40,7 @@ from mfli.mfli_dual_harmonic_6221 import (
 from mfli.mfli_dual_harmonic_6221_tui import (
     DEFAULTS, NUMERIC_FIELDS, TEXT_FIELDS, OPTIONAL_NUMERIC_FIELDS,
     MEASUREMENT_TYPE, MeasurementPlan, build_header_fields, build_summary,
-    compute_filename_preview, format_si, parse_sensor_uids, follower_naming,
+    compute_filename_preview, format_si, parse_sensor_uids, follower_naming, run_costs,
 )
 from instruments.data_naming import (
     TEST_SAMPLE, RunContext, allocate_run, finalize_index_row, make_incremental_writer,
@@ -199,6 +199,7 @@ def build_plan(state: dict) -> MeasurementPlan:
         sample=state["sample"], device=state["device"], data_root=Path(state["data_dir"]),
         temperature_setpoint_K=state["temperature_setpoint_K"],
         cooldown=state["cooldown"], header_extra=header_extra, series=series,
+        run_cost=run_costs(state, currents_A),
     )
 
 
@@ -945,7 +946,7 @@ def page() -> None:
             parameters=state, data_dir=state["data_dir"], planned_output_paths=[],
             on_record=on_record, on_status=on_status, on_run_label=on_run_label, on_log=on_log,
             on_finished=make_on_finished(plan, run_contexts),
-            sample=plan.sample, device=plan.device,
+            sample=plan.sample, device=plan.device, run_cost=plan.run_cost,
         )
         if not rc.try_start():
             ui.notify("Another measurement is already running — see the banner above.", type="warning")

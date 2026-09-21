@@ -72,6 +72,7 @@ from mfli.mfli_diff_resistance_vs_bias import (
     connect,
     connect_device,
     connect_temperature_controller,
+    ramp_bias_s,
     ramp_bias_to_zero,
     run_measurement,
     setup_mds,
@@ -92,6 +93,11 @@ from instruments.data_naming import (
     write_record,
 )
 from instruments.live_plot import start_live_plot
+from instruments.mfli_daq import acquire_s
+from instruments.run_time import (
+    GPIB_TXN_S, MDS_SYNC_S, PER_FILE_S, PER_RUN_S, POINT_OVERHEAD_S, TEMP_READ_S,
+    RunCost, progress_step, progress_total,
+)
 from instruments.tui_sample_picker import (
     NEW_SAMPLE_SENTINEL,
     NewSampleScreen,
@@ -189,21 +195,24 @@ def format_si(value: float, unit: str) -> str:
     return f"{value:.3e} {unit}"
 
 
-def format_duration(seconds: float) -> str:
-    seconds = max(0.0, seconds)
-    m, s = divmod(int(round(seconds)), 60)
-    h, m = divmod(m, 60)
-    if h:
-        return f"{h}h {m}m {s}s"
-    if m:
-        return f"{m}m {s}s"
-    return f"{s}s"
-
-
-def _acquire_duration_s(n_averages: int, sample_rate_Hz: float) -> float:
-    if sample_rate_Hz <= 0:
-        return 0.0
-    return max(0.1, (n_averages * 1.5) / sample_rate_Hz)
+def run_costs(n_points: int, state: dict) -> RunCost:
+    """Modelled cost of the whole run, one entry per bias point. Also drives
+    the run screen's progress bar, so estimate and live ETA cannot disagree."""
+    rate = state["sample_rate_Hz"]
+    # Two sequential acquisitions per point (current-sense, then voltage-sense),
+    # each the loop's own window (3·TC floor included) + subscribe/sync overhead.
+    acq = acquire_s(state["time_constant_s"], state["n_averages"], rate) if rate > 0 else 0.0
+    has_temp = state.get("enable_temperature") and bool(parse_sensor_uids(state["temperature_sensor_uids"]))
+    rc = RunCost(n_points)
+    rc.each("settle", state["settling_time_s"])
+    rc.each("acquire", 2 * acq)
+    # set_bias (write + sync) + MDS status getInt + CSV rewrite / UI hand-off (+ temperature)
+    rc.each("overhead", 3 * GPIB_TXN_S + POINT_OVERHEAD_S + (TEMP_READ_S if has_temp else 0.0))
+    rc.at("per-run", PER_RUN_S + MDS_SYNC_S, 0)        # connects + setup_mds() sync wait
+    # bidirectional sweep ends at bias_min; then ramp_bias_to_zero + output off, PNG + index row
+    rc.tail("ramps", ramp_bias_s(state["bias_min_V"]) + 2 * GPIB_TXN_S)
+    rc.tail("per-file", PER_FILE_S)
+    return rc
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -228,6 +237,7 @@ class MeasurementPlan:
     temp_cfg: Optional[TemperatureControllerConfig] = None
     series: str = ""
     data_root: Path = _DEFAULT_DATA_DIR
+    run_cost: Optional[RunCost] = None      # modelled seconds per point (progress bar + ETA)
 
     @property
     def total_points(self) -> int:
@@ -391,11 +401,6 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     else:
         errors.append("Time constant must be > 0 s.")
 
-    # Two sequential acquisitions per point (current-sense, then voltage-sense).
-    per_point_s = state["settling_time_s"] + 2 * _acquire_duration_s(
-        state["n_averages"], state["sample_rate_Hz"]
-    )
-
     # ── Bias sweep ───────────────────────────────────────────────────────────
     if state["n_points"] < 2:
         errors.append("Points per sweep direction must be ≥ 2.")
@@ -404,7 +409,7 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         f"Bias sweep: {state['bias_min_V']:g} V → {state['bias_max_V']:g} V → "
         f"{state['bias_min_V']:g} V, {total_points} points (bidirectional — reveals hysteresis)"
     )
-    info.append(f"Estimated total run time ≈ {format_duration(total_points * per_point_s)}")
+    info.extend(run_costs(total_points, state).lines("Estimated total run time"))
 
     # ── Temperature (MercuryiTC, optional) ──────────────────────────────────
     if state["enable_temperature"]:
@@ -611,7 +616,8 @@ class RunScreen(Screen):
         yield Static("Starting …", id="status_line")
         with Horizontal(id="progress_row"):
             yield Static(f"Run #{self.plan.run_ctx.run_str}", id="run_label")
-            yield ProgressBar(id="progress", total=self.plan.total_points, show_eta=False)
+            yield ProgressBar(id="progress", total=progress_total(self.plan.run_cost, self.plan.total_points),
+                              show_eta=True)
         yield DataTable(id="results_table", zebra_stripes=True, cursor_type="row")
         yield RichLog(id="log", max_lines=5000, markup=False, wrap=True)
         with Horizontal(id="runactionbar"):
@@ -673,7 +679,8 @@ class RunScreen(Screen):
             f"{T2:.3f}" if T2 is not None else "—",
         )
         table.move_cursor(row=table.row_count - 1, scroll=True)
-        self.query_one("#progress", ProgressBar).advance(1)
+        self.query_one("#progress", ProgressBar).advance(
+            progress_step(self.plan.run_cost, record["point_index"]))
         self._set_status(f"Point {record['point_index'] + 1} / {self.plan.total_points} complete.")
 
     def _on_finished(self, final_status: str) -> None:
@@ -1257,7 +1264,7 @@ class MFLIDiffResistanceApp(App):
             acq_cfg=acq_cfg, biases_V=biases_V,
             run_ctx=run_ctx, data_root=self.data_root, temperature_setpoint_K=state["temperature_setpoint_K"],
             cooldown=state["cooldown"], header_extra=header_extra,
-            temp_cfg=temp_cfg,
+            temp_cfg=temp_cfg, run_cost=run_costs(len(biases_V), state),
         )
 
 

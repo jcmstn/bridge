@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 import dc.dc_iv_curve_tui as tui
 from instruments.data_naming import allocate_run, ensure_sample
 from web.dc.iv_curve import MEASUREMENT_TYPE, build_plan as web_build_plan
@@ -47,3 +49,31 @@ def test_web_build_plan_and_series(tmp_path: Path) -> None:
         for gv in plan.series_values
     ]
     assert [c.run_number for c in contexts] == [1, 2]
+
+
+def test_iv_estimate_counts_more_than_settle_plus_reads(tmp_path: Path) -> None:
+    ensure_sample(tmp_path, "A", create=True)
+    state = _tui_state(data_dir=str(tmp_path))
+    n = 81                                                       # ±1 mA, 50 µA step, bidirectional
+    info, _, errors = tui.build_summary(state)
+    assert not errors
+    line = next(i for i in info if i.startswith("Estimated total run time"))
+    rc = tui.run_costs(n, state)
+    assert len(rc.points) == n
+    old_estimate = n * (0.2 + 5 * 5 / 50.0)                      # what the sidebar used to say: 57 s
+    assert rc.total_s > old_estimate + 3.0 + 1.5                 # + per-run, per-file, GPIB/CSV per point
+    assert rc.total_s == pytest.approx(n * (0.2 + 5 * (5 / 50.0 + 0.02) + 0.02 + 0.10) + 1.5 + 3.0 + 0.2)
+    assert line.startswith("Estimated total run time ≈ ")
+
+
+def test_iv_estimate_multiplies_gate_series_and_plan_carries_cost(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(tui, "_DEFAULT_DATA_DIR", tmp_path)
+    ensure_sample(tmp_path, "A", create=True)
+    state = _tui_state(enable_gate=True, gate_voltage_list=[0.0, 1.0, 2.0])
+    rc = tui.run_costs(81, state)
+    assert len(rc.points) == 3 * 81
+    assert rc.parts["per-file"] == pytest.approx(3 * 1.5)
+    app = tui.DCIVCurveApp()
+    app.data_root = tmp_path
+    plan = app._build_plan(state)
+    assert plan.run_cost is not None and len(plan.run_cost.points) == plan.total_points

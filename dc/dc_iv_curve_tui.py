@@ -94,7 +94,12 @@ from instruments.data_naming import (
     proc_path,
     write_record,
 )
+from instruments.keithley2182 import read_time_s
 from instruments.live_plot import start_live_plot
+from instruments.run_time import (
+    GATE_RAMP_S, GPIB_TXN_S, POINT_OVERHEAD_S, PER_FILE_S, PER_RUN_S, TEMP_READ_S,
+    RunCost, progress_step, progress_total,
+)
 from instruments.tui_sample_picker import (
     NEW_SAMPLE_SENTINEL,
     NewSampleScreen,
@@ -199,20 +204,24 @@ def format_si(value: float, unit: str) -> str:
     return f"{value:.3e} {unit}"
 
 
-def format_duration(seconds: float) -> str:
-    seconds = max(0.0, seconds)
-    m, s = divmod(int(round(seconds)), 60)
-    h, m = divmod(m, 60)
-    if h:
-        return f"{h}h {m}m {s}s"
-    if m:
-        return f"{m}m {s}s"
-    return f"{s}s"
-
-
-def _reading_duration_s(nplc: float) -> float:
-    """Rough per-reading time for the 2182 — NPLC/line_frequency, worst case 50 Hz."""
-    return max(1e-3, nplc / 50.0)
+def run_costs(n_sweep_points: int, state: dict) -> RunCost:
+    """Modelled cost of the whole run, one entry per point in loop order
+    (series-major: one full sweep per gate voltage). Also drives the run
+    screen's progress bar, so estimate and live ETA cannot disagree."""
+    n_series = len(state.get("gate_voltage_list") or []) if state.get("enable_gate") else 1
+    n_series = max(1, n_series)
+    rc = RunCost(n_sweep_points * n_series)
+    has_temp = state.get("enable_temperature") and bool(parse_sensor_uids(state["temperature_sensor_uids"]))
+    rc.each("settle", state["settling_time_s"])
+    rc.each("2182 reads", state["n_averages"] * read_time_s(state["nplc"]))
+    rc.each("overhead", GPIB_TXN_S + POINT_OVERHEAD_S + (TEMP_READ_S if has_temp else 0.0))
+    for k in range(n_series):
+        rc.at("per-file", PER_FILE_S, k * n_sweep_points)
+    rc.at("per-run", PER_RUN_S, 0)
+    # teardown: ramp_current_to_zero (1e-4 A per 0.02 s) + gate ramp-down when a gate is used
+    i_end = state["current_min_A"] if state["bidirectional_sweep"] else state["current_max_A"]
+    rc.tail("ramps", max(1, int(abs(i_end) / 1e-4)) * 0.02 + (GATE_RAMP_S if state.get("enable_gate") else 0.0))
+    return rc
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -235,6 +244,7 @@ class MeasurementPlan:
     gate_voltages: Optional[List[float]] = None
     temp_cfg: Optional[TemperatureControllerConfig] = None
     data_root: Path = _DEFAULT_DATA_DIR
+    run_cost: Optional[RunCost] = None      # modelled seconds per point (progress bar + ETA)
 
     @property
     def series_values(self) -> List[Optional[float]]:
@@ -350,10 +360,8 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     info.append(f"Current range: {format_si(state['current_min_A'], 'A')} → "
                 f"{format_si(state['current_max_A'], 'A')}")
 
-    read_s = _reading_duration_s(state["nplc"])
+    read_s = read_time_s(state["nplc"])
     info.append(f"Estimated 2182 reading time ≈ {read_s * 1000:.0f} ms (NPLC={state['nplc']:g})")
-
-    per_point_s = state["settling_time_s"] + state["n_averages"] * read_s
 
     if state["step_A"] <= 0:
         errors.append("Sweep step size must be > 0 A.")
@@ -388,10 +396,9 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
                             f"one file each, plotted together")
             else:
                 info.append(f"Gate held fixed at {format_si(gate_list[0], 'V')}" if gate_list else "")
-            total_points = n_sweep_points * max(1, n_series)
-            info.append(f"Estimated total run time ≈ {format_duration(total_points * per_point_s)}")
+            info.extend(run_costs(n_sweep_points, state).lines("Estimated total run time"))
     else:
-        info.append(f"Estimated total run time ≈ {format_duration(n_sweep_points * per_point_s)}")
+        info.extend(run_costs(n_sweep_points, state).lines("Estimated total run time"))
 
     # ── Temperature (MercuryiTC, optional) ──────────────────────────────────
     if state["enable_temperature"]:
@@ -595,7 +602,8 @@ class RunScreen(Screen):
         yield Static("Starting …", id="status_line")
         with Horizontal(id="progress_row"):
             yield Static("", id="run_label")
-            yield ProgressBar(id="progress", total=self.plan.total_points, show_eta=False)
+            yield ProgressBar(id="progress", total=progress_total(self.plan.run_cost, self.plan.total_points),
+                              show_eta=True)
         yield DataTable(id="results_table", zebra_stripes=True, cursor_type="row")
         yield RichLog(id="log", max_lines=5000, markup=False, wrap=True)
         with Horizontal(id="runactionbar"):
@@ -654,7 +662,8 @@ class RunScreen(Screen):
             f"{T2:.3f}" if T2 is not None else "—",
         )
         table.move_cursor(row=table.row_count - 1, scroll=True)
-        self.query_one("#progress", ProgressBar).advance(1)
+        self.query_one("#progress", ProgressBar).advance(
+            progress_step(self.plan.run_cost, len(self._records) - 1))
         self._set_status(f"Point {len(self._records)} / {self.plan.total_points} complete.")
 
     def _save_run_png(self, ctx: RunContext, iter_records: list[dict]) -> None:
@@ -1296,7 +1305,7 @@ class DCIVCurveApp(App):
             temperature_setpoint_K=state["temperature_setpoint_K"],
             cooldown=state["cooldown"], header_extra=header_extra, series=series,
             gate_cfg=gate_cfg, gate_voltages=gate_voltages,
-            temp_cfg=temp_cfg,
+            temp_cfg=temp_cfg, run_cost=run_costs(len(currents_A), state),
         )
 
 

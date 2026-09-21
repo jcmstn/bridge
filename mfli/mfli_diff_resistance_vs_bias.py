@@ -100,6 +100,7 @@ from typing import Optional, Callable, List
 import zhinst.core as zi
 import zhinst.utils as ziutils
 
+from instruments.run_time import GPIB_TXN_S
 from instruments.mfli_daq import (
     connect,
     connect_device,
@@ -272,8 +273,18 @@ def set_bias(daq: zi.ziDAQServer, cfg: OutputConfig, bias_V: float) -> None:
     daq.sync()
 
 
+RAMP_STEP_V  = 0.02    # ramp_bias_to_zero() step [V]
+RAMP_DELAY_S = 0.02    # ... and sleep after each step [s]
+
+
+def ramp_bias_s(current_V: float, step_V: float = RAMP_STEP_V, delay_s: float = RAMP_DELAY_S) -> float:
+    """Modelled wall time of ramp_bias_to_zero() from `current_V`: one getDouble,
+    then max(1, |V|/step) steps of (setDouble + sync + sleep)."""
+    return GPIB_TXN_S + max(1, int(abs(current_V) / step_V)) * (2 * GPIB_TXN_S + delay_s)
+
+
 def ramp_bias_to_zero(daq: zi.ziDAQServer, cfg: OutputConfig,
-                       step_V: float = 0.02, delay_s: float = 0.02) -> None:
+                       step_V: float = RAMP_STEP_V, delay_s: float = RAMP_DELAY_S) -> None:
     """Step the DC bias back to 0 V gradually rather than jumping — gentler on the DUT."""
     current = daq.getDouble(f"/{cfg.device}/sigouts/{cfg.out_ch}/offset")
     log.info("Ramping bias from %.4f V to 0 V ...", current)

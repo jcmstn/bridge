@@ -79,7 +79,7 @@ from dc.dc_hall_measurement import (
     shutdown_source,
     shutdown_temperature_controller,
 )
-from dc.dc_sweep_utils import build_segmented_sweep, parse_sweep_rows, parse_value_list, safe_shutdown
+from dc.dc_sweep_utils import build_segmented_sweep, field_hops, parse_sweep_rows, parse_value_list, safe_shutdown
 from instruments.data_dir import DataDirPickerScreen, validate_directory
 from instruments.field_geometry import field_direction_summary_line, render_ascii_field_diagram
 from instruments.data_naming import (
@@ -93,7 +93,15 @@ from instruments.data_naming import (
     proc_path,
     write_record,
 )
+from instruments.keithley2182 import read_time_s
+from instruments.keithley6221 import reversal_avg_s
+from instruments.kepco_magnet import magnet_move_s
+from instruments.lakeshore475 import read_field_s
 from instruments.live_plot import start_live_plot
+from instruments.run_time import (
+    GPIB_TXN_S, PER_FILE_S, PER_RUN_S, POINT_OVERHEAD_S, TEMP_READ_S,
+    RunCost, progress_step, progress_total,
+)
 from instruments.tui_sample_picker import (
     NEW_SAMPLE_SENTINEL,
     NewSampleScreen,
@@ -232,20 +240,37 @@ def format_si(value: float, unit: str) -> str:
     return f"{value:.3e} {unit}"
 
 
-def format_duration(seconds: float) -> str:
-    seconds = max(0.0, seconds)
-    m, s = divmod(int(round(seconds)), 60)
-    h, m = divmod(m, 60)
-    if h:
-        return f"{h}h {m}m {s}s"
-    if m:
-        return f"{m}m {s}s"
-    return f"{s}s"
+def run_costs(currents_A, state: dict) -> RunCost:
+    """Modelled cost of the whole run, one entry per point in loop order
+    (series-major: one full field sweep, or single point when `currents_A`
+    is None, per sense current). Also drives the run screen's progress bar,
+    so estimate and live ETA cannot disagree."""
+    n_series = max(1, len(state.get("sense_current_list") or []))
+    n_pts = len(currents_A) if currents_A is not None else 1
+    n_channels = max(1, len(resolve_channel_map(state["measure_rxx"], state["measure_rxy"])))
+    has_temp = state["enable_temperature"] and bool(parse_sensor_uids(state["temperature_sensor_uids"]))
 
-
-def _reading_duration_s(nplc: float) -> float:
-    """Rough per-reading time for the 2182 — NPLC/line_frequency, worst case 50 Hz."""
-    return max(1e-3, nplc / 50.0)
+    rc = RunCost(n_pts * n_series)
+    rc.each("settle", state["settling_time_s"])
+    rc.each("2182 reads", reversal_avg_s(state["n_reversals"], state["source_delay_s"],
+                                         read_time_s(state["nplc"]), n_channels,
+                                         state["channel_settle_s"]))
+    rc.each("overhead", POINT_OVERHEAD_S + (TEMP_READ_S if has_temp else 0.0))
+    if currents_A is not None:      # field sweep: magnet + gaussmeter per point, ramp-down at the end
+        mcfg = MagnetConfig(ramp_step_A=state["ramp_step_A"], ramp_delay_s=state["ramp_delay_s"])
+        gcfg = GaussmeterConfig(n_averages=state["gaussmeter_n_averages"],
+                                read_delay_s=state["gaussmeter_read_delay_s"])
+        rc.each("field read", read_field_s(gcfg))
+        for i, hop in enumerate(field_hops(currents_A, n_series)):
+            typ, worst = magnet_move_s(hop, mcfg)
+            rc.at("magnet", typ, i, worst_extra=worst - typ)
+        if n_pts:
+            rc.tail("ramps", magnet_move_s(currents_A[-1], mcfg, with_field=False)[0])
+    for k in range(n_series):
+        rc.at("per-file", PER_FILE_S, k * n_pts)
+    rc.at("per-run", PER_RUN_S, 0)
+    rc.tail("ramps", 2 * GPIB_TXN_S)    # 6221 off
+    return rc
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -273,6 +298,7 @@ class MeasurementPlan:
     header_extra: dict
     series: str = ""
     data_root: Path = _DEFAULT_DATA_DIR
+    run_cost: Optional[RunCost] = None      # modelled seconds per point (progress bar + ETA)
 
     @property
     def series_values(self) -> List[float]:
@@ -440,15 +466,12 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         errors.append("Compliance voltage must be > 0 V.")
 
     # ── Voltmeter timing ─────────────────────────────────────────────────────
-    read_s = _reading_duration_s(state["nplc"])
+    read_s = read_time_s(state["nplc"])
     info.append(f"Estimated 2182 reading time ≈ {read_s * 1000:.0f} ms (NPLC={state['nplc']:g})")
-
-    n_channels = max(1, len(channel_map))
-    per_read_s = read_s + (state["channel_settle_s"] if n_channels > 1 else 0.0)
-    per_point_s = state["settling_time_s"] + state["n_reversals"] * 2 * n_channels * per_read_s
 
     # ── Sweep ────────────────────────────────────────────────────────────────
     total_points = 0
+    resolved = None
     if state["enable_sweep"]:
         if state.get("sweep_rows_parse_error"):
             errors.append(f"Sweep rows: {state['sweep_rows_parse_error']}")
@@ -480,12 +503,11 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         elif tol_mT < 0.01:
             warnings.append(f"Field-settle tolerance {tol_mT:g} mT is below the 475's typical "
                              "reading noise — points may stall until the settle timeout.")
-        info.append(f"Estimated total run time ≈ "
-                     f"{format_duration(total_points * max(1, n_series) * per_point_s)}")
+        info.extend(run_costs(resolved if resolved is not None else [], state)
+                    .lines("Estimated total run time"))
     else:
         info.append("Single point — no field sweep, magnet untouched.")
-        info.append(f"Estimated total run time ≈ "
-                     f"{format_duration(max(1, n_series) * per_point_s)}")
+        info.extend(run_costs(None, state).lines("Estimated total run time"))
 
     # ── Temperature (MercuryiTC, optional) ──────────────────────────────────
     if state["enable_temperature"]:
@@ -727,7 +749,8 @@ class RunScreen(Screen):
         yield Static("Starting …", id="status_line")
         with Horizontal(id="progress_row"):
             yield Static("", id="run_label")
-            yield ProgressBar(id="progress", total=self.plan.total_points, show_eta=False)
+            yield ProgressBar(id="progress", total=progress_total(self.plan.run_cost, self.plan.total_points),
+                              show_eta=True)
         yield DataTable(id="results_table", zebra_stripes=True, cursor_type="row")
         yield RichLog(id="log", max_lines=5000, markup=False, wrap=True)
         with Horizontal(id="runactionbar"):
@@ -794,7 +817,8 @@ class RunScreen(Screen):
             f"{T2:.3f}" if T2 is not None else "—",
         )
         table.move_cursor(row=table.row_count - 1, scroll=True)
-        self.query_one("#progress", ProgressBar).advance(1)
+        self.query_one("#progress", ProgressBar).advance(
+            progress_step(self.plan.run_cost, len(self._records) - 1))
         self._set_status(f"Point {len(self._records)} / {self.plan.total_points} complete.")
 
     def _save_run_png(self, ctx: RunContext, iter_records: list[dict]) -> None:
@@ -1567,6 +1591,7 @@ class DCHallMeasurementApp(App):
             field_theta_deg=state["field_theta_deg"],
             field_phi_deg=state["field_phi_deg"],
             cooldown=state["cooldown"], header_extra=header_extra, series=series,
+            run_cost=run_costs(currents_A, state),
         )
 
 

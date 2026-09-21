@@ -29,6 +29,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
+from instruments.run_time import RunCost
+
 
 @dataclass
 class RunHandle:
@@ -40,6 +42,7 @@ class RunHandle:
     records: list = field(default_factory=list)
     log_lines: list = field(default_factory=list)
     status_text: str = "Starting …"
+    run_cost: Optional[RunCost] = None   # modelled seconds per point -> banner progress + ETA
 
     @property
     def elapsed_s(self) -> float:

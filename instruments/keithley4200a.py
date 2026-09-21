@@ -91,6 +91,8 @@ from typing import Optional
 import numpy as np
 from pymeasure.instruments import Instrument
 
+from instruments.run_time import PMU_PULSE_S
+
 log = logging.getLogger(__name__)
 log.addHandler(logging.NullHandler())
 
@@ -603,3 +605,9 @@ def pulse_once(
         except Exception:
             out[name] = None
     return out
+
+
+def pulse_once_s(n_pulses: int, period_s: float) -> float:
+    """Modelled wall time of one ``pulse_once()``: run_time.PMU_PULSE_S (module
+    setup + EX + the GP read-backs + route-back) plus the pulse burst itself."""
+    return PMU_PULSE_S + n_pulses * period_s

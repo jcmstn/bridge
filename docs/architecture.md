@@ -388,6 +388,7 @@ units sub-header row as data. Use `read_raw()`.
 | A form field's default / range / label | `{suite}/{name}_tui.py` only (`DEFAULTS` + `*_FIELDS` + `MeasurementPlan`) — both front ends inherit it |
 | The measurement loop / what's recorded | `{suite}/{name}.py` `run_measurement()`; check `build_header_fields` / plot code for new columns |
 | How a run is named or saved | `instruments/data_naming.py` + `data_convention.md` (locked tables) |
+| A program's "Estimated run time" / live ETA | `{suite}/{name}_tui.py` `run_costs()` (one `RunCost`: seconds per point, shown by `build_summary` **and** fed to the progress bar via `progress_total`/`progress_step`; web banner via `RunController(run_cost=…)`). Per-instrument helpers sit beside their instrument (`magnet_move_s`, `read_field_s`, `read_time_s`, `reversal_avg_s`, `poll_window_s`); the best-guess hardware latencies (`GPIB_TXN_S`, `READ_2182_FACTOR`, `LOCK_TYP_S`, `PMU_PULSE_S`, …) are the knobs at the top of `instruments/run_time.py` — unmeasured, tune there. A new sleep in a loop means a new term in its `run_costs()` |
 | Current-reversal averaging | `instruments/keithley6221.py` `acquire_reversal_averaged_voltage` + `current-reversal.md` |
 | An instrument's SCPI / connect / shutdown behaviour | `instruments/{instr}.py` only |
 | Live-plot / run-lock / run-history behaviour (web) | `web/run_controller.py` / `web/run_manager.py` / `web/run_index.py` |
@@ -412,6 +413,7 @@ No hardware and no VISA layer is touched. The suite covers the pure logic:
 - `test_web_*.py` — each page's form-state → config-dataclass mapping
   matches its TUI.
 - `test_kepco_settle.py` — the magnet current/field settle wait.
+- `test_run_time.py`, `test_run_costs_*.py` — the run-time model: helper arithmetic, per-program `run_costs()` defaults / multiplicity, plan `run_cost` length == `total_points`.
 - `test_dc_gate_sweep.py`, `dc_sweep_utils` coverage — `linear_sweep`
   bidirectional shape, `parse_value_list`.
 

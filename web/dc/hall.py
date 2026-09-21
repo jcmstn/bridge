@@ -40,7 +40,7 @@ from dc.dc_sweep_utils import build_segmented_sweep, parse_sweep_rows, parse_val
 from dc.dc_hall_measurement_tui import (
     DEFAULTS, NUMERIC_FIELDS, TEXT_FIELDS, OPTIONAL_NUMERIC_FIELDS, DC_HALL_DESCRIPTION,
     MEASUREMENT_TYPE, MeasurementPlan, build_header_fields, build_summary,
-    compute_filename_preview, format_si, parse_sensor_uids, resolve_channel_map,
+    compute_filename_preview, format_si, parse_sensor_uids, resolve_channel_map, run_costs,
     QUANTITY_PLOT_LABELS, QUANTITY_LINESTYLES, active_quantities,
 )
 from instruments.data_naming import (
@@ -165,6 +165,7 @@ def build_plan(state: dict) -> MeasurementPlan:
         temperature_setpoint_K=state["temperature_setpoint_K"],
         field_theta_deg=state["field_theta_deg"], field_phi_deg=state["field_phi_deg"],
         cooldown=state["cooldown"], header_extra=header_extra, series=series,
+        run_cost=run_costs(currents_A, state),
     )
 
 
@@ -764,7 +765,7 @@ def page() -> None:
             parameters=state, data_dir=state["data_dir"], planned_output_paths=[],
             on_record=on_record, on_status=on_status, on_run_label=on_run_label, on_log=on_log,
             on_finished=make_on_finished(plan, run_contexts, state["data_dir"]),
-            sample=plan.sample, device=plan.device,
+            sample=plan.sample, device=plan.device, run_cost=plan.run_cost,
         )
         if not rc.try_start():
             ui.notify("Another measurement is already running — see the banner above.", type="warning")

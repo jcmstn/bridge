@@ -36,7 +36,7 @@ from dc.dc_sweep_utils import linear_sweep, parse_value_list, safe_shutdown
 from dc.dc_gate_sweep_tui import (
     DEFAULTS, NUMERIC_FIELDS, TEXT_FIELDS, MEASUREMENT_TYPE,
     DC_GATE_SWEEP_DESCRIPTION, MeasurementPlan, build_header_fields, build_summary,
-    compute_filename_preview, format_si, parse_sensor_uids,
+    compute_filename_preview, format_si, parse_sensor_uids, run_costs,
 )
 from instruments.data_naming import (
     TEST_SAMPLE, RunContext, allocate_run, finalize_index_row,
@@ -138,6 +138,7 @@ def build_plan(state: dict) -> MeasurementPlan:
         magnet_cfg=magnet_cfg, gauss_cfg=gauss_cfg,
         field_currents_A=field_currents_A, field_settle_s=state["field_settle_s"],
         field_settle_tolerance_mT=state["field_settle_tolerance_mT"], temp_cfg=temp_cfg,
+        run_cost=run_costs(len(gate_voltages_V), state),
     )
 
 
@@ -653,7 +654,7 @@ def page() -> None:
             parameters=state, data_dir=state["data_dir"], planned_output_paths=[],
             on_record=on_record, on_status=on_status, on_run_label=on_run_label, on_log=on_log,
             on_finished=make_on_finished(plan, run_contexts, state["data_dir"]),
-            sample=plan.sample, device=plan.device,
+            sample=plan.sample, device=plan.device, run_cost=plan.run_cost,
         )
         if not rc.try_start():
             ui.notify("Another measurement is already running — see the banner above.", type="warning")

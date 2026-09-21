@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -50,8 +51,8 @@ from textual.widgets import (
 )
 
 from dc.dc_sweep_utils import parse_value_list
-from mfli.mfli_dual_harmonic_6221 import _AC_CURRENT_CEILING_A, _AC_COMPLIANCE_CEILING_V
-from mfli.mfli_dual_harmonic_tui import _LogRelay, card, field, format_duration, format_si, switch_field
+from mfli.mfli_dual_harmonic_6221 import _AC_CURRENT_CEILING_A, _AC_COMPLIANCE_CEILING_V, extref_lock_s
+from mfli.mfli_dual_harmonic_tui import _LogRelay, card, field, format_si, switch_field
 from mfli.mfli_noise_spectrum import (
     ACSourceConfig,
     AcquisitionConfig,
@@ -72,6 +73,11 @@ from mfli.mfli_noise_spectrum import (
 )
 from instruments.data_dir import DataDirPickerScreen, validate_directory
 from instruments.data_naming import TEST_SAMPLE, ensure_sample
+from instruments.keithley6221 import ac_source_restart_s
+from instruments.run_time import (
+    ACQ_OVERHEAD_S, GPIB_TXN_S, MDS_SYNC_S, PER_FILE_S, PER_RUN_S, POINT_OVERHEAD_S,
+    RunCost, progress_step, progress_total,
+)
 from instruments.tui_sample_picker import (
     NEW_SAMPLE_SENTINEL,
     NewSampleScreen,
@@ -178,6 +184,7 @@ class NoiseFloorPlan:
     cooldown: str
     series: str
     data_root: Path = _DEFAULT_DATA_DIR
+    run_cost: Optional[RunCost] = None      # modelled seconds per step (progress bar + ETA)
 
     @property
     def steps_per_amplitude(self) -> int:
@@ -186,6 +193,33 @@ class NoiseFloorPlan:
     @property
     def total_steps(self) -> int:
         return self.steps_per_amplitude * len(self.amplitudes_A)
+
+
+_N_CHANNELS = 2   # leader 1f + follower 2f, as built in _build_plan()
+
+
+def run_costs(state: dict) -> RunCost:
+    """Modelled cost of the whole run; one entry per spectrum ("step"), in loop
+    order: per amplitude, Excitation ON leader / follower, then (if enabled) OFF
+    leader / follower. Also drives the run screen's progress bar."""
+    n_amps = max(1, len(state.get("amplitude_list", [])))
+    steps = _N_CHANNELS * (2 if state["also_measure_off"] else 1)
+    rc = RunCost(steps * n_amps)
+    duration = state["duration_s"]
+    # acquire_time_series(): the recording is polled in poll_chunk_s chunks, each followed by an
+    # overload read + MDS check; subscribe / sync / unsubscribe once; then two Welch estimates.
+    n_chunks = math.ceil(duration / AcquisitionConfig().poll_chunk_s)
+    rc.each("recording", duration)
+    rc.each("overhead", 2 * n_chunks * GPIB_TXN_S + ACQ_OVERHEAD_S + POINT_OVERHEAD_S)
+    rc.at("connect + MDS", PER_RUN_S + MDS_SYNC_S, 0)
+    lock_typ, lock_worst = extref_lock_s(state["extref_lock_timeout_s"])
+    for a in range(n_amps):
+        # each amplitude arms the 6221 and locks both ExtRef PLLs before its first recording ...
+        rc.at("6221 + ExtRef", ac_source_restart_s() + lock_typ, a * steps, worst_extra=lock_worst - lock_typ)
+        if a:   # ... and the previous amplitude's save_results() (one file per spectrum + PNG) ran just before
+            rc.at("save", steps * PER_FILE_S, a * steps)
+    rc.tail("save", steps * PER_FILE_S)
+    return rc
 
 
 def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
@@ -257,9 +291,9 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
 
     n_passes = 2 if state["also_measure_off"] else 1
     n_amps = max(1, len(state.get("amplitude_list", [])))
-    est_s = state["duration_s"] * n_passes * 2 * n_amps  # 2 channels, sequential
     amp_note = f" × {n_amps} excitation current(s)" if n_amps > 1 else ""
-    info.append(f"{n_passes} pass(es) × 2 channels{amp_note} ≈ {format_duration(est_s)} total")
+    info.append(f"{n_passes} pass(es) × {_N_CHANNELS} channels{amp_note}")
+    info.extend(run_costs(state).lines("Estimated total run time"))
     if state["duration_s"] < 10:
         warnings.append(f"Duration {state['duration_s']:g} s is short — the lowest "
                          f"resolvable frequency is ~1/duration ≈ {1/state['duration_s']:.2g} Hz.")
@@ -311,12 +345,14 @@ class RunScreen(Screen):
         # status/comment prompt covers every file regardless of how many
         # amplitude values were run.
         self._context_pairs: list = []
+        self._n_done = 0          # spectra finished so far -> index into plan.run_cost
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield Static("Starting …", id="status_line")
         with Horizontal(id="progress_row"):
-            yield ProgressBar(id="progress", total=self.plan.total_steps, show_eta=False)
+            yield ProgressBar(id="progress", total=progress_total(self.plan.run_cost, self.plan.total_steps),
+                              show_eta=True)
         yield RichLog(id="log", max_lines=5000, markup=False, wrap=True)
         with Horizontal(id="runactionbar"):
             yield Button("Back", id="back_btn", disabled=True)
@@ -338,7 +374,8 @@ class RunScreen(Screen):
         self.query_one("#status_line", Static).update(text)
 
     def _on_result(self, cond: str, label: str, spec: dict) -> None:
-        self.query_one("#progress", ProgressBar).advance(1)
+        self.query_one("#progress", ProgressBar).advance(progress_step(self.plan.run_cost, self._n_done))
+        self._n_done += 1
         thermal_note = ""
         if self.plan.ref_cfg.thermal_R_ohm:
             thermal = thermal_noise_asd(self.plan.ref_cfg.thermal_R_ohm, self.plan.ref_cfg.thermal_T_K)
@@ -887,7 +924,7 @@ class MFLINoiseSpectrumApp(App):
             demod_cfgs=demod_cfgs, acq_cfg=acq_cfg, ref_cfg=ref_cfg,
             also_measure_off=state["also_measure_off"],
             sample=state["sample"], device=state["device"], cooldown=state["cooldown"],
-            series=series, data_root=self.data_root,
+            series=series, data_root=self.data_root, run_cost=run_costs(state),
         )
 
 

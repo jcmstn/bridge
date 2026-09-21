@@ -45,6 +45,7 @@ from textual.widgets import (
 from sot.sot_nonlocal_switching import (
     _READ_COMPLIANCE_CEILING_V,
     _READ_CURRENT_CEILING_A,
+    _NO_PULSE_A,
     _WRITE_CURRENT_HARD_MAX_A,
     _check_pulse_currents,
     _check_read_safety,
@@ -83,7 +84,15 @@ from instruments.data_naming import (
     proc_path,
     write_record,
 )
+from instruments.keithley2182 import read_time_s
+from instruments.keithley6221 import reversal_avg_s, wave_pulse_s
+from instruments.kepco_magnet import magnet_move_s
+from instruments.lakeshore475 import read_field_s
 from instruments.live_plot import start_live_plot
+from instruments.run_time import (
+    GPIB_TXN_S, PER_FILE_S, PER_RUN_S, POINT_OVERHEAD_S, TEMP_READ_S,
+    RunCost, progress_step, progress_total,
+)
 from instruments.tui_sample_picker import (
     NEW_SAMPLE_SENTINEL,
     NewSampleScreen,
@@ -246,15 +255,48 @@ def format_si(value: float, unit: str) -> str:
     return f"{value:.3e} {unit}"
 
 
-def format_duration(seconds: float) -> str:
-    seconds = max(0.0, seconds)
-    m, s = divmod(int(round(seconds)), 60)
-    h, m = divmod(m, 60)
-    if h:
-        return f"{h}h {m}m {s}s"
-    if m:
-        return f"{m}m {s}s"
-    return f"{s}s"
+def run_costs(state: dict) -> RunCost:
+    """Modelled cost of the whole run, one entry per point in loop order: per
+    file (one per initial-state current) a baseline read, then one point per
+    pulse current. Also drives the run screen's progress bar, so estimate and
+    live ETA cannot disagree."""
+    pulses = state.get("pulse_current_list", [])
+    inits = list(state.get("init_currents_A", [None]))       # == MeasurementPlan.series_values
+    per_file = len(pulses) + 1
+    rc = RunCost(per_file * max(1, len(inits)))
+    magnet = MagnetConfig(ramp_step_A=state["ramp_step_A"], ramp_delay_s=state["ramp_delay_s"])
+    gauss = GaussmeterConfig(n_averages=state["gaussmeter_n_averages"],
+                             read_delay_s=state["gaussmeter_read_delay_s"])
+    has_temp = state["enable_temperature"] and bool(parse_sensor_uids(state["temperature_sensor_uids"]))
+    one_read_s = read_time_s(state["nplc"])
+    if state["reversal_enabled"]:
+        read_s = reversal_avg_s(state["n_averages"], state["source_delay_s"], one_read_s)
+    else:                                                    # one source write, one delay, plain average
+        read_s = GPIB_TXN_S + state["source_delay_s"] + state["n_averages"] * one_read_s
+    # run_measurement(), per point: output off (3 writes) -> [WAVE pulse -> wait, only if fired]
+    # -> DC read on (4 writes) -> read -> output off (3) -> temperature -> CSV rewrite.
+    # The baseline (index 0) and any 0 A point fire nothing.
+    for f in range(max(1, len(inits))):
+        for j, I in enumerate([0.0, *pulses]):
+            idx = f * per_file + j
+            if abs(I) > _NO_PULSE_A:
+                rc.at("pulses", wave_pulse_s(state["pulse_width_s"]), idx)
+                rc.at("post-pulse wait", state["delay_after_pulse_s"], idx)
+            rc.at("reads", read_s, idx)
+            rc.at("overhead", 10 * GPIB_TXN_S + POINT_OVERHEAD_S + (TEMP_READ_S if has_temp else 0.0), idx)
+    cur = 0.0                                                # magnet starts at 0 A
+    for f, init_A in enumerate(inits):
+        if init_A is not None:                               # initialize_with_field(): init, read, hold
+            (t1, w1), (t2, w2) = (magnet_move_s(abs(init_A - cur), magnet),
+                                  magnet_move_s(abs(state["sweep_magnet_current_A"] - init_A), magnet))
+            rc.at("magnet", t1 + t2, f * per_file, worst_extra=(w1 - t1) + (w2 - t2))
+            rc.at("field read", 2 * read_field_s(gauss), f * per_file)   # once between, once in run_measurement
+            cur = state["sweep_magnet_current_A"]
+        rc.at("per-file", PER_FILE_S, f * per_file)
+    rc.at("per-run", PER_RUN_S, 0)
+    if any(i is not None for i in inits):                    # shutdown_magnet() ramps back to 0 A
+        rc.tail("ramps", magnet_move_s(abs(cur), magnet, with_field=False)[0])
+    return rc
 
 
 # ── plan ────────────────────────────────────────────────────────────────────
@@ -279,6 +321,7 @@ class MeasurementPlan:
     series: str
     temp_cfg: Optional[TemperatureControllerConfig] = None
     data_root: Path = _DEFAULT_DATA_DIR
+    run_cost: Optional[RunCost] = None      # modelled seconds per point (progress bar + ETA)
 
     @property
     def series_values(self) -> List[Optional[float]]:
@@ -485,15 +528,9 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     # size / time
     n = max(1, len(amps))
     n_files = max(1, len(real))
-    one_read_s = state["nplc"] / 50.0 + 0.05
-    read_s = (state["n_averages"] * 2 * (state["source_delay_s"] + one_read_s)
-              if state["reversal_enabled"]
-              else state["source_delay_s"] + state["n_averages"] * one_read_s)
-    per_point_s = 2 * state["pulse_width_s"] + state["delay_after_pulse_s"] + read_s + 0.3
     info.append(f"{n} pulses + a baseline read"
                 + (f", × {n_files} files = {(n + 1) * n_files} total points" if n_files > 1 else ""))
-    info.append(f"Estimated run time ≈ {format_duration(n_files * (read_s + n * per_point_s))} "
-                "(excludes magnet ramps; 50 Hz mains assumed for NPLC)")
+    info.extend(run_costs(state).lines("Estimated run time"))
     info.append("Wiring: 6221 HI → injector; OUTPUT LOW (set floating) → return electrode away from "
                 "the detector; 2182A ch1 → detector magnet / reference electrode past it.")
 
@@ -710,7 +747,7 @@ def build_plan(state: dict, data_root: Path) -> MeasurementPlan:
         sample=state["sample"], device=state["device"],
         temperature_setpoint_K=state["temperature_setpoint_K"],
         cooldown=state["cooldown"], header_extra=header_extra, series="",
-        temp_cfg=temp_cfg,
+        temp_cfg=temp_cfg, run_cost=run_costs(state),
     )
 
 
@@ -878,7 +915,8 @@ class RunScreen(Screen):
         yield Static("Starting …", id="status_line")
         with Horizontal(id="progress_row"):
             yield Static("", id="run_label")
-            yield ProgressBar(id="progress", total=self.plan.total_points, show_eta=False)
+            yield ProgressBar(id="progress", total=progress_total(self.plan.run_cost, self.plan.total_points),
+                              show_eta=True)
         yield DataTable(id="results_table", zebra_stripes=True, cursor_type="row")
         yield RichLog(id="log", max_lines=5000, markup=False, wrap=True)
         with Horizontal(id="runactionbar"):
@@ -947,7 +985,8 @@ class RunScreen(Screen):
             f"{t1:.3f}" if t1 is not None else "—",
         )
         table.move_cursor(row=table.row_count - 1, scroll=True)
-        self.query_one("#progress", ProgressBar).advance(1)
+        self.query_one("#progress", ProgressBar).advance(
+            progress_step(self.plan.run_cost, len(self._records) - 1))
         self._set_status(f"Point {len(self._records)} / {self.plan.total_points}.")
 
     def _save_run_png(self, ctx: RunContext, iter_records: list[dict]) -> None:

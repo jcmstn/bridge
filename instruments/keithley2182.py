@@ -24,6 +24,8 @@ from typing import Optional
 import numpy as np
 from pymeasure.instruments.keithley import Keithley2182
 
+from instruments.run_time import GPIB_TXN_S, READ_2182_FACTOR
+
 log = logging.getLogger(__name__)
 
 
@@ -67,6 +69,12 @@ def connect_voltmeter(cfg: VoltmeterConfig, extra_channels: tuple = ()) -> Keith
     log.info("Keithley 2182 connected: %s  ch=%s  NPLC=%.1f",
              cfg.visa_resource, channels, cfg.nplc)
     return voltmeter
+
+
+def read_time_s(nplc: float) -> float:
+    """Modelled wall time of one ``voltmeter.voltage`` read: NPLC / 50 Hz (Sweden's
+    mains, the longest integration) x run_time.READ_2182_FACTOR, plus one query."""
+    return max(1e-3, nplc / 50.0) * READ_2182_FACTOR + GPIB_TXN_S
 
 
 def acquire_averaged_voltage(

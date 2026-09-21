@@ -34,7 +34,7 @@ from mfli.mfli_diff_resistance_vs_bias import (
 from mfli.mfli_diff_resistance_tui import (
     DEFAULTS, NUMERIC_FIELDS, TEXT_FIELDS,
     MEASUREMENT_TYPE, MeasurementPlan, build_header_fields, build_summary,
-    compute_filename_preview, format_si, parse_sensor_uids,
+    compute_filename_preview, format_si, parse_sensor_uids, run_costs,
 )
 from instruments.data_naming import (
     TEST_SAMPLE, allocate_run, finalize_index_row, make_incremental_writer,
@@ -136,6 +136,7 @@ def build_plan(state: dict) -> MeasurementPlan:
         acq_cfg=acq_cfg, biases_V=biases_V, temp_cfg=temp_cfg,
         run_ctx=run_ctx, temperature_setpoint_K=state["temperature_setpoint_K"],
         cooldown=state["cooldown"], header_extra=header_extra,
+        run_cost=run_costs(len(biases_V), state),
     )
 
 
@@ -539,7 +540,7 @@ def page() -> None:
             on_record=on_record, on_status=on_status, on_log=on_log,
             on_finished=make_on_finished(plan),
             sample=plan.run_ctx.sample, device=plan.run_ctx.device,
-            run_number=plan.run_ctx.run_number,
+            run_number=plan.run_ctx.run_number, run_cost=plan.run_cost,
         )
         if not rc.try_start():
             ui.notify("Another measurement is already running — see the banner above.", type="warning")

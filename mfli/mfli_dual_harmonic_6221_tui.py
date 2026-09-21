@@ -80,6 +80,7 @@ from mfli.mfli_dual_harmonic_6221 import (
     connect_magnet,
     connect_temperature_controller,
     disable_sigout,
+    extref_lock_s,
     null_follower_reference_via_1f,
     run_measurement,
     set_magnet_current,
@@ -93,6 +94,7 @@ from mfli.mfli_dual_harmonic_6221 import (
     _AC_CURRENT_CEILING_A,
     _AC_COMPLIANCE_CEILING_V,
 )
+from mfli.mfli_dual_harmonic import phase_cal_s
 from instruments.data_dir import DataDirPickerScreen, validate_directory
 from instruments.field_geometry import field_direction_summary_line, render_ascii_field_diagram
 from instruments.data_naming import (
@@ -106,7 +108,15 @@ from instruments.data_naming import (
     proc_path,
     write_record,
 )
+from instruments.kepco_magnet import magnet_move_s
+from instruments.keithley6221 import ac_source_restart_s
+from instruments.lakeshore475 import read_field_s
 from instruments.live_plot import start_live_plot
+from instruments.mfli_daq import acquire_s, poll_window_s
+from instruments.run_time import (
+    GPIB_TXN_S, MDS_SYNC_S, PER_FILE_S, PER_RUN_S, POINT_OVERHEAD_S, TEMP_READ_S,
+    RunCost, progress_step, progress_total,
+)
 from instruments.tui_sample_picker import (
     NEW_SAMPLE_SENTINEL,
     NewSampleScreen,
@@ -283,25 +293,54 @@ def format_si(value: float, unit: str) -> str:
     return f"{value:.3e} {unit}"
 
 
-def format_duration(seconds: float) -> str:
-    seconds = max(0.0, seconds)
-    m, s = divmod(int(round(seconds)), 60)
-    h, m = divmod(m, 60)
-    if h:
-        return f"{h}h {m}m {s}s"
-    if m:
-        return f"{m}m {s}s"
-    return f"{s}s"
-
-
-def _acquire_duration_s(n_averages: int, sample_rate_Hz: float,
-                        time_constant_s: float = 0.0) -> float:
-    """Poll window acquire_averaged() will use per point — mirrors the
-    max(0.1, 3xTC, n*1.5/rate) floor in instruments/mfli_daq.py so the
-    run-time estimate and the correlated-samples warning stay honest."""
-    if sample_rate_Hz <= 0:
-        return 0.0
-    return max(0.1, 3.0 * time_constant_s, (n_averages * 1.5) / sample_rate_Hz)
+def run_costs(state: dict, currents_A=None) -> RunCost:
+    """Modelled cost of the whole run, one entry per point in loop order --
+    amplitude-major: one full field sweep (`currents_A`, or a single point at
+    the present field if None) per excitation current, each its own file.
+    Also drives the run screen's progress bar, so the estimate and the live
+    ETA cannot disagree. Every term mirrors a step of run_measurement() /
+    RunScreen.do_run() -- see mfli_dual_harmonic_6221.py."""
+    n_pts = len(currents_A) if currents_A is not None else 1
+    n_amps = max(1, len(state.get("amplitude_list", [])))
+    rc = RunCost(n_pts * n_amps)
+    rate, n_avg = state["sample_rate_Hz"], state["n_averages"]
+    tc1, tc2 = state["time_constant_1f_s"], state["time_constant_2f_s"]
+    # acquire_averaged_pair(): leader and follower share ONE poll window -- the longer of the two.
+    pair_s = max(acquire_s(tc1, n_avg, rate), acquire_s(tc2, n_avg, rate)) if rate > 0 else 0.0
+    has_temp = bool(state["enable_temperature"] and parse_sensor_uids(state["temperature_sensor_uids"]))
+    rc.each("settle", state["settling_time_s"])
+    rc.each("acquire", pair_s)
+    # per point: MDS check + 2 ExtRef lock checks + 3 LabOne reads in build_run_metadata
+    # (frequency + 2 phase nodes) + CSV rewrite + temperature
+    rc.each("overhead", 6 * GPIB_TXN_S + POINT_OVERHEAD_S + (TEMP_READ_S if has_temp else 0.0))
+    rc.at("connect + MDS", PER_RUN_S + MDS_SYNC_S, 0)
+    lock_typ, lock_worst = extref_lock_s(state["extref_lock_timeout_s"])
+    magnet_cfg = MagnetConfig(ramp_step_A=state["ramp_step_A"], ramp_delay_s=state["ramp_delay_s"])
+    if currents_A is not None:
+        rc.each("field read", read_field_s(GaussmeterConfig(
+            n_averages=state["gaussmeter_n_averages"], read_delay_s=state["gaussmeter_read_delay_s"])))
+    phase_cal = (phase_cal_s(tc1, tc2, state["phase_cal_n_averages"],
+                             state["phase_cal_max_iterations"], rate) if rate > 0 else 0.0)
+    i_now = 0.0                                   # the magnet starts at 0 A
+    for a in range(n_amps):
+        first = a * n_pts
+        # every amplitude re-arms the 6221 (waveform_arm) and re-locks both ExtRef PLLs, then saves its own file
+        rc.at("6221 re-arm + ExtRef", ac_source_restart_s() + lock_typ, first, worst_extra=lock_worst - lock_typ)
+        rc.at("per-file", PER_FILE_S, first)
+        if state["enable_phase_cal"]:
+            rc.at("phase cal", phase_cal, first)
+            if currents_A is not None and state["phase_cal_current_A"] is not None:
+                typ, worst = magnet_move_s(abs(state["phase_cal_current_A"] - i_now), magnet_cfg)
+                rc.at("phase cal", typ + state["settling_time_s"], first, worst_extra=worst - typ)
+                i_now = state["phase_cal_current_A"]
+        if currents_A is not None:
+            for j, current in enumerate(currents_A):
+                typ, worst = magnet_move_s(abs(current - i_now), magnet_cfg)
+                rc.at("magnet", typ, first + j, worst_extra=worst - typ)
+                i_now = current
+    if currents_A is not None:
+        rc.tail("ramp-down", magnet_move_s(abs(i_now), magnet_cfg, with_field=False)[0])
+    return rc
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -339,6 +378,7 @@ class MeasurementPlan:
     header_extra: dict
     series: str = ""
     data_root: Path = _DEFAULT_DATA_DIR
+    run_cost: Optional[RunCost] = None      # modelled seconds per point (progress bar + ETA)
 
     @property
     def total_points(self) -> int:
@@ -548,9 +588,8 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
                     f"(want ≳ {min_rate:.1f} Sa/s)."
                 )
 
-            acq_window_s[key] = _acquire_duration_s(
-                state["n_averages"], state["sample_rate_Hz"], tc
-            )
+            acq_window_s[key] = (poll_window_s(tc, state["n_averages"], state["sample_rate_Hz"])
+                                 if state["sample_rate_Hz"] > 0 else 0.0)
             n_indep = acq_window_s[key] / (math.pi * tc)
             if n_indep < 0.5 * state["n_averages"]:
                 warnings.append(
@@ -564,13 +603,9 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         else:
             errors.append(f"{label} time constant must be > 0 s.")
 
-    # Leader and follower are polled together in one window
-    # (acquire_averaged_pair(), see run_measurement) — their poll windows
-    # overlap, so it's the max of the two, not the sum.
-    per_point_s = state["settling_time_s"] + max(acq_window_s["leader"], acq_window_s["follower"])
-
     # ── Sweep ────────────────────────────────────────────────────────────────
     total_points = 0
+    resolved = None
     if state["enable_sweep"]:
         if state.get("sweep_rows_parse_error"):
             errors.append(f"Sweep rows: {state['sweep_rows_parse_error']}")
@@ -601,13 +636,11 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         elif tol_mT < 0.01:
             warnings.append(f"Field-settle tolerance {tol_mT:g} mT is below the 475's typical "
                              "reading noise — points may stall until the settle timeout.")
-        n_amps = max(1, len(state.get("amplitude_list", [])))
-        info.append(f"Estimated total run time ≈ "
-                    f"{format_duration(total_points * per_point_s * n_amps)}")
+        if resolved is not None:
+            info.extend(run_costs(state, resolved).lines("Estimated total run time"))
     else:
-        n_amps = max(1, len(state.get("amplitude_list", [])))
         info.append("Single point — no field sweep, magnet untouched.")
-        info.append(f"Estimated run time ≈ {format_duration(per_point_s * n_amps)}")
+        info.extend(run_costs(state).lines("Estimated run time"))
 
     # ── Temperature (MercuryiTC, optional) ──────────────────────────────────
     if state["enable_temperature"]:
@@ -897,8 +930,10 @@ class RunScreen(Screen):
         yield Static("Starting …", id="status_line")
         with Horizontal(id="progress_row"):
             yield Static("", id="run_label")
-            yield ProgressBar(id="progress", total=self.plan.total_points * self.plan.total_files,
-                               show_eta=False)
+            yield ProgressBar(id="progress",
+                              total=progress_total(self.plan.run_cost,
+                                                   self.plan.total_points * self.plan.total_files),
+                              show_eta=True)
         yield DataTable(id="results_table", zebra_stripes=True, cursor_type="row")
         yield RichLog(id="log", max_lines=5000, markup=False, wrap=True)
         with Horizontal(id="runactionbar"):
@@ -967,7 +1002,8 @@ class RunScreen(Screen):
             f"{T2:.3f}" if T2 is not None else "—",
         )
         table.move_cursor(row=table.row_count - 1, scroll=True)
-        self.query_one("#progress", ProgressBar).advance(1)
+        self.query_one("#progress", ProgressBar).advance(
+            progress_step(self.plan.run_cost, len(self._records) - 1))
         self._set_status(f"Point {len(self._records)} / "
                           f"{self.plan.total_points * self.plan.total_files} complete.")
 
@@ -2018,6 +2054,7 @@ class MFLIDualHarmonic6221App(App):
             sample=state["sample"], device=state["device"], data_root=self.data_root,
             temperature_setpoint_K=state["temperature_setpoint_K"],
             cooldown=state["cooldown"], header_extra=header_extra, series=series,
+            run_cost=run_costs(state, currents_A),
         )
 
 

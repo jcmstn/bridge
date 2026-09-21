@@ -43,6 +43,8 @@ import numpy as np
 from pymeasure.instruments import Instrument
 from pymeasure.instruments.validators import strict_discrete_set, truncated_range
 
+from instruments.run_time import GPIB_TXN_S
+
 log = logging.getLogger(__name__)
 
 
@@ -213,6 +215,11 @@ def read_field_mT(gm: "LakeShore475", cfg: GaussmeterConfig) -> float:
     """Average `cfg.n_averages` field readings and return the result in mT."""
     mean, _std = gm.measure(cfg.n_averages, delay=cfg.read_delay_s)
     return field_to_mT(mean, cfg.unit)
+
+
+def read_field_s(cfg: GaussmeterConfig) -> float:
+    """Modelled wall time of one ``read_field_mT()``: n_averages × (read delay + one query)."""
+    return cfg.n_averages * (cfg.read_delay_s + GPIB_TXN_S)
 
 
 def shutdown_gaussmeter(gm: "LakeShore475") -> None:

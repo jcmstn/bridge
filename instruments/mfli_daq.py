@@ -40,6 +40,8 @@ from typing import Optional
 import numpy as np
 import zhinst.core as zi
 
+from instruments.run_time import ACQ_OVERHEAD_S
+
 log = logging.getLogger(__name__)
 
 
@@ -277,7 +279,19 @@ def _poll_duration_s(cfg, n_averages: int) -> float:
     it isn't present. 50% margin on the sample-count term so we comfortably
     exceed n_averages."""
     tc = getattr(getattr(cfg, "filter", None), "time_constant_s", 0.0)
-    return max(0.1, 3.0 * tc, (n_averages * 1.5) / cfg.sample_rate_Hz)
+    return poll_window_s(tc, n_averages, cfg.sample_rate_Hz)
+
+
+def poll_window_s(time_constant_s: float, n_averages: int, sample_rate_Hz: float) -> float:
+    """Length of the acquisition window ``acquire_averaged`` blocks for --
+    the single source of truth, also used by every TUI's run-time estimate."""
+    return max(0.1, 3.0 * time_constant_s, (n_averages * 1.5) / sample_rate_Hz)
+
+
+def acquire_s(time_constant_s: float, n_averages: int, sample_rate_Hz: float) -> float:
+    """Modelled wall time of one ``acquire_averaged`` / ``_pair`` call: the
+    window plus run_time.ACQ_OVERHEAD_S (subscribe / sync / unsubscribe / overload read)."""
+    return poll_window_s(time_constant_s, n_averages, sample_rate_Hz) + ACQ_OVERHEAD_S
 
 
 def _finish_average(daq: zi.ziDAQServer, cfg, raw: dict, n_averages: int) -> dict:

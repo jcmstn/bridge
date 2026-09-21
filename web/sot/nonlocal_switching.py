@@ -452,7 +452,7 @@ def page() -> None:
             parameters=state, data_dir=state["data_dir"], planned_output_paths=[],
             on_record=on_record, on_status=on_status, on_run_label=on_run_label, on_log=on_log,
             on_finished=make_on_finished(plan, run_contexts, run_extras),
-            sample=plan.sample, device=plan.device,
+            sample=plan.sample, device=plan.device, run_cost=plan.run_cost,
         )
         if not rc.try_start():
             ui.notify("Another measurement is already running — see the banner above.", type="warning")

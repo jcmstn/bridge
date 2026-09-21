@@ -79,9 +79,7 @@ from mfli.mfli_dual_harmonic import (
 )
 from mfli.mfli_dual_harmonic_tui import (
     _LogRelay,
-    _acquire_duration_s,
     field,
-    format_duration,
     format_si,
     select_field,
     sweep_rows_field,
@@ -90,11 +88,21 @@ from mfli.mfli_dual_harmonic_tui import (
 from mfli.mfli_phase_calibration import (
     AmplitudeCheckConfig,
     FrequencyCheckConfig,
+    CONFIGURE_OUTPUT_TXNS,
     SweepConfig,
     format_report,
+    null_follower_s,
+    null_phase_s,
     run_phase_calibration,
 )
 from instruments.data_dir import DataDirPickerScreen, validate_directory
+from instruments.kepco_magnet import magnet_move_s
+from instruments.lakeshore475 import read_field_s
+from instruments.mfli_daq import acquire_s
+from instruments.run_time import (
+    GPIB_TXN_S, MDS_SYNC_S, PER_FILE_S, PER_RUN_S, POINT_OVERHEAD_S, TEMP_READ_S,
+    RunCost, progress_step, progress_total,
+)
 from instruments.data_naming import (
     TEST_SAMPLE,
     RunContext,
@@ -277,10 +285,63 @@ class CalibrationPlan:
     temp_cfg: Optional[TemperatureControllerConfig] = None
     series: str = ""
     data_root: Path = _DEFAULT_DATA_DIR
+    run_cost: Optional[RunCost] = None      # modelled seconds per sweep point (progress bar + ETA)
 
     @property
     def total_points(self) -> int:
         return len(build_segmented_sweep(self.sweep_cfg.rows, bidirectional=True))
+
+
+def run_costs(state: dict) -> RunCost:
+    """Modelled cost of the whole calibration, one entry per SWEEP point (what
+    on_point reports). Everything run_phase_calibration() does before the sweep
+    (ramp to the calibration point, leader + follower nulls) is charged to point
+    0; the optional checks and the magnet/output shutdown after it go in the
+    tail. Also drives the progress bar, so estimate and live ETA cannot disagree."""
+    currents = build_segmented_sweep(state.get("sweep_rows_parsed", []), bidirectional=True)
+    rc = RunCost(len(currents))
+    tc, rate = state["time_constant_s"], state["sample_rate_Hz"]
+    settle = state["sweep_settling_time_s"]
+    magnet_cfg = MagnetConfig(ramp_step_A=state["ramp_step_A"], ramp_delay_s=state["ramp_delay_s"])
+    gauss_cfg = GaussmeterConfig(n_averages=state["gaussmeter_n_averages"],
+                                 read_delay_s=state["gaussmeter_read_delay_s"])
+    has_temp = state.get("enable_temperature") and bool(parse_sensor_uids(state["temperature_sensor_uids"]))
+
+    # ── before the sweep (point 0): connects + MDS, ramp to calibration point, nulls
+    rc.at("per-run", PER_RUN_S + MDS_SYNC_S, 0)
+    typ, worst = magnet_move_s(state["calibration_current_A"], magnet_cfg)
+    rc.at("magnet", typ, 0, worst_extra=worst - typ)
+    rc.at("settle", settle, 0)
+    n1, w1 = null_phase_s(tc, rate, state["null_n_averages"], state["null_max_iterations"])
+    n2, w2 = null_follower_s(tc, rate, state["null_n_averages"], state["null_max_iterations"])
+    rc.at("phase nulls", n1 + n2, 0, worst_extra=(w1 + w2) - (n1 + n2))
+
+    # ── the sweep: hop (first one from the calibration point), settle, two SEQUENTIAL acquisitions
+    prev = state["calibration_current_A"]
+    for i, current in enumerate(currents):
+        typ, worst = magnet_move_s(current - prev, magnet_cfg)
+        rc.at("magnet", typ, i, worst_extra=worst - typ)
+        prev = current
+    rc.each("settle", settle)
+    rc.each("acquire", 2 * acquire_s(tc, state["sweep_n_averages"], rate))
+    rc.each("gaussmeter", read_field_s(gauss_cfg))
+    rc.each("overhead", POINT_OVERHEAD_S + (TEMP_READ_S if has_temp else 0.0))
+
+    # ── after the sweep: optional checks (run_amplitude_check / run_frequency_check)
+    reconfig = CONFIGURE_OUTPUT_TXNS * GPIB_TXN_S
+    if state["enable_amplitude_check"]:
+        n_amp = len(state["amplitudes_V"])
+        rc.tail("checks", n_amp * (reconfig + settle + acquire_s(tc, state["amp_n_averages"], rate))
+                + reconfig + settle)                                  # + restore the original amplitude
+    if state["enable_frequency_check"]:
+        null_typ, _ = null_phase_s(tc, rate, state["freq_n_averages"], state["freq_max_iterations"])
+        per_freq = reconfig + 2 * GPIB_TXN_S + settle + null_typ      # configure_output + follower osc sync
+        rc.tail("checks", (len(state["frequencies_Hz"]) + 1) * per_freq)   # + restore f and re-null
+    # ── shutdown: output off, magnet ramped from the last sweep point to 0, PNG + index row
+    last = float(currents[-1]) if len(currents) else 0.0
+    rc.tail("ramps", 2 * GPIB_TXN_S + magnet_move_s(last, magnet_cfg, with_field=False)[0])
+    rc.tail("per-file", PER_FILE_S)
+    return rc
 
 
 def build_header_fields(plan: "CalibrationPlan", records: list[dict], *,
@@ -403,14 +464,11 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         n_raw = sum(n for _, _, n in rows)
         n_merged = 2 * n_raw - total_points
         merged_note = f", {n_merged} shared boundary point(s) merged" if n_merged else ""
-        per_point_s = state["sweep_settling_time_s"] + _acquire_duration_s(
-            state["sweep_n_averages"], state["sample_rate_Hz"]
-        )
         info.append(f"Sweep: {len(rows)} row(s), {total_points} points (bidirectional)"
                      f"{merged_note}")
         info.append("Field measured live at each point via Lake Shore 475 Gaussmeter "
                      f"({state['gaussmeter_visa_resource']})")
-        info.append(f"Estimated sweep run time ≈ {format_duration(total_points * per_point_s)}")
+        info.extend(run_costs(state).lines("Estimated run time"))
 
     # ── Optional checks ─────────────────────────────────────────────────────
     if state["enable_amplitude_check"]:
@@ -603,7 +661,8 @@ class RunScreen(Screen):
         yield Static("Starting …", id="status_line")
         with Horizontal(id="progress_row"):
             yield Static(f"Run #{self.plan.run_ctx.run_str}", id="run_label")
-            yield ProgressBar(id="progress", total=self.plan.total_points, show_eta=False)
+            yield ProgressBar(id="progress", total=progress_total(self.plan.run_cost, self.plan.total_points),
+                              show_eta=True)
         yield DataTable(id="results_table", zebra_stripes=True, cursor_type="row")
         yield RichLog(id="log", max_lines=5000, markup=False, wrap=True)
         with Horizontal(id="runactionbar"):
@@ -664,7 +723,8 @@ class RunScreen(Screen):
             f"{T2:.3f}" if T2 is not None else "—",
         )
         table.move_cursor(row=table.row_count - 1, scroll=True)
-        self.query_one("#progress", ProgressBar).advance(1)
+        self.query_one("#progress", ProgressBar).advance(
+            progress_step(self.plan.run_cost, record["point_index"]))
         self._set_status(f"Sweep point {record['point_index'] + 1} / {self.plan.total_points} complete.")
 
     def _on_finished(self, final_status: str) -> None:
@@ -1418,7 +1478,7 @@ class MFLIPhaseCalibrationApp(App):
             output_csv=output_csv,
             run_ctx=run_ctx, data_root=self.data_root, temperature_setpoint_K=state["temperature_setpoint_K"],
             cooldown=state["cooldown"], header_extra=header_extra,
-            temp_cfg=temp_cfg,
+            temp_cfg=temp_cfg, run_cost=run_costs(state),
         )
 
 

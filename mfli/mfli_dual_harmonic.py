@@ -78,7 +78,9 @@ from instruments.mfli_daq import (
     sync_follower_oscillator,
     acquire_averaged,
     acquire_averaged_pair,
+    acquire_s,
 )
+from instruments.run_time import GPIB_TXN_S, PHASE_NULL_ITER_TYP
 from instruments.kepco_magnet import (
     KepkoBOPGL,
     MagnetConfig,
@@ -584,6 +586,27 @@ def null_follower_reference_via_1f(
     log.info("Follower 2f reference anchor: 1f delay angle = %.4f° at f "
              "(analysis rotates recorded 2f X/Y by -2× this).", delay_angle_deg)
     return delay_angle_deg
+
+
+def phase_cal_s(time_constant_1f_s: float, time_constant_2f_s: float, n_averages: int,
+                max_iterations: int, sample_rate_Hz: float) -> float:
+    """Modelled wall time of the TUI's phase-calibration block, EXCLUDING its
+    optional magnet ramp + settling sleep (the caller owns those):
+    auto_null_phase() on the leader, one 2f snapshot acquire, then
+    null_follower_reference_via_1f().
+
+    A null of k rounds is k acquire windows + (k-1) x (5 x TC settle sleep +
+    a phase write); k is run_time.PHASE_NULL_ITER_TYP, capped at
+    `max_iterations` (the form only gives the cap). The follower null adds a
+    harmonic switch + a 5 x TC sleep before it and the same after, plus its
+    phase / harmonic restore writes."""
+    def null_s(tc: float) -> float:
+        k = max(1, min(PHASE_NULL_ITER_TYP, max_iterations))
+        return (k * acquire_s(tc, n_averages, sample_rate_Hz)
+                + (k - 1) * (5.0 * tc + GPIB_TXN_S) + 2 * GPIB_TXN_S)
+    snapshot = acquire_s(time_constant_2f_s, n_averages, sample_rate_Hz)
+    follower = null_s(time_constant_2f_s) + 2 * 5.0 * time_constant_2f_s + 6 * GPIB_TXN_S
+    return null_s(time_constant_1f_s) + snapshot + follower
 
 
 # ─────────────────────────────────────────────────────────────────────────────

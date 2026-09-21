@@ -32,6 +32,7 @@ from typing import Any, Callable, Iterator, Optional
 
 from nicegui import ui
 
+from instruments.run_time import RunCost, eta_s, format_duration
 from web import run_index, run_manager
 
 log = logging.getLogger(__name__)
@@ -51,17 +52,6 @@ def format_si(value: float, unit: str) -> str:
         if av < scale * 1000:
             return f"{value / scale:.3f} {prefix}{unit}"
     return f"{value:.3e} {unit}"
-
-
-def format_duration(seconds: float) -> str:
-    seconds = max(0.0, seconds)
-    m, s = divmod(int(round(seconds)), 60)
-    h, m = divmod(m, 60)
-    if h:
-        return f"{h}h {m}m {s}s"
-    if m:
-        return f"{m}m {s}s"
-    return f"{s}s"
 
 
 def num_field(label: str, default: float, *, hint: str = "", integer: bool = False) -> ui.number:
@@ -245,8 +235,13 @@ def busy_banner() -> None:
             return
         with ui.row().classes("w-full items-center gap-3 bg-amber-100 dark:bg-amber-900 rounded p-2 mb-2"):
             ui.icon("hourglass_top")
+            rc = handle.run_cost
+            n_done = len(handle.records)
+            eta = eta_s(rc, n_done, handle.elapsed_s)
+            progress = (f" — {n_done}/{len(rc.points)} · ETA {format_duration(eta)}"
+                        if rc is not None and eta is not None else "")
             ui.label(f"Busy — {handle.suite} · {handle.measurement} — "
-                      f"running {format_duration(handle.elapsed_s)} — {handle.status_text}") \
+                      f"running {format_duration(handle.elapsed_s)}{progress} — {handle.status_text}") \
                 .classes("flex-grow")
             ui.button("Abort", on_click=handle.stop_event.set, color="negative").props("outline dense")
 
@@ -329,7 +324,9 @@ class RunController:
                  on_log: Callable[[str, int], None],
                  on_finished: Callable[["FinalStatus", Any], None],
                  sample: Optional[str] = None, device: Optional[str] = None,
-                 run_number: Optional[int] = None) -> None:
+                 run_number: Optional[int] = None,
+                 run_cost: Optional[RunCost] = None) -> None:
+        self.run_cost = run_cost
         self.suite = suite
         self.measurement = measurement
         self.run_fn = run_fn
@@ -367,6 +364,7 @@ class RunController:
         if handle is None:
             return False
         self.handle = handle
+        handle.run_cost = self.run_cost
         handle.run_id = run_index.start_run(
             self.suite, self.measurement, self.parameters, self.data_dir,
             self.planned_output_paths,

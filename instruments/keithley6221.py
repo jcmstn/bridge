@@ -30,6 +30,8 @@ from typing import Optional
 import numpy as np
 from pymeasure.instruments.keithley import Keithley2182, Keithley6221
 
+from instruments.run_time import ARM_S, GPIB_TXN_S
+
 log = logging.getLogger(__name__)
 
 
@@ -125,6 +127,14 @@ def shutdown_ac_source(source: Keithley6221) -> None:
     source.waveform_abort()
     source.shutdown()
     log.info("Keithley 6221 AC wave stopped, output disabled")
+
+
+def ac_source_restart_s() -> float:
+    """Modelled wall time of one 6221 rebuild between files: shutdown_ac_source()
+    (ABORt + shutdown = 2 writes) + connect_ac_source() (*RST, 9 WAVE writes,
+    ARM, phase-marker readback, START = 13 transactions + ARM_S) + the caller's
+    output-off (ABORt + OUTPUT OFF = 2)."""
+    return (2 + 13 + 2) * GPIB_TXN_S + ARM_S
 
 
 @dataclass
@@ -240,6 +250,13 @@ def fire_wave_pulse(source: Keithley6221, cfg: PulseWaveConfig,
     return {"pulse_width_measured_s": elapsed}
 
 
+def wave_pulse_s(width_s: float) -> float:
+    """Modelled wall time of one ``fire_wave_pulse()``: 9 WAVE config writes, ARM,
+    START, >= 1 OUTPUT? poll, ABORt, OUTPUT OFF (14 transactions) + ARM_S, and the
+    hardware-timed one-cycle wave itself (period = 2 x width_s)."""
+    return 14 * GPIB_TXN_S + ARM_S + 2.0 * width_s
+
+
 def connect(visa_resource: str, compliance_V: float, source_delay_s: float,
             initial_current_A: float = 0.0) -> Keithley6221:
     """Open and configure a Keithley 6221 as a DC current source."""
@@ -284,6 +301,20 @@ def ramp_current_to_zero(source: Keithley6221, step_A: float = 1e-4, delay_s: fl
     for i in np.linspace(current, 0.0, n_steps + 1)[1:]:
         source.source_current = float(i)
         time.sleep(delay_s)
+
+
+def reversal_avg_s(n_reversals: int, source_delay_s: float, read_s: float,
+                   n_channels: int = 1, channel_settle_s: float = 0.0) -> float:
+    """Modelled wall time of one ``acquire_reversal_averaged_voltage()`` call.
+
+    Per polarity flip: one source write + ``source_delay_s`` sleep, then
+    `n_channels` reads of `read_s` each (``keithley2182.read_time_s``), each
+    preceded by a channel-mux write + ``channel_settle_s`` when n_channels > 1;
+    two flips per reversal, plus the final write leaving the source at +I.
+    The delay and the read ADD -- they are sequential, not overlapping."""
+    per_read = read_s + ((GPIB_TXN_S + channel_settle_s) if n_channels > 1 else 0.0)
+    half = GPIB_TXN_S + source_delay_s + n_channels * per_read
+    return n_reversals * 2 * half + GPIB_TXN_S
 
 
 def acquire_reversal_averaged_voltage(
