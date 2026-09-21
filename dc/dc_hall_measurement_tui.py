@@ -403,10 +403,16 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     if not channel_map:
         errors.append("Enable at least one of R_xy or R_xx.")
     elif len(channel_map) == 2:
-        info.append("R_xy on ch1, R_xx on ch2 — 2182 channel 2's LO is tied "
-                     "to channel 1's internally; only safe if the R_xy and "
-                     "R_xx probe pairs share a physical contact. Verify "
-                     "with a multimeter before the first run.")
+        info.append("R_xy on ch1, R_xx on ch2.")
+        warnings.append("R_xy + R_xx: the 2182's ch1 LO and ch2 LO are one node "
+                        "inside the instrument. Wire both LO leads to the SAME "
+                        "sample contact. On two different contacts the 2182 "
+                        "shorts them together, shunting part of the sample and "
+                        "silently corrupting R_xx and R_xy.")
+        warnings.append("Before the first run: unplug the leads from the 2182 "
+                        "and meter between the two LO leads. Lead resistance "
+                        "only = same contact, OK. Sample resistance = different "
+                        "contacts, do not run both.")
         info.append("Both channels read per point — roughly doubles the "
                      "per-point acquisition time.")
     else:

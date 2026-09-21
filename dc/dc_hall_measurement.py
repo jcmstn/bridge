@@ -14,10 +14,14 @@ Wiring
       Channel 1 (differential) ──▶ across the transverse (Hall, R_xy)
       voltage leads of the sample
       Channel 2 (differential, optional) ──▶ across the longitudinal
-      (R_xx) voltage leads — only wire this up if `measure_rxx` is on;
-      channel 2's LO is tied to channel 1's LO internally (2182 hardware),
-      so only combine both channels when the R_xx and R_xy probe pairs
-      genuinely share a physical contact — verify with a multimeter.
+      (R_xx) voltage leads — only wire this up if `measure_rxx` is on.
+      !! Channel 2's LO is tied to channel 1's LO inside the 2182 (fixed
+      hardware), so with both channels on, the R_xy and R_xx LO leads MUST
+      go to the SAME sample contact. On two different contacts the 2182
+      shorts them together, shunting the sample and silently corrupting
+      both readings. Check first: unplug the leads from the 2182 and meter
+      between the two LO leads — lead resistance only = shared (OK);
+      sample resistance = separate (don't run both).
 
 Method
 ------

@@ -45,9 +45,10 @@ def connect_voltmeter(cfg: VoltmeterConfig, extra_channels: tuple = ()) -> Keith
     `extra_channels=(2,)` to also read R_xx on ch2 alongside R_xy on ch1).
 
     Channel 2's LO is internally tied to Channel 1's LO on this instrument
-    (2182 hardware, not configurable) — only combine ch1+ch2 reads when the
-    two probe pairs genuinely share a physical contact; verify with a
-    multimeter before trusting it. Channel 2 also defaults to
+    (2182 hardware, not configurable) — with both channels in use, both LO
+    leads MUST go to the SAME sample contact, else the 2182 shorts two
+    contacts together and silently corrupts both readings (meter test in
+    the `dc/dc_hall_measurement.py` wiring docstring). Channel 2 also defaults to
     `voltage_offset_enabled=True` (relative-to-ch1) on `*RST` — this is
     explicitly turned off here so ch2 reads an absolute voltage like ch1.
     """
