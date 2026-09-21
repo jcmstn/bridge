@@ -85,6 +85,7 @@ Example: `A_0001_HB3_NOISE_T293K_20260811T143022.csv`
 | `SOTPS` | SOT pulsed switching — 4200A PMU write pulse + delayed 6221/2182 R_xy read (`sot/sot_pulsed_switching`) |
 | `SOT2H` | SOT pulsed switching, 2nd-harmonic read — 4200A PMU write pulse + delayed 6221 AC / MFLI 1f+2f read (`sot/sot_pulsed_switching_2h`) |
 | `SOT1I` | SOT pulsed switching, 6221-only (no 4200A) — software-timed 6221 DC write pulse + delayed 6221 AC / MFLI harmonic read (`sot/sot_pulsed_switching_6221`) |
+| `NLSW` | Nonlocal spin-current switching, 6221 + 2182A only — field-initialized ascending sweep of unipolar WAVE write pulses + DC reversal-averaged nonlocal read; key axis = the init magnet current (`current_A`) when the run initializes the state (`sot/nonlocal_switching`) |
 
 A genuinely new measurement kind gets a new short all-caps code added
 here and to nowhere else — `type_code` is just a string parameter to

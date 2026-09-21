@@ -64,6 +64,15 @@ def test_fire_wave_pulse_unipolar_square_one_cycle():
     assert info["pulse_width_measured_s"] >= 0
 
 
+def test_fire_wave_pulse_negative_keeps_amplitude_positive():
+    source = _FakeWaveSource()
+    k.fire_wave_pulse(source, k.PulseWaveConfig(pulse_current_A=-10e-3, width_s=1e-3))
+
+    # pymeasure clips a negative amplitude to ~0, so only the offset carries the sign
+    assert source.writes["waveform_amplitude"] == 5e-3
+    assert source.writes["waveform_offset"] == -5e-3
+
+
 def test_fire_wave_pulse_stops_on_stop_event():
     source = _FakeWaveSource(n_polls_until_off=10_000)   # would "hang" without stop_event
 

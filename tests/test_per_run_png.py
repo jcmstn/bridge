@@ -27,6 +27,7 @@ import dc.dc_gate_sweep_tui as gate_tui  # noqa: E402
 import dc.dc_hall_measurement_tui as hall_tui  # noqa: E402
 import dc.dc_iv_curve_tui as iv_tui  # noqa: E402
 import dc.dc_spin_valve_tui as sv_tui  # noqa: E402
+import sot.nonlocal_switching_tui as nlsw_tui  # noqa: E402
 import sot.sot_pulsed_switching_2h_tui as sot2h_tui  # noqa: E402
 import sot.sot_pulsed_switching_6221_tui as sot6221_tui  # noqa: E402
 import sot.sot_pulsed_switching_tui as sot_tui  # noqa: E402
@@ -68,6 +69,11 @@ def _sot6221(i, idx):
     return {"pulse_current_A": 1e-3 * i, "demod_R_V": 1e-6 * i, "excitation_current_A_peak": 1e-4}
 
 
+def _nlsw(i, idx):
+    return {"pulse_current_A": 1e-3 * i, "nl_resistance_ohm": 0.1 * i, "voltage_even_V": 1e-6,
+            "sense_current_A": 1e-4, "switched": None, "init_magnet_current_A": 5.0 * (idx + 1)}
+
+
 # (module, suffix of the per-run PNG, record factory)
 TUI_CASES = [
     pytest.param(hall_tui, "plot", _hall, id="hall"),
@@ -77,6 +83,7 @@ TUI_CASES = [
     pytest.param(sot_tui, "Rxy_vs_amp", _sot, id="sot"),
     pytest.param(sot2h_tui, "V2f_vs_amp", _sot2h, id="sot_2h"),
     pytest.param(sot6221_tui, "Vnf_vs_pulse", _sot6221, id="sot_6221"),
+    pytest.param(nlsw_tui, "NL_vs_pulse", _nlsw, id="nonlocal_switching"),
 ]
 
 
@@ -139,6 +146,7 @@ def _save_fn(mod, make, path):
     pytest.param(sot_tui, _sot, id="sot_tui"),
     pytest.param(sot2h_tui, _sot2h, id="sot2h_tui"),
     pytest.param(sot6221_tui, _sot6221, id="sot6221_tui"),
+    pytest.param(nlsw_tui, _nlsw, id="nonlocal_switching_tui"),
     pytest.param(hall_web, _hall, id="hall_web"),
     pytest.param(gate_web, _gate, id="gate_web"),
     pytest.param(iv_web, _iv, id="iv_web"),

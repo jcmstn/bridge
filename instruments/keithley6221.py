@@ -152,6 +152,10 @@ class PulseWaveConfig:
         around alternating-polarity offset-cancelling measurement, not a
         single deliberate-polarity write pulse. Nothing here touches a 2182.
 
+    ``pulse_current_A`` may be negative. The wave then swings between
+    -|I| and 0 with the 0 A half first, so a negative pulse is expected to
+    arrive one ``width_s`` later than a positive one (scope-check once).
+
     Duty cycle is fixed at 50% internally so ``width_s`` alone determines
     the frequency this programs (frequency = 1 / (2 x width_s)) — pick
     ``width_s`` so that frequency stays inside the WAVE subsystem's 1 mHz to
@@ -207,7 +211,10 @@ def fire_wave_pulse(source: Keithley6221, cfg: PulseWaveConfig,
 
     source.source_compliance = cfg.compliance_V
     source.waveform_function = "square"
-    source.waveform_amplitude = half
+    # pymeasure's waveform_amplitude truncates to [2e-12, 0.105]: a negative
+    # value would silently become ~0 (a constant half-height, double-width
+    # "pulse"). Amplitude is therefore always |I|/2; the sign lives in the offset.
+    source.waveform_amplitude = abs(half)
     source.waveform_offset = half
     source.waveform_dutycycle = 50.0
     source.waveform_frequency = frequency_Hz

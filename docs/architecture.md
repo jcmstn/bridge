@@ -27,6 +27,7 @@ reference. This file is the map, not a second copy of them.
 | `uv run python sot/sot_pulsed_switching_tui.py` | SOT pulsed switching (4200A PMU pulse + delayed 6221/2182 R_xy) — Textual |
 | `uv run python sot/sot_pulsed_switching_2h_tui.py` | SOT pulsed switching, 2nd-harmonic read (4200A PMU pulse + delayed 6221 AC / MFLI 1f+2f) — Textual |
 | `uv run python sot/sot_pulsed_switching_6221_tui.py` | SOT pulsed switching, 6221-only — no 4200A (software-timed 6221 DC pulse + delayed 6221 AC / MFLI harmonic, harmonic is a parameter) — Textual |
+| `uv run python sot/nonlocal_switching_tui.py` | Nonlocal spin-current switching, 6221 + 2182A only (optional Kepco field initialization, then an ascending sweep of unipolar WAVE write pulses + DC reversal-averaged nonlocal read; type `NLSW`) — Textual. `sot/nonlocal_switching.py` also runs standalone (plain CSV) |
 | `uv run python web/app.py`     | Browser front end, same 7 measurements — NiceGUI, `http://localhost:8080` |
 | `uv run python tools/curate_sample.py <sample>` | Post-hoc curation TUI: mark runs `paper_include` / `figure_ref` |
 
