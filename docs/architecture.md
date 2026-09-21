@@ -385,6 +385,7 @@ units sub-header row as data. Use `read_raw()`.
 | Current-reversal averaging | `instruments/keithley6221.py` `acquire_reversal_averaged_voltage` + `current-reversal.md` |
 | An instrument's SCPI / connect / shutdown behaviour | `instruments/{instr}.py` only |
 | Live-plot / run-lock / run-history behaviour (web) | `web/run_controller.py` / `web/run_manager.py` / `web/run_index.py` |
+| TUI live-plot window (spawned matplotlib process fed over a Queue) | plot body: the TUI's `_live_plot_worker`; process launch: `instruments/live_plot.py` `start_live_plot` — always launch through it, Textual's `sys.stderr.fileno() == -1` breaks a bare `mp.Queue()` |
 | Web page layout skeleton (top band + params/output columns, square plot) | `web/run_controller.py` `measurement_layout()` — every page fills `regions.identity` / `.params` / `.summary` / `.output`; the app-wide colour theme is `web/app.py` (`app.colors()` + shared head CSS) |
 | The identity bar / data-root picker | `web/identity_bar.py` + `web/directory_picker.py`; TUI side `instruments/data_dir.py` |
 | Suite picker text or schematic | `{suite}/{suite}_tui.py` and the `{NAME}_DESCRIPTION` in the TUI module |

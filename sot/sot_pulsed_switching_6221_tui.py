@@ -91,6 +91,7 @@ from instruments.data_naming import (
     proc_path,
     write_record,
 )
+from instruments.live_plot import start_live_plot
 from instruments.tui_sample_picker import (
     NEW_SAMPLE_SENTINEL,
     NewSampleScreen,
@@ -760,12 +761,8 @@ class RunScreen(Screen):
 
     def _start_live_plot(self) -> None:
         try:
-            ctx = mp.get_context("spawn")
-            self._plot_queue = ctx.Queue()
-            self._plot_process = ctx.Process(target=_live_plot_worker,
-                                             args=(self._plot_queue, self.plan.read_cfg.harmonic),
-                                             daemon=True)
-            self._plot_process.start()
+            self._plot_queue, self._plot_process = start_live_plot(
+                _live_plot_worker, self.plan.read_cfg.harmonic)
         except Exception:
             log.exception("Could not start live plot window")
             self._plot_queue = self._plot_process = None
