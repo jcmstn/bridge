@@ -1,8 +1,8 @@
 """
-sot/nonlocal_switching.py — guards, the pure switched/AP-fraction helpers, the
+sot/sot_nonlocal_switching.py — guards, the pure switched/AP-fraction helpers, the
 field-init sequencing, and the pulse -> wait -> DC-read loop end to end against
-a fake 6221 + 2182A whose magnet flips when a unipolar pulse reaches I_c.
-Hardware-free.
+a fake 6221 + 2182A whose magnet flips to the sign of a pulse that reaches I_c.
+Every pulse must be a single lobe 0 -> +/-I -> 0. Hardware-free.
 """
 
 from __future__ import annotations
@@ -12,15 +12,16 @@ import threading
 
 import pytest
 
-import sot.nonlocal_switching as ns
+import sot.sot_nonlocal_switching as ns
 
 _NULL_WRITER = lambda recs: None   # keep run_measurement's fallback to_csv() off disk
 
 
 class _Fake6221:
-    """WAVE pulse flips `state` to +1 when its height reaches i_c. Records the
-    (low, high) level of every pulse — the unipolar 0 -> +I -> 0 contract. Plain
-    DC writes while a wave is armed raise, like the real instrument's +413."""
+    """A WAVE pulse flips `state` to the pulse's sign when its height reaches
+    i_c. Records the (low, high) level of every pulse — the single-lobe
+    0 -> +/-I -> 0 contract. Plain DC writes while a wave is armed raise, like
+    the real instrument's +413."""
 
     def __init__(self, i_c=3e-3):
         self.i_c, self.state = i_c, -1
@@ -57,6 +58,8 @@ class _Fake6221:
         self.pulse_levels.append((lo, hi))
         if hi >= self.i_c:
             self.state = 1
+        elif lo <= -self.i_c:
+            self.state = -1
 
 
 class _FakeVoltmeter:
@@ -80,18 +83,18 @@ def _run(points, **read_kw):
     return src, df
 
 
-def test_unipolar_sweep_switches_once_and_never_goes_negative():
-    src, df = _run([1e-3, 5e-3, 0.0, 8e-3], R_P_ohm=-0.5, R_AP_ohm=0.5)
+def test_pulses_are_single_lobes_of_either_sign_and_switch_the_state():
+    src, df = _run([1e-3, 5e-3, 1e-3, -5e-3, -1e-3, 0.0], R_P_ohm=-0.5, R_AP_ohm=0.5)
 
-    # baseline, sub-threshold, switch, read-only, above threshold (already switched)
-    assert df["nl_resistance_ohm"].round(3).tolist() == [-0.5, -0.5, 0.5, 0.5, 0.5]
-    assert df["switched"].tolist() == [None, False, True, False, False]
-    assert df["state_AP_fraction"].round(3).tolist() == [0.0, 0.0, 1.0, 1.0, 1.0]
-    assert df["pulse_current_A"].tolist() == [0.0, 1e-3, 5e-3, 0.0, 8e-3]
-    assert df["pulse_width_s"].isna().tolist() == [True, False, False, True, False]
-    assert ns.first_switch_current_A(df.to_dict("records")) == 5e-3
-    # every pulse is exactly 0 -> +I: low level 0 A (no negative lobe), high level I
-    assert src.pulse_levels == [(0.0, 1e-3), (0.0, 5e-3), (0.0, 8e-3)]
+    # baseline, sub-threshold, +set, +hold, -reset, -hold, read-only
+    assert df["nl_resistance_ohm"].round(3).tolist() == [-0.5, -0.5, 0.5, 0.5, -0.5, -0.5, -0.5]
+    assert df["switched"].tolist() == [None, False, True, False, True, False, False]
+    assert df["state_AP_fraction"].round(3).tolist() == [0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0]
+    assert df["pulse_current_A"].tolist() == [0.0, 1e-3, 5e-3, 1e-3, -5e-3, -1e-3, 0.0]
+    assert df["pulse_width_s"].isna().tolist() == [True, False, False, False, False, False, True]
+    assert ns.switch_currents_A(df.to_dict("records")) == [5e-3, -5e-3]
+    # every pulse is ONE lobe: 0 -> +I (levels 0, +I) or 0 -> -I (levels -I, 0) — never both
+    assert src.pulse_levels == [(0.0, 1e-3), (0.0, 5e-3), (0.0, 1e-3), (-5e-3, 0.0), (-1e-3, 0.0)]
     # elapsed_s is the relaxation time axis: strictly increasing
     assert df["elapsed_s"].is_monotonic_increasing and df["elapsed_s"].iloc[0] > 0
     # V_even is the thermal-offset proxy, untouched by the switching
@@ -124,9 +127,9 @@ def test_switched_needs_history_and_a_usable_sem():
     assert ns._switched(0.02, 0.01, 0.0, 0.01, 5) is False
 
 
-def test_first_switch_current_none_when_nothing_switched():
-    assert ns.first_switch_current_A([{"pulse_current_A": 1e-3, "switched": False},
-                                      {"pulse_current_A": 0.0, "switched": None}]) is None
+def test_switch_currents_empty_when_nothing_switched():
+    assert ns.switch_currents_A([{"pulse_current_A": 1e-3, "switched": False},
+                                 {"pulse_current_A": 0.0, "switched": None}]) == []
 
 
 def test_ap_fraction():
@@ -149,9 +152,10 @@ def test_initialize_with_field_ramps_to_init_then_hold(monkeypatch):
 
 @pytest.mark.parametrize("points, read_kw", [
     ([ns.PulsePoint(0.2)], {}),                                  # beyond the 6221 range
-    ([ns.PulsePoint(-5e-3)], {}),                                # unipolar only: no negative pulse
+    ([ns.PulsePoint(-0.2)], {}),                                 # beyond the range, negative side
     ([ns.PulsePoint(float("nan"))], {}),
     ([ns.PulsePoint(5e-4)], {"sense_current_A": 5e-4}),          # read >= smallest pulse
+    ([ns.PulsePoint(-5e-4)], {"sense_current_A": 5e-4}),         # ... also for a negative pulse
     ([ns.PulsePoint(5e-3)], {"n_reversals": 1}),
     ([ns.PulsePoint(5e-3)], {"R_P_ohm": 1.0}),                   # only one reference level
     ([ns.PulsePoint(5e-3)], {"sense_current_A": 0.5}),           # over the read ceiling

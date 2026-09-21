@@ -1,6 +1,6 @@
 """
-sot/nonlocal_switching_tui.py — build_summary validation, the unipolar sweep and
-init-current parsing, _build_plan purity, header fields and the filename
+sot/sot_nonlocal_switching_tui.py — build_summary validation, the signed pulse sweep
+and init-current parsing, _build_plan purity, header fields and the filename
 preview. Pure logic only, no Textual mount, no hardware.
 """
 
@@ -14,7 +14,7 @@ import pytest
 
 matplotlib.use("Agg")
 
-import sot.nonlocal_switching_tui as tui  # noqa: E402
+import sot.sot_nonlocal_switching_tui as tui  # noqa: E402
 
 
 def _state(tmp_path: Path, **overrides) -> dict:
@@ -31,9 +31,7 @@ def _state(tmp_path: Path, **overrides) -> dict:
     base.update(device="HB3", sample="A", data_dir=str(tmp_path), temperature_setpoint_K=300.0,
                 enable_temperature=False)
     base.update(overrides)
-    base["pulse_current_list"], base["pulse_current_parse_error"] = tui._resolve_pulse_currents(base)
-    base["init_currents_A"], base["init_currents_parse_error"] = tui._resolve_init_currents(base)
-    return base
+    return tui.resolve_state(base)
 
 
 def test_default_state_has_no_blocking_errors(tmp_path):
@@ -41,16 +39,18 @@ def test_default_state_has_no_blocking_errors(tmp_path):
     assert errors == []
 
 
-@pytest.mark.parametrize("overrides", [
-    dict(pulse_current_start_A=-1e-3, pulse_current_stop_A=5e-3),   # negative start
-    dict(pulse_current_start_A=0.0, pulse_current_stop_A=5e-3),     # 0 A is not a pulse
-])
-def test_pulses_must_be_unipolar_positive(tmp_path, overrides):
-    state = _state(tmp_path, **overrides)
-    assert "unipolar" in state["pulse_current_parse_error"]
-    assert state["pulse_current_list"] == []
-    _, _, errors = tui.build_summary(state)
-    assert any("Pulse currents:" in e for e in errors)
+def test_pulses_may_be_negative_and_a_sweep_through_zero_has_a_read_only_point(tmp_path):
+    state = _state(tmp_path, pulse_current_start_A=-2e-3, pulse_current_stop_A=2e-3,
+                   pulse_current_step_A=2e-3)
+    assert state["pulse_current_parse_error"] is None
+    assert state["pulse_current_list"] == pytest.approx([-2e-3, 0.0, 2e-3], abs=1e-12)
+    info, _, errors = tui.build_summary(state)
+    assert not errors and any("read-only" in i for i in info)
+    # all-negative sweeps are fine too
+    state = _state(tmp_path, pulse_current_start_A=-1e-3, pulse_current_stop_A=-3e-3,
+                   pulse_current_step_A=1e-3)
+    assert state["pulse_current_list"] == pytest.approx([-1e-3, -2e-3, -3e-3])
+    assert tui.build_summary(state)[2] == []
 
 
 def test_summary_blocks_zero_step_and_equal_start_stop(tmp_path):
@@ -60,8 +60,11 @@ def test_summary_blocks_zero_step_and_equal_start_stop(tmp_path):
         assert any("Pulse currents:" in e for e in errors)
 
 
-def test_summary_blocks_pulse_over_hardware_range(tmp_path):
+def test_summary_blocks_pulse_over_hardware_range_either_sign(tmp_path):
     _, _, errors = tui.build_summary(_state(tmp_path, pulse_current_stop_A=0.5))
+    assert any("hardware range" in e for e in errors)
+    _, _, errors = tui.build_summary(_state(tmp_path, pulse_current_start_A=-0.5,
+                                            pulse_current_stop_A=-0.4))
     assert any("hardware range" in e for e in errors)
 
 
@@ -73,6 +76,9 @@ def test_summary_blocks_bad_pulse_width_and_compliance(tmp_path):
 
 def test_sense_current_must_stay_below_the_smallest_pulse(tmp_path):
     _, warnings, errors = tui.build_summary(_state(tmp_path, sense_current_A=1e-3))   # == first pulse
+    assert any("smallest pulse" in e for e in errors)
+    _, _, errors = tui.build_summary(_state(tmp_path, sense_current_A=1e-3,           # negative pulses too
+                                            pulse_current_start_A=-1e-3, pulse_current_stop_A=-5e-3))
     assert any("smallest pulse" in e for e in errors)
     _, warnings, errors = tui.build_summary(_state(tmp_path, sense_current_A=3e-4))   # 30%
     assert not errors and any("read disturb" in w for w in warnings)
@@ -108,6 +114,10 @@ def test_single_init_current_hints_at_the_control_run(tmp_path):
     assert any("opposite sign" in i for i in info)
     info, _, _ = tui.build_summary(_state(tmp_path, init_magnet_currents="5, -5"))
     assert not any("opposite sign" in i for i in info)
+    # a sweep of both polarities can switch either initial state — no control-run hint
+    info, _, _ = tui.build_summary(_state(tmp_path, init_magnet_currents="5",
+                                          pulse_current_start_A=-5e-3, pulse_current_stop_A=5e-3))
+    assert not any("opposite sign" in i for i in info)
 
 
 def test_init_current_over_magnet_limit_is_blocked(tmp_path):
@@ -122,12 +132,17 @@ def test_summary_always_carries_joule_heating_reminder(tmp_path):
     assert any("Joule heating" in i for i in info)
 
 
-def test_bidirectional_sweep_mentions_no_reset(tmp_path):
+def test_bidirectional_sweep_is_a_no_reset_control_or_a_loop(tmp_path):
     state = _state(tmp_path, amplitude_bidirectional=True, pulse_current_start_A=1e-3,
                    pulse_current_stop_A=3e-3, pulse_current_step_A=1e-3)
     assert state["pulse_current_list"] == pytest.approx([1e-3, 2e-3, 3e-3, 2e-3, 1e-3])
     info, _, _ = tui.build_summary(state)
-    assert any("no reset pulses" in i for i in info)
+    assert any("no reset" in i for i in info)
+    state = _state(tmp_path, amplitude_bidirectional=True, pulse_current_start_A=-3e-3,
+                   pulse_current_stop_A=3e-3, pulse_current_step_A=3e-3)
+    assert state["pulse_current_list"] == pytest.approx([-3e-3, 0.0, 3e-3, 0.0, -3e-3], abs=1e-12)
+    info, _, _ = tui.build_summary(state)
+    assert any("hysteresis loop" in i for i in info)
 
 
 def test_filename_preview_carries_the_init_key_axis_only_when_used(tmp_path):
@@ -173,12 +188,13 @@ def test_header_fields_carry_the_switching_current_and_init_state(tmp_path):
                           sample="A", device="HB3")
     records = [{"pulse_current_A": 0.0, "switched": None, "temperature_1_K": None},
                {"pulse_current_A": 2e-3, "switched": False, "temperature_1_K": None},
-               {"pulse_current_A": 3e-3, "switched": True, "temperature_1_K": None}]
+               {"pulse_current_A": 3e-3, "switched": True, "temperature_1_K": None},
+               {"pulse_current_A": -4e-3, "switched": True, "temperature_1_K": None}]
     extra = tui._run_extra(plan, 5.0, {"init_field_measured_mT": 12.5})
 
     h = tui.build_header_fields(plan, ctx, records, status="completed", comment="", extra=extra)
 
-    assert h["type"] == "NLSW" and h["I_switch_A"] == 3e-3
+    assert h["type"] == "NLSW" and h["I_switch_A"] == "0.003, -0.004"
     assert h["init_magnet_current_A"] == 5.0 and h["init_field_measured_mT"] == 12.5
     assert h["sweep_magnet_current_A"] == 0.0 and h["pulse_width_s"] == 1e-3
     assert tui.build_header_fields(plan, ctx, records[:2], status="in_progress",
@@ -208,9 +224,9 @@ def test_run_screen_saves_one_run_per_initial_state(tmp_path, monkeypatch):
     import pandas as pd
     from textual.app import App
     from textual.screen import Screen
-    from test_nonlocal_switching import _Fake6221, _FakeVoltmeter
+    from test_sot_nonlocal_switching import _Fake6221, _FakeVoltmeter
 
-    import sot.nonlocal_switching as ns
+    import sot.sot_nonlocal_switching as ns
     from instruments.data_naming import ensure_sample, read_raw
 
     src = _Fake6221(i_c=3e-3)

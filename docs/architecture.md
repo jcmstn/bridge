@@ -24,11 +24,12 @@ reference. This file is the map, not a second copy of them.
 |---------|-------|
 | `uv run python dc/dc_tui.py`   | DC suite picker (Hall, I–V, gate sweep, spin-valve) — Textual |
 | `uv run python mfli/mfli_tui.py` | MFLI suite picker (dual-harmonic, dual-harmonic w/ 6221 AC source, diff-resistance, phase calibration) — Textual |
+| `uv run python sot/sot_tui.py` | SOT suite picker (the three pulsed-switching programs + nonlocal switching, each with a wiring schematic) — Textual |
 | `uv run python sot/sot_pulsed_switching_tui.py` | SOT pulsed switching (4200A PMU pulse + delayed 6221/2182 R_xy) — Textual |
 | `uv run python sot/sot_pulsed_switching_2h_tui.py` | SOT pulsed switching, 2nd-harmonic read (4200A PMU pulse + delayed 6221 AC / MFLI 1f+2f) — Textual |
 | `uv run python sot/sot_pulsed_switching_6221_tui.py` | SOT pulsed switching, 6221-only — no 4200A (software-timed 6221 DC pulse + delayed 6221 AC / MFLI harmonic, harmonic is a parameter) — Textual |
-| `uv run python sot/nonlocal_switching_tui.py` | Nonlocal spin-current switching, 6221 + 2182A only (optional Kepco field initialization, then an ascending sweep of unipolar WAVE write pulses + DC reversal-averaged nonlocal read; type `NLSW`) — Textual. `sot/nonlocal_switching.py` also runs standalone (plain CSV) |
-| `uv run python web/app.py`     | Browser front end, same 7 measurements — NiceGUI, `http://localhost:8080` |
+| `uv run python sot/sot_nonlocal_switching_tui.py` | Nonlocal spin-current switching, 6221 + 2182A only (optional Kepco field initialization, then a sweep of single-lobe 0 → ±I → 0 WAVE write pulses + DC reversal-averaged nonlocal read; type `NLSW`) — Textual, also a web page. `sot/sot_nonlocal_switching.py` also runs standalone (plain CSV) |
+| `uv run python web/app.py`     | Browser front end — the DC and MFLI measurements plus the SOT nonlocal-switching page — NiceGUI, `http://localhost:8080` |
 | `uv run python tools/curate_sample.py <sample>` | Post-hoc curation TUI: mark runs `paper_include` / `figure_ref` |
 
 Each measurement's `*_tui.py` is also runnable on its own
@@ -280,11 +281,11 @@ The NiceGUI front end adds infrastructure the standalone scripts don't need:
 
 | Module | Role |
 |--------|------|
-| `web/app.py` | entrypoint; registers all 7 pages; `reload=False` on purpose (a file-watch restart would drop the run lock + live instrument connections mid-measurement) |
+| `web/app.py` | entrypoint; registers every page (DC, MFLI, SOT nonlocal switching); `reload=False` on purpose (a file-watch restart would drop the run lock + live instrument connections mid-measurement) |
 | `web/run_manager.py` | **global** run lock (`RunHandle`) — only one measurement app-wide, because the magnet / gaussmeter / iTC are the same physical instruments shared by both suites. Also buffers live records/log so a fresh page load can repaint an in-progress run and abort it. |
 | `web/run_index.py` | SQLite run history at a **fixed** path (`<repo>/../data/runs.db`), deliberately independent of any run's chosen data root, so history is always findable. Short-lived connection per statement; WAL mode. |
 | `web/run_controller.py` | the shared page engine: form → parsed state → config dataclasses → background thread runs `run_measurement()` with `stop_event`/`on_point` → live updates over one `queue.Queue` drained per `ui.timer` tick. Each page supplies only the page-specific callables. |
-| `web/identity_bar.py` | the sample / device / cooldown / temperature-setpoint / data-root fields + filename preview, built once, used by all 7 pages |
+| `web/identity_bar.py` | the sample / device / cooldown / temperature-setpoint / data-root fields + filename preview, built once, used by every page |
 | `web/directory_picker.py` | server-side local-filesystem directory browser (safe: localhost-only, no auth) |
 | `web/sample_picker.py` | NiceGUI sample picker + "+ New sample" + post-run status/comment dialogs |
 
@@ -363,7 +364,11 @@ units sub-header row as data. Use `read_raw()`.
    `compute_filename_preview`, `{NAME}_DESCRIPTION`, and the Textual `App`.
 5. **`{suite}/{suite}_tui.py`** — register the new `App` + its schematic in
    the suite picker.
-6. **`web/{suite}/{name}.py`** — import the pure names from step 4; supply
+6. **`web/{suite}/{name}.py`** — name it so its basename matches NO module in the
+   top-level `{suite}/` package: `python web/app.py` puts `web/` first on
+   `sys.path`, so `web/sot/foo.py` shadows `sot/foo.py` (circular import). The
+   convention `{suite}/{suite}_{name}.py` ↔ `web/{suite}/{name}.py` avoids it.
+   Import the pure names from step 4; supply
    the page-specific callables to `RunController`. Build the layout with
    `measurement_layout()` from `web/run_controller.py`: identity bar into
    `regions.identity`, the param/stable grids into `regions.params`,

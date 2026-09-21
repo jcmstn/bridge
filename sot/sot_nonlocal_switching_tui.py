@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-Textual TUI for sot/nonlocal_switching.py
+Textual TUI for sot/sot_nonlocal_switching.py
 =========================================
 Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
 Created: 2026-09-21
 
 Nonlocal spin-current switching with only a Keithley 6221 and 2182A: an
 optional external-field initialization (Kepco magnet + Lake Shore 475; one
-run per initial-state current), then an ascending sweep of UNIPOLAR
-0 → +I → 0 injector pulses (6221 WAVE square, one cycle), each followed by a
-DC current-reversal nonlocal read on the 2182A. Type NLSW. See
-sot/nonlocal_switching.py's module docstring — wiring, protocol, the
+run per initial-state current), then a sweep of injector pulses — each ONE
+lobe 0 → ±I → 0 (6221 WAVE square, one cycle, never a ± pair) — every one
+followed by a DC current-reversal nonlocal read on the 2182A. Type NLSW. See
+sot/sot_nonlocal_switching.py's module docstring — wiring, protocol, the
 literature this is modelled on and the artifact checklist — before running
 this on a real device.
 
-Run:  uv run python sot/nonlocal_switching_tui.py
+Run:  uv run python sot/sot_nonlocal_switching_tui.py
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ import textwrap
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from rich.text import Text
 
@@ -41,7 +41,7 @@ from textual.widgets import (
     ProgressBar, RichLog, Select, Static, Switch,
 )
 
-from sot.nonlocal_switching import (
+from sot.sot_nonlocal_switching import (
     _READ_COMPLIANCE_CEILING_V,
     _READ_CURRENT_CEILING_A,
     _WRITE_CURRENT_HARD_MAX_A,
@@ -61,13 +61,13 @@ from sot.nonlocal_switching import (
     connect_magnet,
     connect_temperature_controller,
     connect_voltmeter,
-    first_switch_current_A,
     initialize_with_field,
     run_measurement,
     shutdown_gaussmeter,
     shutdown_magnet,
     shutdown_source,
     shutdown_temperature_controller,
+    switch_currents_A,
 )
 from dc.dc_sweep_utils import linear_sweep, parse_value_list, safe_shutdown
 from instruments.data_dir import DataDirPickerScreen, validate_directory
@@ -90,10 +90,10 @@ from instruments.tui_sample_picker import (
     sample_options,
 )
 
-log = logging.getLogger("nonlocal_switching_tui")
+log = logging.getLogger("sot_nonlocal_switching_tui")
 
 _DEFAULT_DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
-SETTINGS_PATH = _DEFAULT_DATA_DIR / "nonlocal_switching_tui_settings.json"
+SETTINGS_PATH = _DEFAULT_DATA_DIR / "sot_nonlocal_switching_tui_settings.json"
 
 MEASUREMENT_TYPE = "NLSW"
 
@@ -101,18 +101,19 @@ NLSW_DESCRIPTION = (
     "Nonlocal spin-current switching, Keithley 6221 + 2182A only, modelled on the "
     "Kimura/Otani experiments with a DC read. Optionally initialize the magnet with an "
     "external field first (Kepco; one run per initial-state current). Then, per amplitude, "
-    "the 6221 fires ONE unipolar hardware-timed pulse through the injector (WAVE square, "
-    "one cycle: 0 → +I → 0, no negative lobe — negative currents are refused), waits, and "
+    "the 6221 fires ONE hardware-timed pulse through the injector (WAVE square, one cycle: "
+    "0 → +I → 0 or 0 → −I → 0 — a single lobe of either sign, never a ± pair), waits, and "
     "reads the nonlocal resistance across detector magnet / reference electrode with a small "
-    "DC ±I_sense current-reversal average on the 2182A. Amplitudes ascend; a step in R_NL "
-    "that stays is the switching current. V_even tracks Joule heating / thermal EMF. With "
-    "unipolar pulses only one initial state can switch — run the opposite initial state as "
-    "the control. Wiring: 6221 HI → injector, OUTPUT LOW (floating) → return electrode "
-    "away from the detector, 2182A ch1 → detector magnet / reference electrode past it."
+    "DC ±I_sense current-reversal average on the 2182A. A step in R_NL that stays is a "
+    "switching event (V_even tracks Joule heating / thermal EMF). Sweep one polarity upward "
+    "from a field-initialized state — then only one initial state can switch, so run the "
+    "opposite one as the control — or sweep −I → +I → −I for a hysteresis loop. "
+    "Wiring: 6221 HI → injector, OUTPUT LOW (floating) → return electrode away from the "
+    "detector, 2182A ch1 → detector magnet / reference electrode past it."
 )
 
 DEFAULTS: dict = {
-    # write pulse (6221 WAVE, unipolar)
+    # write pulse (6221 WAVE, one lobe 0 → ±I → 0)
     "pulse_current_start_A": "1e-3",
     "pulse_current_stop_A": "10e-3",
     "pulse_current_step_A": "0.5e-3",
@@ -195,21 +196,18 @@ def parse_sensor_uids(raw: str) -> tuple:
 
 def _resolve_pulse_currents(state: dict) -> tuple[list[float], Optional[str]]:
     """(list, None) or ([], error) — the pulse-current sweep from start/stop/
-    step (+ the bidirectional toggle). Pulses are unipolar 0 → +I → 0, so every
-    amplitude must be > 0. Shared by parse_state and the tests."""
+    step (+ the bidirectional toggle). Each amplitude is one lobe 0 → ±I → 0, so
+    either sign is fine (a sweep through 0 gets one read-only 0 A point). Shared
+    by parse_state and the tests."""
     try:
         if state["pulse_current_start_A"] == state["pulse_current_stop_A"]:
             raise ValueError("Pulse current start and stop must differ.")
-        amps = [float(v) for v in linear_sweep(
+        return [float(v) for v in linear_sweep(
             state["pulse_current_start_A"], state["pulse_current_stop_A"],
             state["pulse_current_step_A"],
-            bidirectional=state["amplitude_bidirectional"])]
+            bidirectional=state["amplitude_bidirectional"])], None
     except ValueError as exc:
         return [], str(exc)
-    if any(a <= 0 for a in amps):
-        return [], ("Pulses are unipolar (0 → +I → 0): every amplitude must be > 0 A. "
-                    "Re-initialize with the field instead of resetting with a pulse.")
-    return amps, None
 
 
 def _resolve_init_currents(state: dict) -> tuple[list[Optional[float]], Optional[str]]:
@@ -222,6 +220,15 @@ def _resolve_init_currents(state: dict) -> tuple[list[Optional[float]], Optional
         return list(parse_value_list(state["init_magnet_currents"])), None
     except ValueError as exc:
         return [], str(exc)
+
+
+def resolve_state(state: dict) -> dict:
+    """Add the derived keys build_summary() reads — the pulse-current sweep and
+    the init-current list, each with its parse error — to a state built from the
+    raw field values. Shared by the TUI's and the web page's parse_state()."""
+    state["pulse_current_list"], state["pulse_current_parse_error"] = _resolve_pulse_currents(state)
+    state["init_currents_A"], state["init_currents_parse_error"] = _resolve_init_currents(state)
+    return state
 
 
 # ── formatting helpers (per-TUI copies) ─────────────────────────────────────
@@ -291,7 +298,6 @@ def build_header_fields(plan: "MeasurementPlan", ctx: RunContext, records: list[
     """`extra` carries this run's own init current / measured init field on top
     of the plan-wide header_extra — allocate_run() is called fresh per run."""
     measured = [r["temperature_1_K"] for r in records if r.get("temperature_1_K") is not None]
-    switch_A = first_switch_current_A(records)
     fields = {
         "run": ctx.run_number,
         "timestamp": ctx.timestamp.isoformat(timespec="seconds"),
@@ -304,7 +310,7 @@ def build_header_fields(plan: "MeasurementPlan", ctx: RunContext, records: list[
         "status": status,
         "comment": comment,
         "series": plan.series,
-        "I_switch_A": "" if switch_A is None else switch_A,
+        "I_switch_A": ", ".join(f"{i:.6g}" for i in switch_currents_A(records)),
     }
     fields.update(plan.header_extra)
     if extra:
@@ -367,21 +373,30 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     if state.get("pulse_current_parse_error"):
         errors.append(f"Pulse currents: {state['pulse_current_parse_error']}")
     else:
-        over = [a for a in amps if a > _WRITE_CURRENT_HARD_MAX_A]
+        over = [a for a in amps if abs(a) > _WRITE_CURRENT_HARD_MAX_A]
         if over:
             errors.append(f"Pulse current(s) {over} A exceed the 6221's hardware range "
-                          f"{_WRITE_CURRENT_HARD_MAX_A:g} A.")
-        back = ", then back down (no reset pulses exist — R_NL must stay put)" \
-            if state["amplitude_bidirectional"] else ""
-        info.append(f"Pulse sweep: {len(amps)} unipolar pulses "
+                          f"±{_WRITE_CURRENT_HARD_MAX_A:g} A.")
+        one_sign = all(a >= 0 for a in amps) or all(a <= 0 for a in amps)
+        if not state["amplitude_bidirectional"]:
+            back = ""
+        elif one_sign:
+            back = ", then back — same polarity, so no reset: R_NL must stay put"
+        else:
+            back = ", and back (hysteresis loop)"
+        info.append(f"Pulse sweep: {len(amps)} single-lobe pulses "
                     f"{format_si(state['pulse_current_start_A'], 'A')} → "
                     f"{format_si(state['pulse_current_stop_A'], 'A')} step "
                     f"{format_si(state['pulse_current_step_A'], 'A')}{back}")
+        n_zero = sum(abs(a) <= 1e-9 for a in amps)
+        if n_zero:
+            info.append(f"{n_zero} of the amplitudes is 0 A — a read-only point, no pulse fired.")
     if state["pulse_width_s"] <= 0:
         errors.append("Pulse width must be > 0 s.")
     if state["pulse_compliance_V"] <= 0:
         errors.append("Pulse compliance must be > 0 V.")
-    info.append("Hardware-timed write pulse (WAVE square, one cycle, 0 → +I → 0) — the true floor "
+    info.append("Hardware-timed write pulse (WAVE square, one cycle, 0 → ±I → 0: one lobe, never a "
+                "± pair; a negative one arrives one pulse width late) — the true floor "
                 "is range/load-dependent. Joule heating scales as I²R·t: start well below the "
                 "expected switching current, and keep compliance above I_max × R_injector or the "
                 "6221 clips silently.")
@@ -394,8 +409,9 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         errors.append(f"Sense current {sense:g} A exceeds the "
                       f"{format_si(_READ_CURRENT_CEILING_A, 'A')} safety ceiling — the nonlocal "
                       "read needs µA–mA; check for a mistyped exponent.")
-    if amps and not state.get("pulse_current_parse_error") and sense > 0:
-        smallest = min(amps)
+    nonzero = [abs(a) for a in amps if abs(a) > 1e-9]
+    if nonzero and not state.get("pulse_current_parse_error") and sense > 0:
+        smallest = min(nonzero)
         if sense >= smallest:
             errors.append(f"Sense current {sense:g} A must be below the smallest pulse "
                           f"({smallest:g} A) — the read itself would switch the magnet.")
@@ -453,8 +469,8 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
                         f"{cur_str} A, then {state['sweep_magnet_current_A']:g} A held for the "
                         "sweep (field measured by the 475). Each gets its own complete sweep "
                         "and file.")
-            if len(real) == 1:
-                info.append("With unipolar pulses only one initial state can switch — add the "
+            if len(real) == 1 and amps and (all(a >= 0 for a in amps) or all(a <= 0 for a in amps)):
+                info.append("With one pulse polarity only one initial state can switch — add the "
                             "opposite sign (e.g. '5, -5') for the control run.")
 
     # size / time
@@ -589,9 +605,9 @@ def _save_measurement_png(records: list[dict], png_path: Path, comment: str = ""
     sense = sorted({r["sense_current_A"] for r in records if r.get("sense_current_A") is not None})
     if len(sense) == 1:
         lines.append(f"Sense current: {format_si(sense[0], 'A')}")
-    switch_A = first_switch_current_A(records)
-    lines.append(f"Switching current: {format_si(switch_A, 'A')}" if switch_A is not None
-                 else "No switching detected")
+    switched = switch_currents_A(records)
+    lines.append("Switching current(s): " + ", ".join(format_si(i, "A") for i in switched)
+                 if switched else "No switching detected")
     if comment:
         lines.append(f"Comment: {textwrap.shorten(comment, width=90, placeholder='…')}")
     fig.text(0.01, 0.01, "\n".join(lines), fontsize=7, color="0.4", va="bottom")
@@ -617,6 +633,191 @@ class _LogRelay(logging.Handler):
             self.screen.app.call_from_thread(self.screen.write_log, msg, style)
         except Exception:
             pass
+
+
+def build_plan(state: dict, data_root: Path) -> MeasurementPlan:
+    """One parsed, validated run request from a state dict (see resolve_state()).
+    Pure — shared by the TUI and the web page."""
+    pulse_cfg = WritePulseConfig(
+        width_s=state["pulse_width_s"], compliance_V=state["pulse_compliance_V"])
+    read_cfg = ReadConfig(
+        sense_current_A=state["sense_current_A"], compliance_V=state["compliance_V"],
+        n_reversals=state["n_reversals"], source_delay_s=state["source_delay_s"],
+        delay_after_pulse_s=state["delay_after_pulse_s"], switch_sigma=state["switch_sigma"],
+        R_P_ohm=state["R_P_ohm"], R_AP_ohm=state["R_AP_ohm"])
+    volt_cfg = VoltmeterConfig(
+        visa_resource=state["voltmeter_visa_resource"], nplc=state["nplc"], auto_range=True)
+    magnet_cfg = MagnetConfig(
+        visa_resource=state["magnet_visa_resource"], current_limit_A=state["current_limit_A"],
+        voltage_compliance_V=state["magnet_voltage_compliance_V"],
+        ramp_step_A=state["ramp_step_A"], ramp_delay_s=state["ramp_delay_s"])
+    gauss_cfg = GaussmeterConfig(
+        visa_resource=state["gaussmeter_visa_resource"], unit="T",
+        n_averages=state["gaussmeter_n_averages"], read_delay_s=state["gaussmeter_read_delay_s"])
+
+    temp_cfg = None
+    if state["enable_temperature"]:
+        uids = parse_sensor_uids(state["temperature_sensor_uids"])
+        if uids:
+            temp_cfg = TemperatureControllerConfig(
+                visa_resource=state["temperature_visa_resource"], sensor_uids=uids)
+
+    header_extra = {
+        "pulse_current_start_A": state["pulse_current_start_A"],
+        "pulse_current_stop_A": state["pulse_current_stop_A"],
+        "pulse_current_step_A": state["pulse_current_step_A"],
+        "amplitude_bidirectional": state["amplitude_bidirectional"],
+        "pulse_currents_A": state["pulse_current_list"],
+        "pulse_width_s": state["pulse_width_s"],
+        "pulse_compliance_V": state["pulse_compliance_V"],
+        "delay_after_pulse_s": state["delay_after_pulse_s"],
+        "sense_current_A": state["sense_current_A"],
+        "n_reversals": state["n_reversals"],
+        "source_delay_s": state["source_delay_s"],
+        "nplc": state["nplc"],
+        "switch_sigma": state["switch_sigma"],
+        "R_P_ohm": state["R_P_ohm"],
+        "R_AP_ohm": state["R_AP_ohm"],
+    }
+    return MeasurementPlan(
+        pulse_cfg=pulse_cfg, read_cfg=read_cfg, source_visa=state["source_visa_resource"],
+        volt_cfg=volt_cfg, magnet_cfg=magnet_cfg, gauss_cfg=gauss_cfg,
+        pulse_currents_A=state["pulse_current_list"], init_currents_A=state["init_currents_A"],
+        sweep_magnet_current_A=state["sweep_magnet_current_A"],
+        field_settle_tolerance_mT=state["field_settle_tolerance_mT"],
+        data_root=data_root,
+        sample=state["sample"], device=state["device"],
+        temperature_setpoint_K=state["temperature_setpoint_K"],
+        cooldown=state["cooldown"], header_extra=header_extra, series="",
+        temp_cfg=temp_cfg,
+    )
+
+
+def _ignore(*_args) -> None:
+    pass
+
+
+def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
+             on_status: Callable[[str], None] = _ignore,
+             on_run_label: Callable[[str], None] = _ignore,
+             on_point: Callable[[dict], None] = _ignore,
+             on_run_finished: Optional[Callable[[RunContext, list], None]] = None,
+             run_contexts: Optional[list] = None,
+             run_extras: Optional[list] = None) -> None:
+    """Connect, then per initial state (or once, if none): initialize the magnet
+    with the field, `allocate_run()` a fresh run, sweep, and finalize that run's
+    raw file + index row UNCONDITIONALLY before moving on; always shut the
+    instruments down. Shared by the TUI's RunScreen and the web page — each
+    passes its own callbacks. `on_point` gets each record already tagged with
+    series_index / series_label / init_magnet_current_A; `on_run_finished(ctx,
+    records)` is where a caller saves its per-run PNG; `run_contexts` /
+    `run_extras` (if given) collect each run's RunContext and header extras for
+    the caller's end-of-session status/comment step. A failed run is finalized
+    with status "error", then its exception is re-raised."""
+    run_contexts = [] if run_contexts is None else run_contexts
+    run_extras = [] if run_extras is None else run_extras
+    source = magnet = gaussmeter = temp_ctrl = None
+    try:
+        points = [PulsePoint(pulse_current_A=float(v)) for v in plan.pulse_currents_A]
+        # Checked before any hardware is touched (connect() leaves the 6221 live).
+        _check_write_safety(plan.pulse_cfg)
+        _check_pulse_currents(points)
+        _check_read_safety(plan.read_cfg, points)
+
+        on_status("Connecting to Keithley 6221 + 2182A …")
+        source = connect(plan.source_visa, plan.read_cfg.compliance_V,
+                         plan.read_cfg.source_delay_s)
+        source.output_low_grounded = False     # the return goes through its own electrode
+        _output_off(source)                    # channel quiet until the first pulse
+        voltmeter = connect_voltmeter(plan.volt_cfg)
+
+        if plan.uses_magnet:
+            on_status("Connecting to Kepco magnet + Lake Shore 475 …")
+            magnet = connect_magnet(plan.magnet_cfg)
+            gaussmeter = connect_gaussmeter(plan.gauss_cfg)
+
+        if plan.temp_cfg is not None:
+            on_status("Connecting to MercuryiTC …")
+            temp_ctrl = connect_temperature_controller(plan.temp_cfg)
+
+        for series_idx, init_A in enumerate(plan.series_values):
+            if stop_event.is_set():
+                break
+
+            init_info: dict = {}
+            if init_A is not None:
+                on_status(f"Initializing: magnet → {init_A:g} A, then "
+                          f"{plan.sweep_magnet_current_A:g} A …")
+                init_info = initialize_with_field(
+                    magnet, plan.magnet_cfg, gaussmeter, plan.gauss_cfg, init_A,
+                    plan.sweep_magnet_current_A, plan.field_settle_tolerance_mT, stop_event)
+                if stop_event.is_set():
+                    break
+
+            label = f"I_init={init_A:g}A" if len(plan.init_currents_A) > 1 else None
+            # A fresh RunContext (own run number, own file) EVERY iteration.
+            ctx = allocate_run(
+                plan.data_root, plan.sample, plan.device, MEASUREMENT_TYPE,
+                temperature_setpoint_K=plan.temperature_setpoint_K,
+                key_axis=("current_A", init_A) if init_A is not None else None,
+                series=plan.series)
+            extra = _run_extra(plan, init_A, init_info)
+            run_contexts.append(ctx)
+            run_extras.append(extra)
+            on_run_label(f"Run #{ctx.run_str}")
+            write_csv = make_incremental_writer(
+                ctx.raw_path,
+                lambda records, _ctx=ctx, _x=extra: build_header_fields(
+                    plan, _ctx, records, status="in_progress", comment="", extra=_x))
+
+            iter_records: list[dict] = []
+
+            def tagged_on_point(record: dict, _idx=series_idx, _label=label, _init=init_A,
+                                _iter=iter_records) -> None:
+                record["series_index"] = _idx
+                record["series_label"] = _label
+                record["init_magnet_current_A"] = _init
+                _iter.append(record)
+                on_point(record)
+
+            on_status("Running the switching sweep …" if label is None
+                      else f"Running the switching sweep ({label}) …")
+            iter_error: Optional[BaseException] = None
+            try:
+                run_measurement(
+                    source, voltmeter, plan.pulse_cfg, plan.read_cfg, points,
+                    stop_event=stop_event, on_point=tagged_on_point,
+                    gaussmeter=gaussmeter, gauss_cfg=plan.gauss_cfg,
+                    temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg,
+                    magnet_current_A=plan.sweep_magnet_current_A if init_A is not None else None,
+                    write_csv=write_csv, output_file=str(ctx.raw_path))
+            except Exception as exc:
+                iter_error = exc
+
+            # Finalize THIS run's header/index row right now — never gated on
+            # the end-of-session status/comment prompt.
+            iter_status = "error" if iter_error is not None \
+                else ("aborted" if stop_event.is_set() else "completed")
+            header_fields = build_header_fields(
+                plan, ctx, iter_records, status=iter_status, comment="", extra=extra)
+            write_record(ctx.raw_path, iter_records, header_fields)
+            finalize_index_row(plan.data_root, ctx.sample, ctx.run_number, header_fields)
+            if on_run_finished is not None:
+                try:
+                    on_run_finished(ctx, iter_records)
+                except Exception:
+                    log.exception("Could not save the per-run plot for run %s", ctx.run_str)
+            if iter_error is not None:
+                raise iter_error
+    finally:
+        if source is not None:
+            safe_shutdown("6221", lambda: shutdown_source(source))
+        if magnet is not None:
+            safe_shutdown("magnet", lambda: shutdown_magnet(magnet, plan.magnet_cfg))
+        if gaussmeter is not None:
+            safe_shutdown("gaussmeter", lambda: shutdown_gaussmeter(gaussmeter))
+        if temp_ctrl is not None:
+            safe_shutdown("MercuryiTC", lambda: shutdown_temperature_controller(temp_ctrl))
 
 
 # ── run screen ─────────────────────────────────────────────────────────────
@@ -727,15 +928,6 @@ class RunScreen(Screen):
         self.query_one("#progress", ProgressBar).advance(1)
         self._set_status(f"Point {len(self._records)} / {self.plan.total_points}.")
 
-    def _make_on_point(self, series_index: int, series_label: Optional[str],
-                       init_A: Optional[float]):
-        def _cb(record: dict) -> None:
-            record["series_index"] = series_index
-            record["series_label"] = series_label
-            record["init_magnet_current_A"] = init_A
-            self.app.call_from_thread(self._on_point, record)
-        return _cb
-
     def _save_run_png(self, ctx: RunContext, iter_records: list[dict]) -> None:
         """One PNG per run (own run number), as if each initial state had been
         started by hand -- no combined overlay."""
@@ -801,101 +993,18 @@ class RunScreen(Screen):
 
     @work(thread=True, exclusive=True)
     def do_run(self) -> None:
-        plan = self.plan
-        source = magnet = gaussmeter = temp_ctrl = None
         try:
-            points = [PulsePoint(pulse_current_A=float(v)) for v in plan.pulse_currents_A]
-            # Checked before any hardware is touched (connect() leaves the 6221 live).
-            _check_write_safety(plan.pulse_cfg)
-            _check_pulse_currents(points)
-            _check_read_safety(plan.read_cfg, points)
-
-            self._set_status_threadsafe("Connecting to Keithley 6221 + 2182A …")
-            source = connect(plan.source_visa, plan.read_cfg.compliance_V,
-                             plan.read_cfg.source_delay_s)
-            source.output_low_grounded = False     # the return goes through its own electrode
-            _output_off(source)                    # channel quiet until the first pulse
-            voltmeter = connect_voltmeter(plan.volt_cfg)
-
-            if plan.uses_magnet:
-                self._set_status_threadsafe("Connecting to Kepco magnet + Lake Shore 475 …")
-                magnet = connect_magnet(plan.magnet_cfg)
-                gaussmeter = connect_gaussmeter(plan.gauss_cfg)
-
-            if plan.temp_cfg is not None:
-                self._set_status_threadsafe("Connecting to MercuryiTC …")
-                temp_ctrl = connect_temperature_controller(plan.temp_cfg)
-
-            for series_idx, init_A in enumerate(plan.series_values):
-                if self._stop_event.is_set():
-                    break
-
-                init_info: dict = {}
-                if init_A is not None:
-                    self._set_status_threadsafe(
-                        f"Initializing: magnet → {init_A:g} A, then {plan.sweep_magnet_current_A:g} A …")
-                    init_info = initialize_with_field(
-                        magnet, plan.magnet_cfg, gaussmeter, plan.gauss_cfg, init_A,
-                        plan.sweep_magnet_current_A, plan.field_settle_tolerance_mT,
-                        self._stop_event)
-                    if self._stop_event.is_set():
-                        break
-
-                label = f"I_init={init_A:g}A" if len(plan.init_currents_A) > 1 else None
-                ctx = allocate_run(
-                    plan.data_root, plan.sample, plan.device, MEASUREMENT_TYPE,
-                    temperature_setpoint_K=plan.temperature_setpoint_K,
-                    key_axis=("current_A", init_A) if init_A is not None else None,
-                    series=plan.series)
-                extra = _run_extra(plan, init_A, init_info)
-                self._run_contexts.append(ctx)
-                self._run_extras.append(extra)
-                self._set_run_label_threadsafe(f"Run #{ctx.run_str}")
-                write_csv = make_incremental_writer(
-                    ctx.raw_path,
-                    lambda records, _ctx=ctx, _x=extra: build_header_fields(
-                        plan, _ctx, records, status="in_progress", comment="", extra=_x))
-
-                self._set_status_threadsafe(
-                    "Running the switching sweep …" if label is None
-                    else f"Running the switching sweep ({label}) …")
-                iter_error: Optional[BaseException] = None
-                try:
-                    run_measurement(
-                        source, voltmeter, plan.pulse_cfg, plan.read_cfg, points,
-                        stop_event=self._stop_event,
-                        on_point=self._make_on_point(series_idx, label, init_A),
-                        gaussmeter=gaussmeter, gauss_cfg=plan.gauss_cfg,
-                        temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg,
-                        magnet_current_A=plan.sweep_magnet_current_A if init_A is not None else None,
-                        write_csv=write_csv, output_file=str(ctx.raw_path))
-                except Exception as exc:
-                    iter_error = exc
-
-                iter_status = "error" if iter_error is not None \
-                    else ("aborted" if self._stop_event.is_set() else "completed")
-                iter_records = [r for r in self._records if r.get("series_index", 0) == series_idx]
-                header_fields = build_header_fields(
-                    plan, ctx, iter_records, status=iter_status, comment="", extra=extra)
-                write_record(ctx.raw_path, iter_records, header_fields)
-                finalize_index_row(plan.data_root, ctx.sample, ctx.run_number, header_fields)
-                self._save_run_png(ctx, iter_records)
-                if iter_error is not None:
-                    raise iter_error
-
+            run_plan(self.plan, self._stop_event,
+                     on_status=self._set_status_threadsafe,
+                     on_run_label=self._set_run_label_threadsafe,
+                     on_point=lambda record: self.app.call_from_thread(self._on_point, record),
+                     on_run_finished=self._save_run_png,
+                     run_contexts=self._run_contexts, run_extras=self._run_extras)
             final = "Measurement aborted." if self._stop_event.is_set() else "Measurement complete."
         except Exception as exc:
             log.exception("Measurement failed")
             final = f"ERROR: {exc}"
         finally:
-            if source is not None:
-                safe_shutdown("6221", lambda: shutdown_source(source))
-            if magnet is not None:
-                safe_shutdown("magnet", lambda: shutdown_magnet(magnet, plan.magnet_cfg))
-            if gaussmeter is not None:
-                safe_shutdown("gaussmeter", lambda: shutdown_gaussmeter(gaussmeter))
-            if temp_ctrl is not None:
-                safe_shutdown("MercuryiTC", lambda: shutdown_temperature_controller(temp_ctrl))
             self.app.call_from_thread(self._on_finished, final)
 
 
@@ -903,7 +1012,7 @@ class RunScreen(Screen):
 
 class NonlocalSwitchingApp(App):
     TITLE = "Nonlocal spin-current switching"
-    SUB_TITLE = "6221 unipolar pulse · DC reversal nonlocal read (2182A) · field-initialized"
+    SUB_TITLE = "6221 single-lobe pulse · DC reversal nonlocal read (2182A) · field-initialized"
 
     data_root: Path = _DEFAULT_DATA_DIR
 
@@ -971,19 +1080,19 @@ class NonlocalSwitchingApp(App):
 
                 with Vertical(classes="param-grid"):
                     yield card(
-                        "Write pulse (6221 WAVE, unipolar 0 → +I → 0)",
+                        "Write pulse (6221 WAVE, one lobe 0 → ±I → 0)",
                         field("pulse_current_start_A", "Pulse current start (A)",
                               DEFAULTS["pulse_current_start_A"],
-                              validators=[Number(minimum=1e-12, failure_description="must be > 0")]),
+                              hint="Signed: negative = a −I lobe (never a ± pair)."),
                         field("pulse_current_stop_A", "Pulse current stop (A)",
-                              DEFAULTS["pulse_current_stop_A"],
-                              validators=[Number(minimum=1e-12, failure_description="must be > 0")]),
+                              DEFAULTS["pulse_current_stop_A"]),
                         field("pulse_current_step_A", "Pulse current step (A)",
                               DEFAULTS["pulse_current_step_A"],
                               validators=[Number(minimum=1e-12, failure_description="must be > 0")],
-                              hint="One pulse per step, positive only."),
+                              hint="One pulse per step. A sweep through 0 gets one read-only "
+                                   "0 A point."),
                         switch_field("amplitude_bidirectional",
-                                     "Then sweep back down (no-reset control)",
+                                     "Then sweep back (loop / no-reset control)",
                                      DEFAULTS["amplitude_bidirectional"]),
                         field("pulse_width_s", "Requested pulse width (s)",
                               DEFAULTS["pulse_width_s"],
@@ -1018,7 +1127,7 @@ class NonlocalSwitchingApp(App):
                               DEFAULTS["init_magnet_currents"], kind="text",
                               hint="Blank = magnet untouched (initialize externally). One value, or "
                                    "comma-separated — each is its own initial state, sweep and "
-                                   "file. With unipolar pulses use both signs, e.g. 5, -5."),
+                                   "file. With one pulse polarity use both signs, e.g. 5, -5."),
                         field("sweep_magnet_current_A", "Magnet current during the sweep (A)",
                               DEFAULTS["sweep_magnet_current_A"],
                               hint="0 = field off after initializing; the sweep starts from the "
@@ -1201,11 +1310,7 @@ class NonlocalSwitchingApp(App):
         sample_value = self.query_one("#sample_select", Select).value
         state["sample"] = sample_value if sample_value not in (None, Select.BLANK) else ""
 
-        state["pulse_current_list"], state["pulse_current_parse_error"] = \
-            _resolve_pulse_currents(state)
-        state["init_currents_A"], state["init_currents_parse_error"] = \
-            _resolve_init_currents(state)
-        return state, errors
+        return resolve_state(state), errors
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "data_dir":
@@ -1266,59 +1371,7 @@ class NonlocalSwitchingApp(App):
             self._browse_data_dir()
 
     def _build_plan(self, state: dict) -> MeasurementPlan:
-        pulse_cfg = WritePulseConfig(
-            width_s=state["pulse_width_s"], compliance_V=state["pulse_compliance_V"])
-        read_cfg = ReadConfig(
-            sense_current_A=state["sense_current_A"], compliance_V=state["compliance_V"],
-            n_reversals=state["n_reversals"], source_delay_s=state["source_delay_s"],
-            delay_after_pulse_s=state["delay_after_pulse_s"], switch_sigma=state["switch_sigma"],
-            R_P_ohm=state["R_P_ohm"], R_AP_ohm=state["R_AP_ohm"])
-        volt_cfg = VoltmeterConfig(
-            visa_resource=state["voltmeter_visa_resource"], nplc=state["nplc"], auto_range=True)
-        magnet_cfg = MagnetConfig(
-            visa_resource=state["magnet_visa_resource"], current_limit_A=state["current_limit_A"],
-            voltage_compliance_V=state["magnet_voltage_compliance_V"],
-            ramp_step_A=state["ramp_step_A"], ramp_delay_s=state["ramp_delay_s"])
-        gauss_cfg = GaussmeterConfig(
-            visa_resource=state["gaussmeter_visa_resource"], unit="T",
-            n_averages=state["gaussmeter_n_averages"], read_delay_s=state["gaussmeter_read_delay_s"])
-
-        temp_cfg = None
-        if state["enable_temperature"]:
-            uids = parse_sensor_uids(state["temperature_sensor_uids"])
-            if uids:
-                temp_cfg = TemperatureControllerConfig(
-                    visa_resource=state["temperature_visa_resource"], sensor_uids=uids)
-
-        header_extra = {
-            "pulse_current_start_A": state["pulse_current_start_A"],
-            "pulse_current_stop_A": state["pulse_current_stop_A"],
-            "pulse_current_step_A": state["pulse_current_step_A"],
-            "amplitude_bidirectional": state["amplitude_bidirectional"],
-            "pulse_currents_A": state["pulse_current_list"],
-            "pulse_width_s": state["pulse_width_s"],
-            "pulse_compliance_V": state["pulse_compliance_V"],
-            "delay_after_pulse_s": state["delay_after_pulse_s"],
-            "sense_current_A": state["sense_current_A"],
-            "n_reversals": state["n_reversals"],
-            "source_delay_s": state["source_delay_s"],
-            "nplc": state["nplc"],
-            "switch_sigma": state["switch_sigma"],
-            "R_P_ohm": state["R_P_ohm"],
-            "R_AP_ohm": state["R_AP_ohm"],
-        }
-        return MeasurementPlan(
-            pulse_cfg=pulse_cfg, read_cfg=read_cfg, source_visa=state["source_visa_resource"],
-            volt_cfg=volt_cfg, magnet_cfg=magnet_cfg, gauss_cfg=gauss_cfg,
-            pulse_currents_A=state["pulse_current_list"], init_currents_A=state["init_currents_A"],
-            sweep_magnet_current_A=state["sweep_magnet_current_A"],
-            field_settle_tolerance_mT=state["field_settle_tolerance_mT"],
-            data_root=self.data_root,
-            sample=state["sample"], device=state["device"],
-            temperature_setpoint_K=state["temperature_setpoint_K"],
-            cooldown=state["cooldown"], header_extra=header_extra, series="",
-            temp_cfg=temp_cfg,
-        )
+        return build_plan(state, self.data_root)
 
 
 def main() -> None:

@@ -19,11 +19,13 @@ Method
      state before the sweep (`initialize_with_field`: Kepco + Lake Shore 475;
      or do it by hand and skip it). One initial state per run.
   1. WRITE  — one hardware-timed 6221 WAVE-square pulse (`fire_wave_pulse`,
-     one cycle) through the injector: 0 -> +I -> 0, UNIPOLAR. offset =
-     amplitude = I/2, so the low level is exactly 0 A and the output turns off
-     after the cycle — there is no negative lobe, and negative pulse currents
-     are refused. Which way the pulse pushes the magnet is set by the wiring
-     and the initial state; the opposite initial state is the control.
+     one cycle) through the injector: 0 -> +I -> 0 or 0 -> -I -> 0 — ONE lobe
+     of the chosen polarity, never an opposite-polarity lobe after it. Positive:
+     offset = amplitude = I/2. Negative: offset = -|I|/2, so the wave swings
+     between -|I| and 0 (it never goes positive) with the 0 A half first, i.e.
+     the lobe arrives one `width_s` after the start. The output turns off after
+     the cycle. The pulse sign is the sign of the injected spin accumulation:
+     it pushes the magnet toward P or toward AP.
   2. WAIT   — `delay_after_pulse_s` (Joule heat and Peltier/thermal EMFs
      decay, the 2182A recovers).
   3. READ   — the SAME injector pair, small DC +/-I_sense, current-reversal
@@ -36,7 +38,7 @@ Method
   initialization left. Each row carries R_NL, delta_R vs the previous row and
   `switched` (|delta_R| above `switch_sigma` x combined SEM — and, if
   `R_P_ohm`/`R_AP_ohm` are given, at least half the P<->AP swing).
-  `first_switch_current_A(records)` is the switching current of the sweep.
+  `switch_currents_A(records)` lists the signed pulse currents that switched.
 
 Wiring
 ------
@@ -54,18 +56,22 @@ Wiring
     (2182A ch2 is not used: its LO is bonded to ch1 LO, wrong for a nonlocal
     geometry where the detector pair shares no contact with the injector pair.)
 
-Protocols — `points` is a list of non-negative pulse currents
--------------------------------------------------------------
+Protocols — `points` is a list of signed pulse currents (one lobe each)
+------------------------------------------------------------------------
     linear_sweep(I0, I1, step, bidirectional=False)   the Kimura-style sweep:
         initialize, then ascending amplitudes; R_NL steps at the switching current
-    ... run once per initial state (e.g. field +B and -B): with unipolar pulses
-        only one initial state can switch — the other is the polarity control
-    bidirectional=True                                 then back down: no reset
-        pulses exist, so R_NL must stay put (nonvolatile, not thermal)
+    ... run once per initial state (e.g. field +B and -B): with ONE pulse
+        polarity only one initial state can switch — the other is the control
+    bidirectional=True on a one-polarity sweep         back down again: no reset
+        pulse exists, so R_NL must stay put (nonvolatile, not thermal)
+    linear_sweep(-I, +I, step, bidirectional=True)     self-resetting hysteresis
+        loop of R_NL vs pulse current (Kimura: different +/- switching currents)
+    [+I, -I] * N                                       toggle test: R_NL must
+        alternate between two levels following the pulse SIGN
     [+I, 0, 0, 0]                                      a 0 A point is a read-only
         point (no `delay_after_pulse_s`, back-to-back reads) -> relaxation after
         a pulse; the time axis is `elapsed_s` (end of each read, s since start)
-  Re-initialize with the field between sweeps; do not use pulses to reset.
+  A pulse is never a +/- pair: every point is a single 0 -> +/-I -> 0 lobe.
 
 How switching is verified in the literature
 -------------------------------------------
@@ -113,8 +119,9 @@ Bench-verify before trusting a run
 ----------------------------------
   * Plain :SOUR:CURR sourcing works right after WAVE abort (the manual's
     "+413 Not allowed with mode arm" is the failure to watch for).
-  * Scope: the pulse is 0 -> +I -> 0 with no negative undershoot, requested vs
-    delivered height for the first amplitudes. `pulse_width_measured_s` is only
+  * Scope: every pulse is a single lobe 0 -> +/-I -> 0 with no opposite-polarity
+    undershoot, and a negative pulse arrives one `width_s` after the start (0 A
+    half first); requested vs delivered height for the first amplitudes. `pulse_width_measured_s` is only
     an order-of-magnitude check (it includes GPIB polling and the full
     2*width wave period).
   * Requires: pymeasure, pyvisa, numpy, pandas, matplotlib.
@@ -182,8 +189,8 @@ _NO_PULSE_A = 1e-9                    # |I| below this is a read-only point (als
 
 @dataclass
 class WritePulseConfig:
-    """Timing/compliance of the write pulse (`fire_wave_pulse`); the
-    amplitude is per point (`PulsePoint.pulse_current_A`, >= 0)."""
+    """Timing/compliance of the write pulse (`fire_wave_pulse`); the signed
+    amplitude is per point (`PulsePoint.pulse_current_A`)."""
     width_s: float      = 1e-3    # requested pulse width [s] — Kimura/Otani use ~1 ms
     compliance_V: float = 5.0     # pulse voltage compliance [V]
 
@@ -203,7 +210,7 @@ class ReadConfig:
 
 @dataclass
 class PulsePoint:
-    pulse_current_A: float    # >= 0; 0 = read only, no pulse
+    pulse_current_A: float    # signed: one lobe 0 -> +/-I -> 0; 0 = read only, no pulse
 
 
 def _check_write_safety(pulse_cfg: WritePulseConfig) -> None:
@@ -216,17 +223,15 @@ def _check_write_safety(pulse_cfg: WritePulseConfig) -> None:
 
 
 def _check_pulse_currents(points: List[PulsePoint]) -> None:
-    """Refuse a pulse outside [0, 6221 range] (or NaN). Pulses are unipolar
-    0 -> +I -> 0 by design, so a negative current is a mistake, not a feature;
-    pymeasure also clips silently, which would hide a mistyped exponent. Zero is
-    allowed (read only)."""
+    """Refuse a pulse beyond the 6221's range (or NaN) — pymeasure clips
+    silently, which would hide a mistyped exponent. Either sign is fine (one
+    lobe 0 -> +/-I -> 0); zero is allowed (read only)."""
     bad = [pt.pulse_current_A for pt in points
-           if not 0 <= pt.pulse_current_A <= _WRITE_CURRENT_HARD_MAX_A]
+           if not abs(pt.pulse_current_A) <= _WRITE_CURRENT_HARD_MAX_A]
     if bad:
         raise ValueError(
-            f"Pulse current(s) {bad} A must be in [0, {_WRITE_CURRENT_HARD_MAX_A}] A — "
-            "pulses are unipolar (0 -> +I -> 0) and the 6221 range is "
-            f"{_WRITE_CURRENT_HARD_MAX_A} A (or the value is NaN).")
+            f"Pulse current(s) {bad} A exceed the 6221's hardware range "
+            f"±{_WRITE_CURRENT_HARD_MAX_A} A (or are NaN).")
 
 
 def _check_read_safety(read_cfg: ReadConfig, points: List[PulsePoint]) -> None:
@@ -245,7 +250,7 @@ def _check_read_safety(read_cfg: ReadConfig, points: List[PulsePoint]) -> None:
     r_p, r_ap = read_cfg.R_P_ohm, read_cfg.R_AP_ohm
     if (r_p is None) != (r_ap is None) or (r_p is not None and r_p == r_ap):
         raise ValueError("Give both R_P_ohm and R_AP_ohm (different), or neither.")
-    pulses = [pt.pulse_current_A for pt in points if pt.pulse_current_A > _NO_PULSE_A]
+    pulses = [abs(pt.pulse_current_A) for pt in points if abs(pt.pulse_current_A) > _NO_PULSE_A]
     if pulses and read_cfg.sense_current_A >= min(pulses):
         raise ValueError(
             f"sense_current_A ({read_cfg.sense_current_A} A) must be below the smallest "
@@ -276,11 +281,12 @@ def _ap_fraction(r: float, r_p: Optional[float], r_ap: Optional[float]) -> Optio
     return None if r_p is None else (r - r_p) / (r_ap - r_p)
 
 
-def first_switch_current_A(records: List[dict]) -> Optional[float]:
-    """Pulse current of the first row flagged `switched` — the switching current
-    of an ascending sweep. None if nothing switched."""
-    return next((r["pulse_current_A"] for r in records
-                 if r.get("switched") is True and r["pulse_current_A"] > 0), None)
+def switch_currents_A(records: List[dict]) -> List[float]:
+    """Signed pulse currents of the rows flagged `switched`, in run order — the
+    switching current of an ascending sweep, or +Ic and -Ic of a loop. Empty if
+    nothing switched."""
+    return [r["pulse_current_A"] for r in records
+            if r.get("switched") is True and r["pulse_current_A"] != 0]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -382,7 +388,7 @@ def run_measurement(
                 log.info("Aborted after %d / %d points.", len(records), len(plan))
                 break
 
-            fired = pt.pulse_current_A > _NO_PULSE_A
+            fired = abs(pt.pulse_current_A) > _NO_PULSE_A
             pinfo = None
             _output_off(source)
             if fired:
@@ -449,8 +455,8 @@ def run_measurement(
     finally:
         _output_off(source)
 
-    log.info("Done. %d rows → '%s'  (switching current: %s A)", len(records), output_file,
-             first_switch_current_A(records))
+    log.info("Done. %d rows → '%s'  (switching current(s): %s A)", len(records), output_file,
+             switch_currents_A(records) or "none")
     return pd.DataFrame(records)
 
 
@@ -476,15 +482,17 @@ def plot_results(df: pd.DataFrame) -> None:
 
 
 def main() -> None:
-    """Standalone run. The magnet state must already be initialized (external
-    field, by hand) — the TUI (nonlocal_switching_tui.py) does it for you and
+    """Standalone run. For a one-polarity sweep the magnet state must already be
+    initialized (external field, by hand) — the TUI (nonlocal_switching_tui.py) does it for you and
     saves into the data convention (type NLSW)."""
     pulse_cfg = WritePulseConfig(width_s=1e-3, compliance_V=5.0)
     read_cfg = ReadConfig(sense_current_A=1e-4, compliance_V=2.0, n_reversals=5,
                           delay_after_pulse_s=1.0)   # + R_P_ohm / R_AP_ohm from a dc_spin_valve loop
 
     # ── pick ONE protocol (see module docstring) ─────────────────────────────
-    pulses_A = linear_sweep(1e-3, 10e-3, 0.5e-3, bidirectional=False)   # ascending, unipolar
+    pulses_A = linear_sweep(1e-3, 10e-3, 0.5e-3, bidirectional=False)   # ascending, one polarity
+    # pulses_A = linear_sweep(-5e-3, 5e-3, 0.5e-3, bidirectional=True)  # hysteresis loop
+    # pulses_A = [+3e-3, -3e-3] * 10                                    # toggle test
     # pulses_A = [+3e-3, 0, 0, 0]                                       # relaxation after a pulse
     points = [PulsePoint(float(i)) for i in pulses_A]
 

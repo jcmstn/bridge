@@ -5,8 +5,9 @@ bridge/web — NiceGUI entrypoint
 Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
 Created: 2026-08-07
 
-Alternative front end to the Textual TUI (dc/dc_tui.py, mfli/mfli_tui.py),
-covering the same 8 measurements plus one new capability the TUI doesn't
+Alternative front end to the Textual TUI (dc/dc_tui.py, mfli/mfli_tui.py,
+sot/sot_tui.py), covering the same measurements (the SOT suite: the nonlocal
+switching program so far) plus one new capability the TUI doesn't
 have: freely choosing the save directory for a run, anywhere on disk (see
 directory_picker.py), rather than only a sub-folder name under a hardcoded
 data/ root. Runs alongside the TUI, not instead of it.
@@ -39,6 +40,7 @@ from nicegui import app, ui
 
 from web.dc import hall, iv_curve, gate_sweep, spin_valve
 from web.mfli import dual_harmonic, dual_harmonic_6221, diff_resistance, phase_calibration
+from web.sot import nonlocal_switching
 from web import run_index
 from web.run_controller import busy_banner
 
@@ -123,6 +125,11 @@ def _mfli_phase_calibration_page() -> None:
     phase_calibration.page()
 
 
+@ui.page("/sot/nonlocal-switching")
+def _sot_nonlocal_switching_page() -> None:
+    nonlocal_switching.page()
+
+
 def _card(title: str, description: str, route: str) -> None:
     with ui.card().classes("w-full"):
         ui.label(title).classes("text-lg font-bold")
@@ -171,8 +178,8 @@ def landing() -> None:
     busy_banner()
     ui.label(APP_TITLE).classes("text-3xl font-bold")
     ui.label(
-        "Web front end for the DC and MFLI measurement programs — runs alongside "
-        "the Textual TUI (dc_tui.py / mfli_tui.py), not instead of it."
+        "Web front end for the DC, MFLI and SOT measurement programs — runs alongside "
+        "the Textual TUI (dc_tui.py / mfli_tui.py / sot_tui.py), not instead of it."
     ).classes("text-grey-7 mb-4")
 
     with ui.row().classes("w-full gap-4 items-start"):
@@ -192,6 +199,10 @@ def landing() -> None:
                   diff_resistance.MFLI_DIFF_RESISTANCE_DESCRIPTION, "/mfli/diff-resistance")
             _card("MFLI Phase Calibration",
                   phase_calibration.MFLI_PHASE_CALIBRATION_DESCRIPTION, "/mfli/phase-calibration")
+        with ui.column().classes("flex-1 gap-3"):
+            ui.label("SOT Suite").classes("text-xl font-bold")
+            _card("Nonlocal Spin-Current Switching",
+                  nonlocal_switching.NLSW_DESCRIPTION, "/sot/nonlocal-switching")
 
     ui.separator().classes("my-4")
     ui.label("Recent runs").classes("text-xl font-bold mb-2")

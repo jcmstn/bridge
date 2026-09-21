@@ -28,12 +28,15 @@ picker:
 ```
 uv run python dc/dc_tui.py             # DC suite TUI (Hall, I-V, gate sweep, spin-valve)
 uv run python mfli/mfli_tui.py         # MFLI suite TUI (dual-harmonic, dual-harmonic w/ 6221 AC source, diff resistance, phase calibration)
+uv run python sot/sot_tui.py           # SOT suite TUI (three pulsed-switching variants + nonlocal spin-current switching)
 uv run python sot/sot_pulsed_switching_tui.py   # SOT pulsed switching TUI — 4200A PMU pulse + delayed 6221/2182 R_xy
-uv run python web/app.py               # Browser front end, DC + MFLI suites, http://localhost:8080
+uv run python web/app.py               # Browser front end, DC + MFLI suites + SOT nonlocal switching, http://localhost:8080
 ```
 
-The SOT pulsed-switching program is TUI-only (no web page) and needs a KULT
-user module compiled on the 4200A — see [`instruments/kult/`](instruments/kult/).
+The three SOT pulsed-switching programs are TUI-only (no web page); the two
+4200A ones need a KULT user module compiled on the 4200A — see
+[`instruments/kult/`](instruments/kult/). The nonlocal spin-current switching
+program (6221 + 2182A only) has a TUI and a web page.
 
 The web front end runs alongside the TUI, not instead of it — pick whichever
 is more convenient for a given session. Its port defaults to 8080; override

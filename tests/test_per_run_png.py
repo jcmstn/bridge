@@ -27,7 +27,7 @@ import dc.dc_gate_sweep_tui as gate_tui  # noqa: E402
 import dc.dc_hall_measurement_tui as hall_tui  # noqa: E402
 import dc.dc_iv_curve_tui as iv_tui  # noqa: E402
 import dc.dc_spin_valve_tui as sv_tui  # noqa: E402
-import sot.nonlocal_switching_tui as nlsw_tui  # noqa: E402
+import sot.sot_nonlocal_switching_tui as nlsw_tui  # noqa: E402
 import sot.sot_pulsed_switching_2h_tui as sot2h_tui  # noqa: E402
 import sot.sot_pulsed_switching_6221_tui as sot6221_tui  # noqa: E402
 import sot.sot_pulsed_switching_tui as sot_tui  # noqa: E402
