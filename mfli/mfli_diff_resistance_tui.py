@@ -1141,9 +1141,6 @@ class MFLIDiffResistanceApp(App):
     def on_switch_changed(self, event: Switch.Changed) -> None:
         self.refresh_summary()
 
-    def on_select_changed(self, event: Select.Changed) -> None:
-        self.refresh_summary()
-
     def refresh_summary(self) -> None:
         state, parse_errors = self.parse_state()
         if parse_errors:

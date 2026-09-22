@@ -1557,9 +1557,6 @@ class MFLIDualHarmonicApp(App):
             self._set_temperature_fields_enabled(event.value)
         self.refresh_summary()
 
-    def on_select_changed(self, event: Select.Changed) -> None:
-        self.refresh_summary()
-
     def _set_magnet_fields_enabled(self, enabled: bool) -> None:
         for fid in MAGNET_FIELD_IDS:
             self.query_one(f"#{fid}", Input).disabled = not enabled
