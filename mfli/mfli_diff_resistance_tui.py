@@ -28,13 +28,13 @@ import logging
 import math
 import multiprocessing as mp
 import textwrap
+import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 
-from textual import work
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.validation import Number
@@ -48,7 +48,7 @@ from textual.widgets import (
     Switch,
 )
 
-from dc.dc_sweep_utils import check_sweep_size
+from dc.dc_sweep_utils import check_sweep_size, safe_shutdown
 from mfli.mfli_diff_resistance_vs_bias import (
     AcquisitionConfig,
     BiasPoint,
@@ -74,7 +74,7 @@ from instruments.data_dir import validate_directory
 from instruments.data_naming import (
     RunContext,
     allocate_run,
-    make_incremental_writer,
+    record_run,
     preview_raw_filename,
 )
 from instruments.mfli_daq import acquire_s
@@ -250,8 +250,8 @@ class MeasurementPlan:
         return len(self.biases_V)
 
 
-def build_header_fields(plan: "MeasurementPlan", records: list[dict], *,
-                         status: str, comment: str) -> dict:
+def build_header_fields(plan: "MeasurementPlan", ctx: RunContext, records: list[dict], *,
+                        status: str, comment: str, extra: Optional[dict] = None) -> dict:
     """
     Universal + measurement-specific header/index fields for one run. Called
     on every incremental write (status='in_progress', comment='') and once
@@ -263,7 +263,6 @@ def build_header_fields(plan: "MeasurementPlan", records: list[dict], *,
     backfilled with the setpoint) whenever the MercuryiTC is disconnected
     or hasn't produced a reading yet.
     """
-    ctx = plan.run_ctx
     measured = [r["temperature_1_K"] for r in records if r.get("temperature_1_K") is not None]
     T_K = (sum(measured) / len(measured)) if measured else ""
     fields = {
@@ -280,6 +279,8 @@ def build_header_fields(plan: "MeasurementPlan", records: list[dict], *,
         "series": plan.series,
     }
     fields.update(plan.header_extra)
+    if extra:
+        fields.update(extra)
     return fields
 
 
@@ -523,6 +524,160 @@ def _save_measurement_png(records: list[dict], png_path: Path,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Plan + run  ── pure, shared by the TUI RunScreen and web/mfli/diff_resistance.py
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_plan(state: dict, data_root: Path) -> MeasurementPlan:
+    """One parsed, validated run request from a state dict. Pure — shared by
+    the TUI and the web page."""
+    out_cfg = OutputConfig(
+        device=state["leader_device"],
+        frequency_Hz=state["frequency_Hz"],
+        ac_amplitude_V=state["ac_amplitude_V"],
+        series_R_ohm=state["series_R_ohm"],
+        bias_min_V=state["bias_min_V"],
+        bias_max_V=state["bias_max_V"],
+    )
+    filt = FilterConfig(
+        time_constant_s=state["time_constant_s"],
+        order=state["order"],
+        sinc_filter=state["sinc_filter"],
+    )
+    current_cfg = DemodConfig(
+        device=state["leader_device"], label="I (Current Input 1)",
+        demod_index=0, harmonic=1,
+        input_ch=0, use_current_input=True,
+        input_range=state["current_input_range_A"],
+        sample_rate_Hz=state["sample_rate_Hz"], filter=filt,
+    )
+    voltage_cfg = DemodConfig(
+        device=state["follower_device"], label="V (across DUT)",
+        demod_index=0, harmonic=1,
+        input_range=state["voltage_input_range_V"],
+        sample_rate_Hz=state["sample_rate_Hz"], filter=filt,
+    )
+    run_ctx = allocate_run(
+        data_root, state["sample"], state["device"], MEASUREMENT_TYPE,
+        temperature_setpoint_K=state["temperature_setpoint_K"],
+    )
+    acq_cfg = AcquisitionConfig(
+        settling_time_s=state["settling_time_s"],
+        n_averages=state["n_averages"],
+        output_file=str(run_ctx.raw_path),
+    )
+
+    biases_V = bidirectional_bias_sweep(
+        v_min=state["bias_min_V"], v_max=state["bias_max_V"], n_points=state["n_points"],
+    )
+
+    temp_cfg = None
+    if state["enable_temperature"]:
+        uids = parse_sensor_uids(state["temperature_sensor_uids"])
+        if uids:
+            temp_cfg = TemperatureControllerConfig(
+                visa_resource=state["temperature_visa_resource"],
+                sensor_uids=uids,
+            )
+
+    header_extra = {
+        "excitation_frequency_Hz": state["frequency_Hz"],
+        "ac_amplitude_V": state["ac_amplitude_V"],
+        "series_R_ohm": state["series_R_ohm"],
+        "bias_sweep_V": [state["bias_min_V"], state["bias_max_V"], state["n_points"]],
+        "demod_time_constant_s": state["time_constant_s"],
+        "demod_order": state["order"],
+        "n_averages": state["n_averages"],
+        "settling_time_s": state["settling_time_s"],
+    }
+
+    return MeasurementPlan(
+        daq_host=state["daq_host"], daq_port=state["daq_port"],
+        leader=state["leader_device"], follower=state["follower_device"],
+        out_cfg=out_cfg, current_cfg=current_cfg, voltage_cfg=voltage_cfg,
+        acq_cfg=acq_cfg, biases_V=biases_V,
+        run_ctx=run_ctx, data_root=data_root, temperature_setpoint_K=state["temperature_setpoint_K"],
+        cooldown=state["cooldown"], header_extra=header_extra,
+        temp_cfg=temp_cfg, run_cost=run_costs(len(biases_V), state),
+    )
+
+def _ignore(*_args) -> None:
+    pass
+
+
+def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
+             on_status: Callable[[str], None] = _ignore,
+             on_run_label: Callable[[str], None] = _ignore,
+             on_point: Callable[[dict], None] = _ignore,
+             on_run_finished: Optional[Callable[[RunContext, list], None]] = None,
+             run_contexts: Optional[list] = None,
+             run_extras: Optional[list] = None) -> None:
+    """Record the plan's single run (plan.run_ctx, allocated at Start): connect,
+    sweep the bias, finalize the run the instant it ends — even if connecting
+    failed — then ramp the bias to zero and shut down, and only then save the
+    PNG (nothing left biased while it renders). Pure — the TUI's RunScreen and
+    the web page each pass their own callbacks."""
+    run_contexts = [] if run_contexts is None else run_contexts
+    run_extras = [] if run_extras is None else run_extras
+    ctx = plan.run_ctx
+    run_contexts.append(ctx)
+    run_extras.append(None)
+    daq = temp_ctrl = None
+    output_configured = False
+    recorded: list[dict] = []
+
+    def measure(point_cb, write_csv) -> None:
+        nonlocal daq, temp_ctrl, output_configured
+        on_status("Connecting to LabOne data server …")
+        daq = connect(plan.daq_host, plan.daq_port)
+        connect_device(daq, plan.leader, interface="1GbE")
+        connect_device(daq, plan.follower, interface="1GbE")
+
+        if plan.temp_cfg is not None:
+            on_status("Connecting to MercuryiTC (temperature) …")
+            temp_ctrl = connect_temperature_controller(plan.temp_cfg)
+
+        on_status("Synchronizing MDS …")
+        setup_mds(daq, leader=plan.leader, follower=plan.follower)
+
+        on_status("Configuring output & demodulators …")
+        configure_output(daq, plan.out_cfg)
+        output_configured = True
+        sync_follower_oscillator(daq, plan.out_cfg, plan.follower)
+        configure_demodulator(daq, plan.current_cfg)
+        configure_demodulator(daq, plan.voltage_cfg)
+
+        points = [BiasPoint(bias_V=float(v)) for v in plan.biases_V]
+        on_status("Running measurement …")
+        run_measurement(
+            daq, plan.out_cfg, plan.current_cfg, plan.voltage_cfg, plan.acq_cfg, points,
+            stop_event=stop_event, on_point=point_cb,
+            temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg, write_csv=write_csv,
+        )
+
+    try:
+        record_run(plan.data_root, ctx,
+                   lambda records, status: build_header_fields(plan, ctx, records, status=status, comment=""),
+                   measure, stop_event,
+                   on_point=lambda record: (recorded.append(record), on_point(record)))
+    finally:
+        if daq is not None and output_configured:
+            safe_shutdown("bias ramp-down", lambda: ramp_bias_to_zero(daq, plan.out_cfg))
+            safe_shutdown("MFLI output", lambda: shutdown_output(daq, plan.out_cfg))
+        if temp_ctrl is not None:
+            safe_shutdown("MercuryiTC", lambda: shutdown_temperature_controller(temp_ctrl))
+        if on_run_finished is not None:
+            try:
+                on_run_finished(ctx, recorded)
+            except Exception:
+                log.exception("Could not save the run's plot")
+
+
+def save_run_png(plan: MeasurementPlan, records: list[dict], png_path: Path, comment: str = "") -> None:
+    """The run's PNG (RunScreen and the web page both call this)."""
+    _save_measurement_png(records, png_path, plan=plan, comment=comment)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Run screen  ── executes the plan in a worker thread, shows live progress
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -530,9 +685,6 @@ class RunScreen(MeasurementRunScreen):
     ABORT_STATUS = "Abort requested — finishing current point, then ramping bias to zero …"
     TABLE_COLUMNS = ("#", "V_bias (V)", "I_ac (A)", "V_dut (V)", "R_diff (Ω)", "X_react (Ω)", "|Z| (Ω)", "phase (°)", "T1 (K)", "T2 (K)")
     MEASUREMENT_TYPE = MEASUREMENT_TYPE
-
-    def save_png(self, records: list[dict], png_path: Path, comment: str = "") -> None:
-        _save_measurement_png(records, png_path, plan=self.plan, comment=comment)
 
     def live_plot_args(self):
         return (_live_plot_worker,)
@@ -555,71 +707,6 @@ class RunScreen(MeasurementRunScreen):
 
     def progress_index(self, record: dict) -> int:
         return record["point_index"]
-
-    def build_header(self, ctx: RunContext, records: list[dict], *, status: str, comment: str,
-                     extra: Optional[dict]) -> dict:
-        return build_header_fields(self.plan, records, status=status, comment=comment)
-
-    @work(thread=True, exclusive=True)
-    def do_run(self) -> None:
-        plan = self.plan
-        daq = None
-        output_configured = False
-        temp_ctrl = None
-        try:
-            self._set_status_threadsafe("Connecting to LabOne data server …")
-            daq = connect(plan.daq_host, plan.daq_port)
-            connect_device(daq, plan.leader, interface="1GbE")
-            connect_device(daq, plan.follower, interface="1GbE")
-
-            if plan.temp_cfg is not None:
-                self._set_status_threadsafe("Connecting to MercuryiTC (temperature) …")
-                temp_ctrl = connect_temperature_controller(plan.temp_cfg)
-
-            self._set_status_threadsafe("Synchronizing MDS …")
-            setup_mds(daq, leader=plan.leader, follower=plan.follower)
-
-            self._set_status_threadsafe("Configuring output & demodulators …")
-            configure_output(daq, plan.out_cfg)
-            output_configured = True
-            sync_follower_oscillator(daq, plan.out_cfg, plan.follower)
-            configure_demodulator(daq, plan.current_cfg)
-            configure_demodulator(daq, plan.voltage_cfg)
-
-            points = [BiasPoint(bias_V=float(v)) for v in plan.biases_V]
-
-            self._set_status_threadsafe("Running measurement …")
-            write_csv = make_incremental_writer(
-                plan.run_ctx.raw_path,
-                lambda records: build_header_fields(plan, records, status="in_progress", comment=""),
-            )
-            run_measurement(
-                daq, plan.out_cfg, plan.current_cfg, plan.voltage_cfg, plan.acq_cfg, points,
-                stop_event=self._stop_event,
-                on_point=lambda record: self.app.call_from_thread(self._on_point, record),
-                temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg,
-                write_csv=write_csv,
-            )
-            final = "Measurement aborted." if self._stop_event.is_set() else "Measurement complete."
-        except Exception as exc:
-            log.exception("Measurement failed")
-            final = f"ERROR: {exc}"
-        finally:
-            if daq is not None and output_configured:
-                try:
-                    ramp_bias_to_zero(daq, plan.out_cfg)
-                except Exception:
-                    log.exception("Error while ramping bias to zero")
-                try:
-                    shutdown_output(daq, plan.out_cfg)
-                except Exception:
-                    log.exception("Error while shutting down output")
-            if temp_ctrl is not None:
-                try:
-                    shutdown_temperature_controller(temp_ctrl)
-                except Exception:
-                    log.exception("Error while shutting down MercuryiTC")
-            self.app.call_from_thread(self._on_finished, final)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -827,75 +914,7 @@ class MFLIDiffResistanceApp(MeasurementApp):
     # ── Start ────────────────────────────────────────────────────────────────
 
     def _build_plan(self, state: dict) -> MeasurementPlan:
-        out_cfg = OutputConfig(
-            device=state["leader_device"],
-            frequency_Hz=state["frequency_Hz"],
-            ac_amplitude_V=state["ac_amplitude_V"],
-            series_R_ohm=state["series_R_ohm"],
-            bias_min_V=state["bias_min_V"],
-            bias_max_V=state["bias_max_V"],
-        )
-        filt = FilterConfig(
-            time_constant_s=state["time_constant_s"],
-            order=state["order"],
-            sinc_filter=state["sinc_filter"],
-        )
-        current_cfg = DemodConfig(
-            device=state["leader_device"], label="I (Current Input 1)",
-            demod_index=0, harmonic=1,
-            input_ch=0, use_current_input=True,
-            input_range=state["current_input_range_A"],
-            sample_rate_Hz=state["sample_rate_Hz"], filter=filt,
-        )
-        voltage_cfg = DemodConfig(
-            device=state["follower_device"], label="V (across DUT)",
-            demod_index=0, harmonic=1,
-            input_range=state["voltage_input_range_V"],
-            sample_rate_Hz=state["sample_rate_Hz"], filter=filt,
-        )
-        run_ctx = allocate_run(
-            self.data_root, state["sample"], state["device"], MEASUREMENT_TYPE,
-            temperature_setpoint_K=state["temperature_setpoint_K"],
-        )
-        acq_cfg = AcquisitionConfig(
-            settling_time_s=state["settling_time_s"],
-            n_averages=state["n_averages"],
-            output_file=str(run_ctx.raw_path),
-        )
-
-        biases_V = bidirectional_bias_sweep(
-            v_min=state["bias_min_V"], v_max=state["bias_max_V"], n_points=state["n_points"],
-        )
-
-        temp_cfg = None
-        if state["enable_temperature"]:
-            uids = parse_sensor_uids(state["temperature_sensor_uids"])
-            if uids:
-                temp_cfg = TemperatureControllerConfig(
-                    visa_resource=state["temperature_visa_resource"],
-                    sensor_uids=uids,
-                )
-
-        header_extra = {
-            "excitation_frequency_Hz": state["frequency_Hz"],
-            "ac_amplitude_V": state["ac_amplitude_V"],
-            "series_R_ohm": state["series_R_ohm"],
-            "bias_sweep_V": [state["bias_min_V"], state["bias_max_V"], state["n_points"]],
-            "demod_time_constant_s": state["time_constant_s"],
-            "demod_order": state["order"],
-            "n_averages": state["n_averages"],
-            "settling_time_s": state["settling_time_s"],
-        }
-
-        return MeasurementPlan(
-            daq_host=state["daq_host"], daq_port=state["daq_port"],
-            leader=state["leader_device"], follower=state["follower_device"],
-            out_cfg=out_cfg, current_cfg=current_cfg, voltage_cfg=voltage_cfg,
-            acq_cfg=acq_cfg, biases_V=biases_V,
-            run_ctx=run_ctx, data_root=self.data_root, temperature_setpoint_K=state["temperature_setpoint_K"],
-            cooldown=state["cooldown"], header_extra=header_extra,
-            temp_cfg=temp_cfg, run_cost=run_costs(len(biases_V), state),
-        )
+        return build_plan(state, self.data_root)
 
 
 def main() -> None:

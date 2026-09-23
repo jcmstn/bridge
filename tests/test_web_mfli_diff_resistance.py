@@ -1,5 +1,5 @@
 """
-Plan-purity test for web/mfli/diff_resistance.py's build_plan().
+Plan-purity test for shared build_plan() (TUI + web).
 
 No NiceGUI page render or hardware needed -- build_plan() is a plain
 function of a state dict, side-effecting only via allocate_run() (naming/
@@ -11,7 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from instruments.data_naming import ensure_sample
-from web.mfli.diff_resistance import build_plan
+from mfli.mfli_diff_resistance_tui import build_plan
 
 
 def _state(data_dir: Path, **overrides) -> dict:
@@ -35,10 +35,10 @@ def _state(data_dir: Path, **overrides) -> dict:
 def test_build_plan_allocates_run_and_matches_filename_convention(tmp_path: Path) -> None:
     ensure_sample(tmp_path, "A", create=True)
 
-    plan1 = build_plan(_state(tmp_path))
+    plan1 = build_plan(_state(tmp_path), tmp_path)
     assert plan1.run_ctx.run_number == 1
     assert plan1.acq_cfg.output_file == str(plan1.run_ctx.raw_path)
     assert Path(plan1.acq_cfg.output_file).name.startswith("A_0001_HB3_DIFFR_T300K_")
 
-    plan2 = build_plan(_state(tmp_path))
+    plan2 = build_plan(_state(tmp_path), tmp_path)
     assert plan2.run_ctx.run_number == 2

@@ -30,14 +30,14 @@ import logging
 import math
 import multiprocessing as mp
 import textwrap
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 
-from textual import work
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.validation import Number
@@ -52,7 +52,7 @@ from textual.widgets import (
     TextArea,
 )
 
-from dc.dc_sweep_utils import build_segmented_sweep, parse_sweep_rows
+from dc.dc_sweep_utils import build_segmented_sweep, parse_sweep_rows, safe_shutdown
 from mfli.mfli_dual_harmonic import (
     AcquisitionConfig,
     DemodConfig,
@@ -88,7 +88,7 @@ from instruments.field_geometry import field_direction_summary_line, render_asci
 from instruments.data_naming import (
     RunContext,
     allocate_run,
-    make_incremental_writer,
+    record_run,
     preview_raw_filename,
 )
 from instruments.kepco_magnet import magnet_move_s
@@ -332,8 +332,8 @@ class MeasurementPlan:
         return len(self.currents_A) if self.currents_A is not None else 1
 
 
-def build_header_fields(plan: "MeasurementPlan", records: list[dict], *,
-                         status: str, comment: str) -> dict:
+def build_header_fields(plan: "MeasurementPlan", ctx: RunContext, records: list[dict], *,
+                        status: str, comment: str, extra: Optional[dict] = None) -> dict:
     """
     Universal + measurement-specific header/index fields for one run. Called
     on every incremental write (status='in_progress', comment='') and once
@@ -345,7 +345,6 @@ def build_header_fields(plan: "MeasurementPlan", records: list[dict], *,
     backfilled with the setpoint) whenever the MercuryiTC is disconnected
     or hasn't produced a reading yet.
     """
-    ctx = plan.run_ctx
     measured = [r["temperature_1_K"] for r in records if r.get("temperature_1_K") is not None]
     T_K = (sum(measured) / len(measured)) if measured else ""
     fields = {
@@ -362,6 +361,8 @@ def build_header_fields(plan: "MeasurementPlan", records: list[dict], *,
         "series": plan.series,
     }
     fields.update(plan.header_extra)
+    if extra:
+        fields.update(extra)
     return fields
 
 
@@ -692,15 +693,271 @@ def _save_measurement_png(records: list[dict], png_path: Path,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Plan + run  ── pure, shared by the TUI RunScreen and web/mfli/dual_harmonic.py
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_plan(state: dict, data_root: Path) -> MeasurementPlan:
+    """One parsed, validated run request from a state dict. Pure — shared by
+    the TUI and the web page."""
+    out_cfg = OutputConfig(
+        device=state["leader_device"],
+        frequency_Hz=state["frequency_Hz"],
+        amplitude_V=state["amplitude_V"],
+        series_R_ohm=state["series_R_ohm"],
+    )
+    filt_1f = FilterConfig(
+        time_constant_s=state["time_constant_1f_s"],
+        order=state["order_1f"],
+        sinc_filter=state["sinc_filter_1f"],
+    )
+    filt_2f = FilterConfig(
+        time_constant_s=state["time_constant_2f_s"],
+        order=state["order_2f"],
+        sinc_filter=state["sinc_filter_2f"],
+    )
+    demod1_cfg = DemodConfig(
+        device=state["leader_device"], demod_index=0, harmonic=1,
+        differential=state["differential"], ac_coupling=state["ac_coupling"],
+        input_range_V=state["input_range_1f_V"],
+        sample_rate_Hz=state["sample_rate_Hz"], filter=filt_1f,
+    )
+    demod2_cfg = DemodConfig(
+        device=state["follower_device"], demod_index=0, harmonic=2,
+        differential=state["differential"], ac_coupling=state["ac_coupling"],
+        input_range_V=state["input_range_2f_V"],
+        sample_rate_Hz=state["sample_rate_Hz"], filter=filt_2f,
+    )
+    run_ctx = allocate_run(
+        data_root, state["sample"], state["device"], MEASUREMENT_TYPE,
+        temperature_setpoint_K=state["temperature_setpoint_K"],
+    )
+    acq_cfg = AcquisitionConfig(
+        settling_time_s=state["settling_time_s"],
+        field_settle_tolerance_mT=state["field_settle_tolerance_mT"],
+        n_averages=state["n_averages"],
+        output_file=str(run_ctx.raw_path),
+    )
+
+    magnet_cfg = None
+    gauss_cfg = None
+    currents_A = None
+    if state["enable_sweep"]:
+        magnet_cfg = MagnetConfig(
+            visa_resource=state["visa_resource"],
+            current_limit_A=state["current_limit_A"],
+            voltage_compliance_V=state["voltage_compliance_V"],
+            ramp_step_A=state["ramp_step_A"],
+            ramp_delay_s=state["ramp_delay_s"],
+        )
+        gauss_cfg = GaussmeterConfig(
+            visa_resource=state["gaussmeter_visa_resource"],
+            n_averages=state["gaussmeter_n_averages"],
+            read_delay_s=state["gaussmeter_read_delay_s"],
+        )
+        currents_A = build_segmented_sweep(state["sweep_rows_parsed"], bidirectional=True)
+
+    temp_cfg = None
+    if state["enable_temperature"]:
+        uids = parse_sensor_uids(state["temperature_sensor_uids"])
+        if uids:
+            temp_cfg = TemperatureControllerConfig(
+                visa_resource=state["temperature_visa_resource"],
+                sensor_uids=uids,
+            )
+
+    geometry_cfg = SampleGeometryConfig(
+        hall_bar_length_um=state["hall_bar_length_um"],
+        hall_bar_width_um=state["hall_bar_width_um"],
+        hall_bar_thickness_nm=state["hall_bar_thickness_nm"],
+        field_theta_deg=state["field_theta_deg"],
+        field_phi_deg=state["field_phi_deg"],
+    )
+
+    # Geometry/dimensions are recorded per-row in the CSV (via
+    # build_run_metadata) and belong in sample.yaml long-term — they are
+    # deliberately NOT duplicated into header_extra/index.csv here.
+    header_extra = {
+        "excitation_frequency_Hz": state["frequency_Hz"],
+        "excitation_amplitude_V": state["amplitude_V"],
+        "series_R_ohm": state["series_R_ohm"],
+        "demod1_time_constant_s": state["time_constant_1f_s"],
+        "demod1_order": state["order_1f"],
+        "demod2_time_constant_s": state["time_constant_2f_s"],
+        "demod2_order": state["order_2f"],
+        "n_averages": state["n_averages"],
+        "settling_time_s": state["settling_time_s"],
+    }
+    if state["enable_sweep"]:
+        header_extra["field_sweep_rows_A"] = state["sweep_rows_parsed"]
+
+    return MeasurementPlan(
+        daq_host=state["daq_host"], daq_port=state["daq_port"],
+        leader=state["leader_device"], follower=state["follower_device"],
+        out_cfg=out_cfg, demod1_cfg=demod1_cfg, demod2_cfg=demod2_cfg,
+        acq_cfg=acq_cfg, magnet_cfg=magnet_cfg, gauss_cfg=gauss_cfg, currents_A=currents_A,
+        temp_cfg=temp_cfg,
+        phase_cal_enabled=state["enable_phase_cal"],
+        phase_cal_current_A=state["phase_cal_current_A"],
+        phase_cal_n_averages=state["phase_cal_n_averages"],
+        phase_cal_max_iterations=state["phase_cal_max_iterations"],
+        geometry_cfg=geometry_cfg,
+        run_ctx=run_ctx, data_root=data_root,
+        temperature_setpoint_K=state["temperature_setpoint_K"],
+        cooldown=state["cooldown"], header_extra=header_extra,
+        run_cost=run_costs(state, currents_A),
+    )
+
+def _ignore(*_args) -> None:
+    pass
+
+
+def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
+             on_status: Callable[[str], None] = _ignore,
+             on_run_label: Callable[[str], None] = _ignore,
+             on_point: Callable[[dict], None] = _ignore,
+             on_run_finished: Optional[Callable[[RunContext, list], None]] = None,
+             run_contexts: Optional[list] = None,
+             run_extras: Optional[list] = None) -> None:
+    """Record the plan's single run (plan.run_ctx, allocated at Start): connect
+    both MFLIs (MDS), optionally phase-calibrate, sweep, finalize the run the
+    instant it ends — even if connecting failed — then shut down, and only
+    then save the PNG. Pure — the TUI's RunScreen and the web page each pass
+    their own callbacks."""
+    run_contexts = [] if run_contexts is None else run_contexts
+    run_extras = [] if run_extras is None else run_extras
+    ctx = plan.run_ctx
+    run_contexts.append(ctx)
+    run_extras.append(None)
+    daq = magnet = gaussmeter = temp_ctrl = None
+    recorded: list[dict] = []
+
+    def measure(point_cb, write_csv) -> None:
+        nonlocal daq, magnet, gaussmeter, temp_ctrl
+        on_status("Connecting to LabOne data server …")
+        daq = connect(plan.daq_host, plan.daq_port)
+        connect_device(daq, plan.leader, interface="1GbE")
+        connect_device(daq, plan.follower, interface="1GbE")
+
+        on_status("Synchronizing MDS …")
+        mds = setup_mds(daq, leader=plan.leader, follower=plan.follower)
+
+        on_status("Configuring output & demodulators …")
+        configure_output(daq, plan.out_cfg)
+        sync_follower_oscillator(daq, plan.out_cfg, plan.follower)
+        configure_demodulator(daq, plan.demod1_cfg)
+        configure_demodulator(daq, plan.demod2_cfg)
+
+        if plan.temp_cfg is not None:
+            on_status("Connecting to MercuryiTC (temperature) …")
+            temp_ctrl = connect_temperature_controller(plan.temp_cfg)
+
+        if plan.magnet_cfg is not None and plan.currents_A is not None:
+            on_status("Connecting magnet power supply …")
+            magnet = connect_magnet(plan.magnet_cfg)
+            on_status("Connecting gaussmeter …")
+            gaussmeter = connect_gaussmeter(plan.gauss_cfg)
+            points = [
+                MeasurementPoint(
+                    magnet_current_A=I,
+                    set_action=lambda daq, I=I: set_magnet_current(
+                        magnet, plan.magnet_cfg, I, gaussmeter, plan.gauss_cfg,
+                        plan.acq_cfg.field_settle_tolerance_mT, stop_event),
+                )
+                for I in plan.currents_A
+            ]
+        else:
+            points = [MeasurementPoint()]
+
+        demod2_phase_null_1f_deg = None
+        if plan.phase_cal_enabled:
+            on_status("Phase calibration: nulling 1f Y (leader demod phaseshift) …")
+            if magnet is not None and plan.phase_cal_current_A is not None:
+                log.info("Phase calibration: ramping magnet to %.4f A ...", plan.phase_cal_current_A)
+                set_magnet_current(magnet, plan.magnet_cfg, plan.phase_cal_current_A,
+                                   gaussmeter, plan.gauss_cfg,
+                                   plan.acq_cfg.field_settle_tolerance_mT, stop_event)
+                time.sleep(plan.acq_cfg.settling_time_s)
+            result = auto_null_phase(
+                daq, plan.demod1_cfg,
+                n_averages=plan.phase_cal_n_averages,
+                max_iterations=plan.phase_cal_max_iterations,
+            )
+            if not result.converged:
+                log.warning(
+                    "Phase null did not fully converge after %d iteration(s) "
+                    "(|Y|/R=%.2e) — check cabling/contacts before trusting the 2f data.",
+                    result.iterations, result.residual_ratio,
+                )
+            # 2f is measured on a different physical device (the follower) with its
+            # own delay chain, so nulling the leader's 1f phase says nothing about
+            # which 2f channel is physically correct — that must be verified
+            # empirically. Both X2f/Y2f are already saved per point in the CSV;
+            # this snapshot just gives an immediate look at the calibration point.
+            d2 = acquire_averaged(daq, plan.demod2_cfg, plan.phase_cal_n_averages)
+            log.info(
+                "2f snapshot at calibration point: X=%.4e V  Y=%.4e V  R=%.4e V — "
+                "don't assume this matches 1f's X/Y convention (V_2w ~ cos, not sin); "
+                "check which channel carries the structured field dependence in the "
+                "recorded sweep before trusting either one.",
+                d2["x_mean"], d2["y_mean"], d2["r_mean"],
+            )
+            # Anchor the follower's 2f reference to the current: null the
+            # follower at 1f against the same (split) V_xy, record the delay
+            # angle as demod2_phase_null_1f_deg so analysis can rotate the
+            # recorded 2f X/Y into the current frame.
+            on_status("Phase calibration: anchoring follower 2f reference (1f null) …")
+            demod2_phase_null_1f_deg = null_follower_reference_via_1f(
+                daq, plan.demod2_cfg,
+                n_averages=plan.phase_cal_n_averages,
+                max_iterations=plan.phase_cal_max_iterations,
+            )
+
+        on_status("Running measurement …")
+        run_measurement(
+            daq, plan.out_cfg, plan.demod1_cfg, plan.demod2_cfg, plan.acq_cfg, points,
+            stop_event=stop_event, on_point=point_cb,
+            gaussmeter=gaussmeter, gauss_cfg=plan.gauss_cfg,
+            temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg,
+            geometry_cfg=plan.geometry_cfg,
+            demod2_phase_null_1f_deg=demod2_phase_null_1f_deg, mds=mds,
+            write_csv=write_csv,
+        )
+
+    try:
+        record_run(plan.data_root, ctx,
+                   lambda records, status: build_header_fields(plan, ctx, records, status=status, comment=""),
+                   measure, stop_event,
+                   on_point=lambda record: (recorded.append(record), on_point(record)))
+    finally:
+        # Excitation output off first (immediate, no current into the DUT), so
+        # the magnet can start its ramp-down right away rather than waiting.
+        if daq is not None:
+            safe_shutdown("MFLI output", lambda: shutdown_output(daq, plan.out_cfg))
+        if magnet is not None:
+            safe_shutdown("magnet", lambda: shutdown_magnet(magnet, plan.magnet_cfg))
+        if gaussmeter is not None:
+            safe_shutdown("gaussmeter", lambda: shutdown_gaussmeter(gaussmeter))
+        if temp_ctrl is not None:
+            safe_shutdown("MercuryiTC", lambda: shutdown_temperature_controller(temp_ctrl))
+        if on_run_finished is not None:
+            try:
+                on_run_finished(ctx, recorded)
+            except Exception:
+                log.exception("Could not save the run's plot")
+
+
+def save_run_png(plan: MeasurementPlan, records: list[dict], png_path: Path, comment: str = "") -> None:
+    """The run's PNG (RunScreen and the web page both call this)."""
+    _save_measurement_png(records, png_path, plan=plan, comment=comment)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Run screen  ── executes the plan in a worker thread, shows live progress
 # ─────────────────────────────────────────────────────────────────────────────
 
 class RunScreen(MeasurementRunScreen):
     TABLE_COLUMNS = ("#", "I (A)", "B (mT)", "1f R (V)", "1f θ (°)", "2f R (V)", "2f θ (°)", "T1 (K)", "T2 (K)")
     MEASUREMENT_TYPE = MEASUREMENT_TYPE
-
-    def save_png(self, records: list[dict], png_path: Path, comment: str = "") -> None:
-        _save_measurement_png(records, png_path, plan=self.plan, comment=comment)
 
     def live_plot_args(self):
         return (_live_plot_worker, self.plan.magnet_cfg is not None)
@@ -724,148 +981,6 @@ class RunScreen(MeasurementRunScreen):
 
     def progress_index(self, record: dict) -> int:
         return record["point_index"]
-
-    def build_header(self, ctx: RunContext, records: list[dict], *, status: str, comment: str,
-                     extra: Optional[dict]) -> dict:
-        return build_header_fields(self.plan, records, status=status, comment=comment)
-
-    @work(thread=True, exclusive=True)
-    def do_run(self) -> None:
-        plan = self.plan
-        daq = None
-        magnet = None
-        gaussmeter = None
-        temp_ctrl = None
-        try:
-            self._set_status_threadsafe("Connecting to LabOne data server …")
-            daq = connect(plan.daq_host, plan.daq_port)
-            connect_device(daq, plan.leader, interface="1GbE")
-            connect_device(daq, plan.follower, interface="1GbE")
-
-            self._set_status_threadsafe("Synchronizing MDS …")
-            mds = setup_mds(daq, leader=plan.leader, follower=plan.follower)
-
-            self._set_status_threadsafe("Configuring output & demodulators …")
-            configure_output(daq, plan.out_cfg)
-            sync_follower_oscillator(daq, plan.out_cfg, plan.follower)
-            configure_demodulator(daq, plan.demod1_cfg)
-            configure_demodulator(daq, plan.demod2_cfg)
-
-            if plan.temp_cfg is not None:
-                self._set_status_threadsafe("Connecting to MercuryiTC (temperature) …")
-                temp_ctrl = connect_temperature_controller(plan.temp_cfg)
-
-            if plan.magnet_cfg is not None and plan.currents_A is not None:
-                self._set_status_threadsafe("Connecting magnet power supply …")
-                magnet = connect_magnet(plan.magnet_cfg)
-                self._set_status_threadsafe("Connecting gaussmeter …")
-                gaussmeter = connect_gaussmeter(plan.gauss_cfg)
-                points = [
-                    MeasurementPoint(
-                        magnet_current_A=I,
-                        set_action=lambda daq, I=I: set_magnet_current(
-                            magnet, plan.magnet_cfg, I, gaussmeter, plan.gauss_cfg,
-                            plan.acq_cfg.field_settle_tolerance_mT, self._stop_event),
-                    )
-                    for I in plan.currents_A
-                ]
-            else:
-                points = [MeasurementPoint()]
-
-            demod2_phase_null_1f_deg = None
-            if plan.phase_cal_enabled:
-                self._set_status_threadsafe(
-                    "Phase calibration: nulling 1f Y (leader demod phaseshift) …"
-                )
-                if magnet is not None and plan.phase_cal_current_A is not None:
-                    log.info("Phase calibration: ramping magnet to %.4f A ...",
-                             plan.phase_cal_current_A)
-                    set_magnet_current(magnet, plan.magnet_cfg, plan.phase_cal_current_A,
-                                       gaussmeter, plan.gauss_cfg,
-                                       plan.acq_cfg.field_settle_tolerance_mT, self._stop_event)
-                    time.sleep(plan.acq_cfg.settling_time_s)
-                result = auto_null_phase(
-                    daq, plan.demod1_cfg,
-                    n_averages=plan.phase_cal_n_averages,
-                    max_iterations=plan.phase_cal_max_iterations,
-                )
-                if not result.converged:
-                    log.warning(
-                        "Phase null did not fully converge after %d iteration(s) "
-                        "(|Y|/R=%.2e) — check cabling/contacts before trusting the 2f data.",
-                        result.iterations, result.residual_ratio,
-                    )
-                # 2f is measured on a different physical device (the follower) with its
-                # own delay chain, so nulling the leader's 1f phase says nothing about
-                # which 2f channel is physically correct — that must be verified
-                # empirically. Both X2f/Y2f are already saved per point in the CSV;
-                # this snapshot just gives an immediate look at the calibration point.
-                d2 = acquire_averaged(daq, plan.demod2_cfg, plan.phase_cal_n_averages)
-                log.info(
-                    "2f snapshot at calibration point: X=%.4e V  Y=%.4e V  R=%.4e V — "
-                    "don't assume this matches 1f's X/Y convention (V_2w ~ cos, not sin); "
-                    "check which channel carries the structured field dependence in the "
-                    "recorded sweep before trusting either one.",
-                    d2["x_mean"], d2["y_mean"], d2["r_mean"],
-                )
-
-                # Anchor the follower's 2f reference to the current: null the
-                # follower at 1f against the same (split) V_xy, record the
-                # delay angle as demod2_phase_null_1f_deg so analysis can
-                # rotate the recorded 2f X/Y into the current frame.
-                self._set_status_threadsafe(
-                    "Phase calibration: anchoring follower 2f reference (1f null) …"
-                )
-                demod2_phase_null_1f_deg = null_follower_reference_via_1f(
-                    daq, plan.demod2_cfg,
-                    n_averages=plan.phase_cal_n_averages,
-                    max_iterations=plan.phase_cal_max_iterations,
-                )
-
-            self._set_status_threadsafe("Running measurement …")
-            write_csv = make_incremental_writer(
-                plan.run_ctx.raw_path,
-                lambda records: build_header_fields(plan, records, status="in_progress", comment=""),
-            )
-            run_measurement(
-                daq, plan.out_cfg, plan.demod1_cfg, plan.demod2_cfg, plan.acq_cfg, points,
-                stop_event=self._stop_event,
-                on_point=lambda record: self.app.call_from_thread(self._on_point, record),
-                gaussmeter=gaussmeter, gauss_cfg=plan.gauss_cfg,
-                temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg,
-                geometry_cfg=plan.geometry_cfg,
-                demod2_phase_null_1f_deg=demod2_phase_null_1f_deg, mds=mds,
-                write_csv=write_csv,
-            )
-            final = "Measurement aborted." if self._stop_event.is_set() else "Measurement complete."
-        except Exception as exc:
-            log.exception("Measurement failed")
-            final = f"ERROR: {exc}"
-        finally:
-            # Excitation output off first (immediate, no current into the
-            # DUT), so the magnet can start its ramp-down right away rather
-            # than waiting behind it.
-            if daq is not None:
-                try:
-                    shutdown_output(daq, plan.out_cfg)
-                except Exception:
-                    log.exception("Error while shutting down output")
-            if magnet is not None:
-                try:
-                    shutdown_magnet(magnet, plan.magnet_cfg)
-                except Exception:
-                    log.exception("Error while shutting down magnet")
-            if gaussmeter is not None:
-                try:
-                    shutdown_gaussmeter(gaussmeter)
-                except Exception:
-                    log.exception("Error while shutting down gaussmeter")
-            if temp_ctrl is not None:
-                try:
-                    shutdown_temperature_controller(temp_ctrl)
-                except Exception:
-                    log.exception("Error while shutting down MercuryiTC")
-            self.app.call_from_thread(self._on_finished, final)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1199,113 +1314,7 @@ class MFLIDualHarmonicApp(MeasurementApp):
     # ── Start ────────────────────────────────────────────────────────────────
 
     def _build_plan(self, state: dict) -> MeasurementPlan:
-        out_cfg = OutputConfig(
-            device=state["leader_device"],
-            frequency_Hz=state["frequency_Hz"],
-            amplitude_V=state["amplitude_V"],
-            series_R_ohm=state["series_R_ohm"],
-        )
-        filt_1f = FilterConfig(
-            time_constant_s=state["time_constant_1f_s"],
-            order=state["order_1f"],
-            sinc_filter=state["sinc_filter_1f"],
-        )
-        filt_2f = FilterConfig(
-            time_constant_s=state["time_constant_2f_s"],
-            order=state["order_2f"],
-            sinc_filter=state["sinc_filter_2f"],
-        )
-        demod1_cfg = DemodConfig(
-            device=state["leader_device"], demod_index=0, harmonic=1,
-            differential=state["differential"], ac_coupling=state["ac_coupling"],
-            input_range_V=state["input_range_1f_V"],
-            sample_rate_Hz=state["sample_rate_Hz"], filter=filt_1f,
-        )
-        demod2_cfg = DemodConfig(
-            device=state["follower_device"], demod_index=0, harmonic=2,
-            differential=state["differential"], ac_coupling=state["ac_coupling"],
-            input_range_V=state["input_range_2f_V"],
-            sample_rate_Hz=state["sample_rate_Hz"], filter=filt_2f,
-        )
-        run_ctx = allocate_run(
-            self.data_root, state["sample"], state["device"], MEASUREMENT_TYPE,
-            temperature_setpoint_K=state["temperature_setpoint_K"],
-        )
-        acq_cfg = AcquisitionConfig(
-            settling_time_s=state["settling_time_s"],
-            field_settle_tolerance_mT=state["field_settle_tolerance_mT"],
-            n_averages=state["n_averages"],
-            output_file=str(run_ctx.raw_path),
-        )
-
-        magnet_cfg = None
-        gauss_cfg = None
-        currents_A = None
-        if state["enable_sweep"]:
-            magnet_cfg = MagnetConfig(
-                visa_resource=state["visa_resource"],
-                current_limit_A=state["current_limit_A"],
-                voltage_compliance_V=state["voltage_compliance_V"],
-                ramp_step_A=state["ramp_step_A"],
-                ramp_delay_s=state["ramp_delay_s"],
-            )
-            gauss_cfg = GaussmeterConfig(
-                visa_resource=state["gaussmeter_visa_resource"],
-                n_averages=state["gaussmeter_n_averages"],
-                read_delay_s=state["gaussmeter_read_delay_s"],
-            )
-            currents_A = build_segmented_sweep(state["sweep_rows_parsed"], bidirectional=True)
-
-        temp_cfg = None
-        if state["enable_temperature"]:
-            uids = parse_sensor_uids(state["temperature_sensor_uids"])
-            if uids:
-                temp_cfg = TemperatureControllerConfig(
-                    visa_resource=state["temperature_visa_resource"],
-                    sensor_uids=uids,
-                )
-
-        geometry_cfg = SampleGeometryConfig(
-            hall_bar_length_um=state["hall_bar_length_um"],
-            hall_bar_width_um=state["hall_bar_width_um"],
-            hall_bar_thickness_nm=state["hall_bar_thickness_nm"],
-            field_theta_deg=state["field_theta_deg"],
-            field_phi_deg=state["field_phi_deg"],
-        )
-
-        # Geometry/dimensions are recorded per-row in the CSV (via
-        # build_run_metadata) and belong in sample.yaml long-term — they are
-        # deliberately NOT duplicated into header_extra/index.csv here.
-        header_extra = {
-            "excitation_frequency_Hz": state["frequency_Hz"],
-            "excitation_amplitude_V": state["amplitude_V"],
-            "series_R_ohm": state["series_R_ohm"],
-            "demod1_time_constant_s": state["time_constant_1f_s"],
-            "demod1_order": state["order_1f"],
-            "demod2_time_constant_s": state["time_constant_2f_s"],
-            "demod2_order": state["order_2f"],
-            "n_averages": state["n_averages"],
-            "settling_time_s": state["settling_time_s"],
-        }
-        if state["enable_sweep"]:
-            header_extra["field_sweep_rows_A"] = state["sweep_rows_parsed"]
-
-        return MeasurementPlan(
-            daq_host=state["daq_host"], daq_port=state["daq_port"],
-            leader=state["leader_device"], follower=state["follower_device"],
-            out_cfg=out_cfg, demod1_cfg=demod1_cfg, demod2_cfg=demod2_cfg,
-            acq_cfg=acq_cfg, magnet_cfg=magnet_cfg, gauss_cfg=gauss_cfg, currents_A=currents_A,
-            temp_cfg=temp_cfg,
-            phase_cal_enabled=state["enable_phase_cal"],
-            phase_cal_current_A=state["phase_cal_current_A"],
-            phase_cal_n_averages=state["phase_cal_n_averages"],
-            phase_cal_max_iterations=state["phase_cal_max_iterations"],
-            geometry_cfg=geometry_cfg,
-            run_ctx=run_ctx, data_root=self.data_root,
-            temperature_setpoint_K=state["temperature_setpoint_K"],
-            cooldown=state["cooldown"], header_extra=header_extra,
-            run_cost=run_costs(state, currents_A),
-        )
+        return build_plan(state, self.data_root)
 
 
 def main() -> None:

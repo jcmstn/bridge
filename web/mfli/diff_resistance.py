@@ -17,40 +17,33 @@ hard jump to 0 V.
 from __future__ import annotations
 
 import json
-import textwrap
 from pathlib import Path
 from typing import Optional
 
 from plotly.subplots import make_subplots
 from nicegui import background_tasks, ui
 
-from mfli.mfli_diff_resistance_vs_bias import (
-    AcquisitionConfig, BiasPoint, DemodConfig, FilterConfig, OutputConfig,
-    TemperatureControllerConfig, bidirectional_bias_sweep, configure_demodulator,
-    configure_output, connect, connect_device, connect_temperature_controller,
-    ramp_bias_to_zero, run_measurement, setup_mds, shutdown_output,
-    shutdown_temperature_controller, sync_follower_oscillator,
-)
+import mfli.mfli_diff_resistance_tui as program
 from mfli.mfli_diff_resistance_tui import (
+    build_plan,
     MFLI_DIFF_RESISTANCE_DESCRIPTION,
     DEFAULTS, NUMERIC_FIELDS, TEXT_FIELDS,
-    MEASUREMENT_TYPE, MeasurementPlan, build_header_fields, build_summary,
-    compute_filename_preview, format_si, parse_sensor_uids, run_costs,
+    MeasurementPlan, build_summary,
+    compute_filename_preview,
 )
 from instruments.data_naming import (
-    TEST_SAMPLE, allocate_run, finalize_index_row, make_incremental_writer,
-    preview_raw_filename, proc_path, write_record,
+    TEST_SAMPLE,
 )
-from dc.dc_sweep_utils import safe_shutdown
 from web import run_manager
 from web.run_controller import (
-    RunController, RunCallbacks, FinalStatus, num_field, text_field, bool_switch,
+    RunController, FinalStatus, num_field, text_field, bool_switch,
     param_card, param_grid, advanced_section, stable_card, stable_grid, measurement_layout,
     render_summary, busy_banner, is_busy,
+    program_artifacts, program_run_fn, prompt_last_run,
 )
 from web.directory_picker import validate_directory
 from web.identity_bar import identity_bar
-from web.sample_picker import NEW_SAMPLE_SENTINEL, prepare_data_root, status_comment_dialog
+from web.sample_picker import NEW_SAMPLE_SENTINEL, prepare_data_root
 
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data"
 _SETTINGS_PATH = _DATA_DIR / "web_settings" / "mfli_diff_resistance_web_settings.json"
@@ -72,112 +65,6 @@ def _save_settings(raw: dict) -> None:
         _SETTINGS_PATH.write_text(json.dumps(raw, indent=2))
     except OSError:
         pass
-
-
-def build_plan(state: dict) -> MeasurementPlan:
-    out_cfg = OutputConfig(
-        device=state["leader_device"], frequency_Hz=state["frequency_Hz"],
-        ac_amplitude_V=state["ac_amplitude_V"], series_R_ohm=state["series_R_ohm"],
-        bias_min_V=state["bias_min_V"], bias_max_V=state["bias_max_V"],
-    )
-    filt = FilterConfig(
-        time_constant_s=state["time_constant_s"], order=int(state["order"]),
-        sinc_filter=state["sinc_filter"],
-    )
-    current_cfg = DemodConfig(
-        device=state["leader_device"], label="I (Current Input 1)", demod_index=0, harmonic=1,
-        input_ch=0, use_current_input=True, input_range=state["current_input_range_A"],
-        sample_rate_Hz=state["sample_rate_Hz"], filter=filt,
-    )
-    voltage_cfg = DemodConfig(
-        device=state["follower_device"], label="V (across DUT)", demod_index=0, harmonic=1,
-        input_range=state["voltage_input_range_V"], sample_rate_Hz=state["sample_rate_Hz"], filter=filt,
-    )
-    run_ctx = allocate_run(
-        Path(state["data_dir"]), state["sample"], state["device"], MEASUREMENT_TYPE,
-        temperature_setpoint_K=state["temperature_setpoint_K"],
-    )
-    acq_cfg = AcquisitionConfig(
-        settling_time_s=state["settling_time_s"], n_averages=int(state["n_averages"]),
-        output_file=str(run_ctx.raw_path),
-    )
-
-    biases_V = bidirectional_bias_sweep(
-        v_min=state["bias_min_V"], v_max=state["bias_max_V"], n_points=int(state["n_points"]))
-
-    temp_cfg = None
-    if state["enable_temperature"]:
-        uids = parse_sensor_uids(state["temperature_sensor_uids"])
-        if uids:
-            temp_cfg = TemperatureControllerConfig(
-                visa_resource=state["temperature_visa_resource"], sensor_uids=uids)
-
-    header_extra = {
-        "excitation_frequency_Hz": state["frequency_Hz"],
-        "ac_amplitude_V": state["ac_amplitude_V"],
-        "series_R_ohm": state["series_R_ohm"],
-        "bias_sweep_V": [state["bias_min_V"], state["bias_max_V"], int(state["n_points"])],
-        "demod_time_constant_s": state["time_constant_s"],
-        "demod_order": int(state["order"]),
-        "n_averages": int(state["n_averages"]),
-        "settling_time_s": state["settling_time_s"],
-    }
-
-    return MeasurementPlan(
-        daq_host=state["daq_host"], daq_port=int(state["daq_port"]),
-        leader=state["leader_device"], follower=state["follower_device"],
-        out_cfg=out_cfg, current_cfg=current_cfg, voltage_cfg=voltage_cfg,
-        acq_cfg=acq_cfg, biases_V=biases_V, temp_cfg=temp_cfg,
-        run_ctx=run_ctx, temperature_setpoint_K=state["temperature_setpoint_K"],
-        cooldown=state["cooldown"], header_extra=header_extra,
-        run_cost=run_costs(len(biases_V), state),
-    )
-
-
-def _save_measurement_png(records: list[dict], png_path: Path,
-                           plan: Optional[MeasurementPlan] = None, comment: str = "") -> None:
-    """`plan`/`comment` add a small "at a glance" text annotation -- see
-    mfli_diff_resistance_tui.py's _save_measurement_png for the same
-    logic. Called once when the run ends (comment="") and again, to
-    overwrite the PNG in place, once the operator's comment is known."""
-    if not records:
-        return
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    xs = [r["bias_V"] for r in records]
-    r_diff = [r["R_diff_ohm"] for r in records]
-    x_react = [r["X_reactive_ohm"] for r in records]
-    phase = [r["Z_phase_deg"] for r in records]
-
-    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, sharex=True, figsize=(7, 9))
-    ax1.plot(xs, r_diff, "o-", color="#2E3192")
-    ax2.plot(xs, x_react, "o-", color="#e34948")
-    ax2.axhline(0, color="gray", linewidth=0.8)
-    ax3.plot(xs, phase, "o-", color="#00AEEF")
-    ax1.set_ylabel("R_diff (Ω)"); ax2.set_ylabel("Reactive (Ω)"); ax3.set_ylabel("Phase (deg)")
-    ax3.set_xlabel("DC bias (V)")
-    ax1.set_title("Measurement result — dV/dI vs. bias")
-    for ax in (ax1, ax2, ax3):
-        ax.grid(True, alpha=0.3)
-    fig.tight_layout()
-
-    lines: list[str] = []
-    if plan is not None:
-        freq_Hz = plan.header_extra.get("excitation_frequency_Hz")
-        amp_V = plan.header_extra.get("ac_amplitude_V")
-        if freq_Hz is not None and amp_V is not None:
-            lines.append(f"AC excitation: {format_si(amp_V, 'V')} @ {format_si(freq_Hz, 'Hz')}")
-    if comment:
-        lines.append(f"Comment: {textwrap.shorten(comment, width=90, placeholder='…')}")
-    if lines:
-        fig.text(0.01, 0.01, "\n".join(lines), fontsize=7, color="0.4", va="bottom")
-        fig.subplots_adjust(bottom=0.08 + 0.045 * len(lines))
-
-    png_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(png_path, dpi=150)
-    plt.close(fig)
 
 
 def page() -> None:
@@ -412,30 +299,7 @@ def page() -> None:
     def on_log(text: str, level: int) -> None:
         log_area.push(text)
 
-    async def _prompt_status_comment(plan: MeasurementPlan, records: list[dict]) -> None:
-        result = await status_comment_dialog(page_client)
-        if result is None:
-            return
-        status, comment = result
-        ctx = plan.run_ctx
-        header_fields = build_header_fields(plan, records, status=status, comment=comment)
-        try:
-            # Never truncate an already-written raw file to an empty stub —
-            # only a run that never wrote a point gets a header-only write.
-            if records or not ctx.raw_path.exists():
-                write_record(ctx.raw_path, records, header_fields)
-            finalize_index_row(ctx.sample_dir.parent, ctx.sample, ctx.run_number, header_fields)
-        except Exception:
-            ui.notify("Could not save final status/comment.", type="negative")
-        if comment:
-            try:
-                png_path = proc_path(ctx.sample_dir.parent, ctx.sample, ctx.run_str, ctx.device,
-                                      MEASUREMENT_TYPE, "plot")
-                _save_measurement_png(records, png_path, plan=plan, comment=comment)
-            except Exception:
-                pass
-
-    def make_on_finished(plan: MeasurementPlan):
+    def make_on_finished(plan: MeasurementPlan, run_contexts: list, run_extras: list):
         def on_finished(final: FinalStatus, result) -> None:
             label = {"completed": "Measurement complete.", "aborted": "Measurement aborted.",
                       "error": f"ERROR: {final.error}"}[final.status]
@@ -446,68 +310,8 @@ def page() -> None:
             handle = controller["c"].handle if controller["c"] is not None else None
             records = list(handle.records) if handle is not None else []
             background_tasks.create(
-                _prompt_status_comment(plan, records), name="status_comment_prompt")
+                prompt_last_run(page_client, program, plan, run_contexts, run_extras, records), name="status_comment_prompt")
         return on_finished
-
-    def _finalize(plan: MeasurementPlan, records: list[dict], result, status: str) -> list[str]:
-        """save_artifacts -- runs on the worker thread, right after run_fn
-        returns/raises. Writes the outcome-derived header/index row
-        UNCONDITIONALLY (never gated on the status/comment dialog above) and
-        the final PNG into proc/."""
-        ctx = plan.run_ctx
-        data_root = ctx.sample_dir.parent
-        header_fields = build_header_fields(plan, records, status=status, comment="")
-        write_record(ctx.raw_path, records, header_fields)
-        finalize_index_row(data_root, ctx.sample, ctx.run_number, header_fields)
-        png_path = proc_path(data_root, ctx.sample, ctx.run_str, ctx.device, MEASUREMENT_TYPE, "plot")
-        _save_measurement_png(records, png_path, plan=plan)
-        return [str(ctx.raw_path), str(png_path)]
-
-    def make_run_fn(plan: MeasurementPlan):
-        def run_fn(stop_event, cb: RunCallbacks):
-            daq = None
-            output_configured = False
-            temp_ctrl = None
-            try:
-                cb.on_status("Connecting to LabOne data server …")
-                daq = connect(plan.daq_host, plan.daq_port)
-                connect_device(daq, plan.leader, interface="1GbE")
-                connect_device(daq, plan.follower, interface="1GbE")
-
-                if plan.temp_cfg is not None:
-                    cb.on_status("Connecting to MercuryiTC (temperature) …")
-                    temp_ctrl = connect_temperature_controller(plan.temp_cfg)
-
-                cb.on_status("Synchronizing MDS …")
-                setup_mds(daq, leader=plan.leader, follower=plan.follower)
-
-                cb.on_status("Configuring output & demodulators …")
-                configure_output(daq, plan.out_cfg)
-                output_configured = True
-                sync_follower_oscillator(daq, plan.out_cfg, plan.follower)
-                configure_demodulator(daq, plan.current_cfg)
-                configure_demodulator(daq, plan.voltage_cfg)
-
-                points = [BiasPoint(bias_V=float(v)) for v in plan.biases_V]
-
-                cb.on_status("Running measurement …")
-                write_csv = make_incremental_writer(
-                    plan.run_ctx.raw_path,
-                    lambda records: build_header_fields(plan, records, status="in_progress", comment=""),
-                )
-                return run_measurement(
-                    daq, plan.out_cfg, plan.current_cfg, plan.voltage_cfg, plan.acq_cfg, points,
-                    stop_event=stop_event, on_point=cb.on_point,
-                    temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg,
-                    write_csv=write_csv,
-                )
-            finally:
-                if daq is not None and output_configured:
-                    safe_shutdown("bias ramp-down", lambda: ramp_bias_to_zero(daq, plan.out_cfg))
-                    safe_shutdown("MFLI output", lambda: shutdown_output(daq, plan.out_cfg))
-                if temp_ctrl is not None:
-                    safe_shutdown("MercuryiTC", lambda: shutdown_temperature_controller(temp_ctrl))
-        return run_fn
 
     def on_start() -> None:
         state, parse_errors = parse_state()
@@ -530,15 +334,17 @@ def page() -> None:
         if run_manager.snapshot() is not None:
             ui.notify("Another measurement is already running — see the banner above.", type="warning")
             return
-        plan = build_plan(state)
+        plan = build_plan(state, Path(state["data_dir"]))
+        run_contexts: list = []
+        run_extras: list = []
         run_label.set_text(f"Run #{plan.run_ctx.run_str}")
 
         rc = RunController(
-            suite=SUITE, measurement=PAGE_TITLE, run_fn=make_run_fn(plan),
-            save_artifacts=lambda records, result, status: _finalize(plan, records, result, status),
+            suite=SUITE, measurement=PAGE_TITLE, run_fn=program_run_fn(program, plan, run_contexts, run_extras),
+            save_artifacts=lambda records, result, status: program_artifacts(program, plan, run_contexts),
             parameters=state, data_dir=state["data_dir"], planned_output_paths=[plan.acq_cfg.output_file],
             on_record=on_record, on_status=on_status, on_log=on_log,
-            on_finished=make_on_finished(plan),
+            on_finished=make_on_finished(plan, run_contexts, run_extras),
             sample=plan.run_ctx.sample, device=plan.run_ctx.device,
             run_number=plan.run_ctx.run_number, run_cost=plan.run_cost,
         )

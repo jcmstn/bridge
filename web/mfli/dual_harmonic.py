@@ -18,47 +18,35 @@ from __future__ import annotations
 
 import json
 import logging
-import textwrap
-import time
 from pathlib import Path
 from typing import Optional
 
 from plotly.subplots import make_subplots
 from nicegui import background_tasks, ui
 
-from dc.dc_sweep_utils import build_segmented_sweep, parse_sweep_rows
-from mfli.mfli_dual_harmonic import (
-    AcquisitionConfig, DemodConfig, FilterConfig, GaussmeterConfig, MagnetConfig,
-    MeasurementPoint, OutputConfig, SampleGeometryConfig, TemperatureControllerConfig,
-    acquire_averaged, auto_null_phase, configure_demodulator,
-    configure_output, connect, connect_device, connect_gaussmeter, connect_magnet,
-    connect_temperature_controller, null_follower_reference_via_1f, run_measurement,
-    set_magnet_current, setup_mds,
-    shutdown_gaussmeter, shutdown_magnet, shutdown_output, shutdown_temperature_controller,
-    sync_follower_oscillator,
-)
+from dc.dc_sweep_utils import parse_sweep_rows
+import mfli.mfli_dual_harmonic_tui as program
 from mfli.mfli_dual_harmonic_tui import (
+    build_plan,
     MFLI_DUAL_HARMONIC_DESCRIPTION,
     DEFAULTS, NUMERIC_FIELDS, TEXT_FIELDS, OPTIONAL_NUMERIC_FIELDS,
-    MEASUREMENT_TYPE, MeasurementPlan, build_header_fields, build_summary,
-    compute_filename_preview, format_si, parse_sensor_uids, run_costs,
+    MeasurementPlan, build_summary,
+    compute_filename_preview,
 )
 from instruments.data_naming import (
-    TEST_SAMPLE, allocate_run, finalize_index_row, make_incremental_writer,
-    preview_raw_filename, proc_path, write_record,
+    TEST_SAMPLE,
 )
-from instruments.field_geometry import field_direction_summary_line
-from dc.dc_sweep_utils import safe_shutdown
 from web import run_manager
 from web.run_controller import (
-    RunController, RunCallbacks, FinalStatus, num_field, text_field, textarea_field, bool_switch,
+    RunController, FinalStatus, num_field, text_field, textarea_field, bool_switch,
     optional_num_field, render_summary, busy_banner, is_busy,
     param_card, param_grid, stable_card, stable_grid, advanced_section, measurement_layout,
+    program_artifacts, program_run_fn, prompt_last_run,
 )
 from web.directory_picker import validate_directory
 from web.field_diagram import build_field_diagram_figure
 from web.identity_bar import identity_bar
-from web.sample_picker import NEW_SAMPLE_SENTINEL, prepare_data_root, status_comment_dialog
+from web.sample_picker import NEW_SAMPLE_SENTINEL, prepare_data_root
 
 log = logging.getLogger("web.mfli.dual_harmonic")
 
@@ -82,146 +70,6 @@ def _save_settings(raw: dict) -> None:
         _SETTINGS_PATH.write_text(json.dumps(raw, indent=2))
     except OSError:
         pass
-
-
-def build_plan(state: dict) -> MeasurementPlan:
-    out_cfg = OutputConfig(
-        device=state["leader_device"], frequency_Hz=state["frequency_Hz"],
-        amplitude_V=state["amplitude_V"], series_R_ohm=state["series_R_ohm"],
-    )
-    filt_1f = FilterConfig(
-        time_constant_s=state["time_constant_1f_s"], order=int(state["order_1f"]),
-        sinc_filter=state["sinc_filter_1f"],
-    )
-    filt_2f = FilterConfig(
-        time_constant_s=state["time_constant_2f_s"], order=int(state["order_2f"]),
-        sinc_filter=state["sinc_filter_2f"],
-    )
-    demod1_cfg = DemodConfig(
-        device=state["leader_device"], demod_index=0, harmonic=1,
-        input_range_V=state["input_range_1f_V"], sample_rate_Hz=state["sample_rate_Hz"], filter=filt_1f,
-    )
-    demod2_cfg = DemodConfig(
-        device=state["follower_device"], demod_index=0, harmonic=2,
-        input_range_V=state["input_range_2f_V"], sample_rate_Hz=state["sample_rate_Hz"], filter=filt_2f,
-    )
-    run_ctx = allocate_run(
-        Path(state["data_dir"]), state["sample"], state["device"], MEASUREMENT_TYPE,
-        temperature_setpoint_K=state["temperature_setpoint_K"],
-    )
-    acq_cfg = AcquisitionConfig(
-        settling_time_s=state["settling_time_s"], n_averages=int(state["n_averages"]),
-        field_settle_tolerance_mT=state["field_settle_tolerance_mT"],
-        output_file=str(run_ctx.raw_path),
-    )
-
-    magnet_cfg = None
-    gauss_cfg = None
-    currents_A = None
-    if state["enable_sweep"]:
-        magnet_cfg = MagnetConfig(
-            visa_resource=state["visa_resource"], current_limit_A=state["current_limit_A"],
-            voltage_compliance_V=state["voltage_compliance_V"], ramp_step_A=state["ramp_step_A"],
-            ramp_delay_s=state["ramp_delay_s"],
-        )
-        gauss_cfg = GaussmeterConfig(
-            visa_resource=state["gaussmeter_visa_resource"], n_averages=int(state["gaussmeter_n_averages"]),
-            read_delay_s=state["gaussmeter_read_delay_s"],
-        )
-        currents_A = build_segmented_sweep(state["sweep_rows_parsed"], bidirectional=True)
-
-    temp_cfg = None
-    if state["enable_temperature"]:
-        uids = parse_sensor_uids(state["temperature_sensor_uids"])
-        if uids:
-            temp_cfg = TemperatureControllerConfig(
-                visa_resource=state["temperature_visa_resource"], sensor_uids=uids)
-
-    geometry_cfg = SampleGeometryConfig(
-        hall_bar_length_um=state["hall_bar_length_um"], hall_bar_width_um=state["hall_bar_width_um"],
-        hall_bar_thickness_nm=state["hall_bar_thickness_nm"],
-        field_theta_deg=state["field_theta_deg"], field_phi_deg=state["field_phi_deg"],
-    )
-
-    # Geometry/dimensions are recorded per-row in the CSV (via
-    # build_run_metadata) and belong in sample.yaml long-term — they are
-    # deliberately NOT duplicated into header_extra/index.csv here.
-    header_extra = {
-        "excitation_frequency_Hz": state["frequency_Hz"],
-        "excitation_amplitude_V": state["amplitude_V"],
-        "series_R_ohm": state["series_R_ohm"],
-        "demod1_time_constant_s": state["time_constant_1f_s"],
-        "demod1_order": int(state["order_1f"]),
-        "demod2_time_constant_s": state["time_constant_2f_s"],
-        "demod2_order": int(state["order_2f"]),
-        "n_averages": int(state["n_averages"]),
-        "settling_time_s": state["settling_time_s"],
-    }
-    if state["enable_sweep"]:
-        header_extra["field_sweep_rows_A"] = state["sweep_rows_parsed"]
-
-    return MeasurementPlan(
-        daq_host=state["daq_host"], daq_port=int(state["daq_port"]),
-        leader=state["leader_device"], follower=state["follower_device"],
-        out_cfg=out_cfg, demod1_cfg=demod1_cfg, demod2_cfg=demod2_cfg, acq_cfg=acq_cfg,
-        magnet_cfg=magnet_cfg, gauss_cfg=gauss_cfg, currents_A=currents_A, temp_cfg=temp_cfg,
-        phase_cal_enabled=state["enable_phase_cal"], phase_cal_current_A=state["phase_cal_current_A"],
-        phase_cal_n_averages=int(state["phase_cal_n_averages"]),
-        phase_cal_max_iterations=int(state["phase_cal_max_iterations"]), geometry_cfg=geometry_cfg,
-        run_ctx=run_ctx, temperature_setpoint_K=state["temperature_setpoint_K"],
-        cooldown=state["cooldown"], header_extra=header_extra,
-        run_cost=run_costs(state, currents_A),
-    )
-
-
-def _save_measurement_png(records: list[dict], png_path: Path,
-                           plan: Optional[MeasurementPlan] = None, comment: str = "") -> None:
-    """`plan`/`comment` add a small "at a glance" text annotation -- see
-    mfli_dual_harmonic_tui.py's _save_measurement_png for the same logic.
-    Called once when the run ends (comment="") and again, to overwrite the
-    PNG in place, once the operator's comment is known."""
-    if not records:
-        return
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    has_field = any(r.get("magnet_field_mT") is not None for r in records)
-    xs = [r["magnet_field_mT"] if has_field else r["point_index"] for r in records]
-    r1 = [r["1f_R_V"] for r in records]
-    r2 = [r["2f_R_V"] for r in records]
-
-    fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True, figsize=(7, 7))
-    ax1.plot(xs, r1, "o-", color="tab:blue")
-    ax2.plot(xs, r2, "o-", color="tab:orange")
-    ax1.set_ylabel("1f  R (V)"); ax2.set_ylabel("2f  R (V)")
-    ax2.set_xlabel("Magnetic field (mT)" if has_field else "Point #")
-    ax1.set_title("Measurement result")
-    for ax in (ax1, ax2):
-        ax.grid(True, alpha=0.3)
-    fig.tight_layout()
-
-    lines: list[str] = []
-    if plan is not None:
-        theta = plan.geometry_cfg.field_theta_deg
-        if theta is not None:
-            lines.append(field_direction_summary_line(theta, plan.geometry_cfg.field_phi_deg))
-        freq_Hz = plan.header_extra.get("excitation_frequency_Hz")
-        amp_V = plan.header_extra.get("excitation_amplitude_V")
-        if freq_Hz is not None and amp_V is not None:
-            lines.append(f"AC excitation: {format_si(amp_V, 'V')} @ {format_si(freq_Hz, 'Hz')}")
-        tc1, order1 = plan.demod1_cfg.filter.time_constant_s, plan.demod1_cfg.filter.order
-        tc2, order2 = plan.demod2_cfg.filter.time_constant_s, plan.demod2_cfg.filter.order
-        lines.append(f"Filter: 1f TC={tc1:g} s order={order1}, 2f TC={tc2:g} s order={order2}")
-    if comment:
-        lines.append(f"Comment: {textwrap.shorten(comment, width=90, placeholder='…')}")
-    if lines:
-        fig.text(0.01, 0.01, "\n".join(lines), fontsize=7, color="0.4", va="bottom")
-        fig.subplots_adjust(bottom=0.08 + 0.045 * len(lines))
-
-    png_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(png_path, dpi=150)
-    plt.close(fig)
 
 
 def page() -> None:
@@ -543,30 +391,7 @@ def page() -> None:
     def on_log(text: str, level: int) -> None:
         log_area.push(text)
 
-    async def _prompt_status_comment(plan: MeasurementPlan, records: list[dict]) -> None:
-        result = await status_comment_dialog(page_client)
-        if result is None:
-            return
-        status, comment = result
-        ctx = plan.run_ctx
-        header_fields = build_header_fields(plan, records, status=status, comment=comment)
-        try:
-            # Never truncate an already-written raw file to an empty stub —
-            # only a run that never wrote a point gets a header-only write.
-            if records or not ctx.raw_path.exists():
-                write_record(ctx.raw_path, records, header_fields)
-            finalize_index_row(ctx.sample_dir.parent, ctx.sample, ctx.run_number, header_fields)
-        except Exception:
-            ui.notify("Could not save final status/comment.", type="negative")
-        if comment:
-            try:
-                png_path = proc_path(ctx.sample_dir.parent, ctx.sample, ctx.run_str, ctx.device,
-                                      MEASUREMENT_TYPE, "plot")
-                _save_measurement_png(records, png_path, plan=plan, comment=comment)
-            except Exception:
-                pass
-
-    def make_on_finished(plan: MeasurementPlan):
+    def make_on_finished(plan: MeasurementPlan, run_contexts: list, run_extras: list):
         def on_finished(final: FinalStatus, result) -> None:
             label = {"completed": "Measurement complete.", "aborted": "Measurement aborted.",
                       "error": f"ERROR: {final.error}"}[final.status]
@@ -577,124 +402,8 @@ def page() -> None:
             handle = controller["c"].handle if controller["c"] is not None else None
             records = list(handle.records) if handle is not None else []
             background_tasks.create(
-                _prompt_status_comment(plan, records), name="status_comment_prompt")
+                prompt_last_run(page_client, program, plan, run_contexts, run_extras, records), name="status_comment_prompt")
         return on_finished
-
-    def _finalize(plan: MeasurementPlan, records: list[dict], result, status: str) -> list[str]:
-        """save_artifacts -- runs on the worker thread, right after run_fn
-        returns/raises. Writes the outcome-derived header/index row
-        UNCONDITIONALLY (never gated on the status/comment dialog above) and
-        the final PNG into proc/."""
-        ctx = plan.run_ctx
-        data_root = ctx.sample_dir.parent
-        header_fields = build_header_fields(plan, records, status=status, comment="")
-        write_record(ctx.raw_path, records, header_fields)
-        finalize_index_row(data_root, ctx.sample, ctx.run_number, header_fields)
-        png_path = proc_path(data_root, ctx.sample, ctx.run_str, ctx.device, MEASUREMENT_TYPE, "plot")
-        _save_measurement_png(records, png_path, plan=plan)
-        return [str(ctx.raw_path), str(png_path)]
-
-    def make_run_fn(plan: MeasurementPlan):
-        def run_fn(stop_event, cb: RunCallbacks):
-            daq = magnet = gaussmeter = temp_ctrl = None
-            try:
-                cb.on_status("Connecting to LabOne data server …")
-                daq = connect(plan.daq_host, plan.daq_port)
-                connect_device(daq, plan.leader, interface="1GbE")
-                connect_device(daq, plan.follower, interface="1GbE")
-
-                cb.on_status("Synchronizing MDS …")
-                mds = setup_mds(daq, leader=plan.leader, follower=plan.follower)
-
-                cb.on_status("Configuring output & demodulators …")
-                configure_output(daq, plan.out_cfg)
-                sync_follower_oscillator(daq, plan.out_cfg, plan.follower)
-                configure_demodulator(daq, plan.demod1_cfg)
-                configure_demodulator(daq, plan.demod2_cfg)
-
-                if plan.temp_cfg is not None:
-                    cb.on_status("Connecting to MercuryiTC (temperature) …")
-                    temp_ctrl = connect_temperature_controller(plan.temp_cfg)
-
-                if plan.magnet_cfg is not None and plan.currents_A is not None:
-                    cb.on_status("Connecting magnet power supply …")
-                    magnet = connect_magnet(plan.magnet_cfg)
-                    cb.on_status("Connecting gaussmeter …")
-                    gaussmeter = connect_gaussmeter(plan.gauss_cfg)
-                    points = [
-                        MeasurementPoint(magnet_current_A=I,
-                                         set_action=lambda daq, I=I: set_magnet_current(
-                            magnet, plan.magnet_cfg, I, gaussmeter, plan.gauss_cfg,
-                            plan.acq_cfg.field_settle_tolerance_mT, stop_event))
-                        for I in plan.currents_A
-                    ]
-                else:
-                    points = [MeasurementPoint()]
-
-                demod2_phase_null_1f_deg = None
-                if plan.phase_cal_enabled:
-                    cb.on_status("Phase calibration: nulling 1f Y (leader demod phaseshift) …")
-                    if magnet is not None and plan.phase_cal_current_A is not None:
-                        log.info("Phase calibration: ramping magnet to %.4f A ...", plan.phase_cal_current_A)
-                        set_magnet_current(magnet, plan.magnet_cfg, plan.phase_cal_current_A,
-                                           gaussmeter, plan.gauss_cfg,
-                                           plan.acq_cfg.field_settle_tolerance_mT, stop_event)
-                        time.sleep(plan.acq_cfg.settling_time_s)
-                    result = auto_null_phase(
-                        daq, plan.demod1_cfg, n_averages=plan.phase_cal_n_averages,
-                        max_iterations=plan.phase_cal_max_iterations,
-                    )
-                    if not result.converged:
-                        log.warning(
-                            "Phase null did not fully converge after %d iteration(s) "
-                            "(|Y|/R=%.2e) — check cabling/contacts before trusting the 2f data.",
-                            result.iterations, result.residual_ratio,
-                        )
-                    d2 = acquire_averaged(daq, plan.demod2_cfg, plan.phase_cal_n_averages)
-                    log.info(
-                        "2f snapshot at calibration point: X=%.4e V  Y=%.4e V  R=%.4e V — "
-                        "check which channel carries the structured field dependence in the "
-                        "recorded sweep before trusting either one.",
-                        d2["x_mean"], d2["y_mean"], d2["r_mean"],
-                    )
-
-                    # Anchor the follower's 2f reference to the drive current
-                    # (null the follower at 1f against the same split V_xy) so
-                    # analysis can rotate the recorded 2f X/Y into the current
-                    # frame — saved as demod2_phase_null_1f_deg.
-                    cb.on_status("Phase calibration: anchoring follower 2f reference (1f null) …")
-                    demod2_phase_null_1f_deg = null_follower_reference_via_1f(
-                        daq, plan.demod2_cfg,
-                        n_averages=plan.phase_cal_n_averages,
-                        max_iterations=plan.phase_cal_max_iterations,
-                    )
-
-                cb.on_status("Running measurement …")
-                write_csv = make_incremental_writer(
-                    plan.run_ctx.raw_path,
-                    lambda records: build_header_fields(plan, records, status="in_progress", comment=""),
-                )
-                return run_measurement(
-                    daq, plan.out_cfg, plan.demod1_cfg, plan.demod2_cfg, plan.acq_cfg, points,
-                    stop_event=stop_event, on_point=cb.on_point,
-                    gaussmeter=gaussmeter, gauss_cfg=plan.gauss_cfg,
-                    temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg, geometry_cfg=plan.geometry_cfg,
-                    demod2_phase_null_1f_deg=demod2_phase_null_1f_deg, mds=mds,
-                    write_csv=write_csv,
-                )
-            finally:
-                # Excitation output off first (immediate, no current into
-                # the DUT), so the magnet can start its ramp-down right
-                # away rather than waiting behind it.
-                if daq is not None:
-                    safe_shutdown("MFLI output", lambda: shutdown_output(daq, plan.out_cfg))
-                if magnet is not None:
-                    safe_shutdown("magnet", lambda: shutdown_magnet(magnet, plan.magnet_cfg))
-                if gaussmeter is not None:
-                    safe_shutdown("gaussmeter", lambda: shutdown_gaussmeter(gaussmeter))
-                if temp_ctrl is not None:
-                    safe_shutdown("MercuryiTC", lambda: shutdown_temperature_controller(temp_ctrl))
-        return run_fn
 
     def on_start() -> None:
         state, parse_errors = parse_state()
@@ -717,15 +426,17 @@ def page() -> None:
         if run_manager.snapshot() is not None:
             ui.notify("Another measurement is already running — see the banner above.", type="warning")
             return
-        plan = build_plan(state)
+        plan = build_plan(state, Path(state["data_dir"]))
+        run_contexts: list = []
+        run_extras: list = []
         run_label.set_text(f"Run #{plan.run_ctx.run_str}")
 
         rc = RunController(
-            suite=SUITE, measurement=PAGE_TITLE, run_fn=make_run_fn(plan),
-            save_artifacts=lambda records, result, status: _finalize(plan, records, result, status),
+            suite=SUITE, measurement=PAGE_TITLE, run_fn=program_run_fn(program, plan, run_contexts, run_extras),
+            save_artifacts=lambda records, result, status: program_artifacts(program, plan, run_contexts),
             parameters=state, data_dir=state["data_dir"], planned_output_paths=[plan.acq_cfg.output_file],
             on_record=on_record, on_status=on_status, on_log=on_log,
-            on_finished=make_on_finished(plan),
+            on_finished=make_on_finished(plan, run_contexts, run_extras),
             sample=plan.run_ctx.sample, device=plan.run_ctx.device,
             run_number=plan.run_ctx.run_number, run_cost=plan.run_cost,
         )

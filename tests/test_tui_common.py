@@ -13,34 +13,52 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
-from textual import work
 from textual.app import App
 
 import instruments.tui_common as tc
 from instruments import run_index
-from instruments.data_naming import allocate_run, ensure_sample, read_raw
+from instruments.data_naming import allocate_run, ensure_sample, read_raw, record_run
+
+
+# This test module plays the "program module": the pure API the base
+# RunScreen (and a web page) drive — run_plan / build_header_fields / save_run_png.
+PNGS: list = []
+
+
+def build_header_fields(plan, ctx, records, *, status, comment, extra=None):
+    return {"run": ctx.run_number, "sample": ctx.sample, "device": ctx.device,
+            "type": "IV", "status": status, "comment": comment}
+
+
+def save_run_png(plan, records, png_path, comment=""):
+    PNGS.append((png_path.name, len(records), comment))
+
+
+def run_plan(plan, stop_event, *, on_status=None, on_run_label=None, on_point=None,
+             on_run_finished=None, run_contexts=None, run_extras=None):
+    ctx = plan.run_ctx
+    run_contexts.append(ctx)
+    run_extras.append(None)
+
+    def measure(point_cb, write_csv):
+        recs = []
+        for i in range(3):
+            rec = {"point_index": i, "voltage_V": 0.1 * i}
+            recs.append(rec)
+            point_cb(rec)
+            write_csv(recs)
+
+    record_run(plan.data_root, ctx,
+               lambda records, status: build_header_fields(plan, ctx, records, status=status, comment=""),
+               measure, stop_event, on_point=on_point, on_finished=on_run_finished)
 
 
 class _Screen(tc.MeasurementRunScreen):
     TABLE_COLUMNS = ("#", "V")
     MEASUREMENT_TYPE = "IV"
-    pngs: list = []
 
     def table_row(self, record):
         return (str(record["point_index"] + 1), f"{record['voltage_V']:g}")
-
-    def save_png(self, records, png_path, comment=""):
-        type(self).pngs.append((png_path.name, len(records), comment))
-
-    def build_header(self, ctx, records, *, status, comment, extra):
-        return {"run": ctx.run_number, "sample": ctx.sample, "device": ctx.device,
-                "type": "IV", "status": status, "comment": comment}
-
-    @work(thread=True, exclusive=True)
-    def do_run(self):
-        for i in range(3):
-            self.app.call_from_thread(self._on_point, {"point_index": i, "voltage_V": 0.1 * i})
-        self.app.call_from_thread(self._on_finished, "Measurement complete.")
 
 
 def test_single_run_lifecycle(tmp_path: Path, monkeypatch) -> None:
@@ -50,7 +68,7 @@ def test_single_run_lifecycle(tmp_path: Path, monkeypatch) -> None:
                            header_extra={"sense_current_A": 1e-3})
     answers = []
     monkeypatch.setattr(tc, "StatusCommentScreen", lambda: answers.append("asked") or tc.Screen())
-    _Screen.pngs = []
+    PNGS.clear()
     screen = _Screen(plan)
 
     class Host(App):
@@ -76,8 +94,8 @@ def test_single_run_lifecycle(tmp_path: Path, monkeypatch) -> None:
     assert len(read_raw(ctx.raw_path)) == 3
     row = pd.read_csv(tmp_path / "A" / "index.csv").iloc[0]
     assert (row["status"], row["comment"]) == ("good", "clean curve")
-    assert [(n, k) for n, k, _ in _Screen.pngs] == [(f"A_{ctx.run_str}_HB3_IV_plot.png", 3)] * 2
-    assert _Screen.pngs[-1][2] == "clean curve"          # re-saved with the comment
+    assert [(n, k) for n, k, _ in PNGS] == [(f"A_{ctx.run_str}_HB3_IV_plot.png", 3)] * 2
+    assert PNGS[-1][2] == "clean curve"          # re-saved with the comment
     (hist,) = run_index.recent_runs()
     # suite = the program's package ("dc" -> "DC"); here the test module's
     assert (hist["suite"], hist["measurement"], hist["status"], hist["point_count"]) == \

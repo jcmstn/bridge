@@ -1,5 +1,5 @@
 """
-Plan-purity test for web/mfli/dual_harmonic_6221.py's build_plan().
+Plan-purity test for shared build_plan() (TUI + web).
 
 No NiceGUI page render or hardware needed -- build_plan() is a plain
 function of a state dict, side-effecting only via allocate_run() (naming/
@@ -11,7 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from instruments.data_naming import ensure_sample
-from web.mfli.dual_harmonic_6221 import build_plan
+from mfli.mfli_dual_harmonic_6221_tui import build_plan
 
 
 def _state(data_dir: Path, **overrides) -> dict:
@@ -56,7 +56,7 @@ def test_build_plan_does_not_allocate_a_run_upfront(tmp_path: Path) -> None:
     # effects).
     ensure_sample(tmp_path, "A", create=True)
 
-    plan1 = build_plan(_state(tmp_path))
+    plan1 = build_plan(_state(tmp_path), tmp_path)
     assert plan1.acq_cfg.output_file == ""
     assert plan1.ac_cfg.amplitude_A == 1e-7
     assert plan1.amplitudes_A == [1e-7]
@@ -66,7 +66,7 @@ def test_build_plan_does_not_allocate_a_run_upfront(tmp_path: Path) -> None:
 def test_build_plan_multiple_amplitudes(tmp_path: Path) -> None:
     ensure_sample(tmp_path, "A", create=True)
     plan = build_plan(_state(tmp_path, amplitude_values="1e-7, 2e-7",
-                              amplitude_list=[1e-7, 2e-7]))
+                              amplitude_list=[1e-7, 2e-7]), tmp_path)
     assert plan.amplitudes_A == [1e-7, 2e-7]
     assert plan.ac_cfg.amplitude_A == 1e-7
     assert plan.series.startswith("A_HB3_HARM6_")
@@ -77,7 +77,7 @@ def test_build_plan_multi_row_sweep(tmp_path: Path) -> None:
     plan = build_plan(_state(
         tmp_path, enable_sweep=True,
         sweep_rows_parsed=[(-1.0, 1.0, 10), (1.0, 10.0, 10)],
-    ))
+    ), tmp_path)
     assert len(plan.currents_A) == 37
     assert plan.header_extra["field_sweep_rows_A"] == [(-1.0, 1.0, 10), (1.0, 10.0, 10)]
 
@@ -89,7 +89,7 @@ def test_save_measurement_png_single_run_looks_like_a_manual_run(tmp_path) -> No
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    from web.mfli.dual_harmonic_6221 import _save_measurement_png
+    from mfli.mfli_dual_harmonic_6221_tui import _save_measurement_png
 
     records = [
         {"point_index": i, "magnet_field_mT": None, "1f_R_V": 1e-3 * i, "2f_R_V": 2e-6 * i,

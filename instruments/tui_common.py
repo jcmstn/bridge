@@ -54,8 +54,7 @@ from textual.widgets import (
 from instruments import run_index
 from instruments.data_dir import DataDirPickerScreen
 from instruments.data_naming import (
-    TEST_SAMPLE, RunContext, ensure_sample, finalize_index_row, finish_last_run, proc_path,
-    write_record,
+    TEST_SAMPLE, RunContext, ensure_sample, finish_last_run, proc_path,
 )
 from instruments.live_plot import start_live_plot
 from instruments.run_time import progress_step, progress_total
@@ -260,9 +259,8 @@ class MeasurementRunScreen(Screen):
         self._records: list[dict] = []
         self._plot_queue: Optional["mp.Queue"] = None
         self._plot_process: Optional[mp.Process] = None
-        run_ctx = getattr(plan, "run_ctx", None)
-        self._run_contexts: list[RunContext] = [run_ctx] if run_ctx is not None else []
-        self._run_extras: list[Optional[dict]] = []    # parallel to _run_contexts
+        self._run_contexts: list[RunContext] = []       # filled by run_plan()
+        self._run_extras: list[Optional[dict]] = []     # parallel to _run_contexts
         # The LAST run's PNG, stashed by _save_run_png so _on_status_comment
         # can re-save it in place once the operator's comment is known.
         self._png_path: Optional[Path] = None
@@ -336,6 +334,7 @@ class MeasurementRunScreen(Screen):
             self._plot_process.terminate()
 
     DONE_STATUS = "Measurement complete."
+    ABORTED_STATUS = "Measurement aborted."
 
     @work(thread=True, exclusive=True)
     def do_run(self) -> None:
@@ -347,7 +346,7 @@ class MeasurementRunScreen(Screen):
                 on_point=lambda record: self.app.call_from_thread(self._on_point, record),
                 on_run_finished=self._save_run_png,
                 run_contexts=self._run_contexts, run_extras=self._run_extras)
-            final = "Measurement aborted." if self._stop_event.is_set() else self.DONE_STATUS
+            final = self.ABORTED_STATUS if self._stop_event.is_set() else self.DONE_STATUS
         except Exception as exc:
             log.exception("Measurement failed")
             final = f"ERROR: {exc}"
@@ -417,30 +416,6 @@ class MeasurementRunScreen(Screen):
         except Exception:
             log.exception("Could not save measurement plot PNG")
 
-    def _last_run(self) -> Optional[tuple[RunContext, list[dict], Optional[dict]]]:
-        if not self._run_contexts:
-            return None
-        idx = len(self._run_contexts) - 1
-        records = [r for r in self._records if r.get("series_index", 0) == idx]
-        extra = self._run_extras[idx] if idx < len(self._run_extras) else None
-        return self._run_contexts[idx], records, extra
-
-    def finalize_single_run(self, outcome_status: str) -> None:
-        """Single-run plans (plan.run_ctx): write the final raw file + index
-        row with the outcome status, then the PNG — unconditionally, before
-        the optional status/comment prompt. Multi-run programs finalize each
-        run inside do_run() instead."""
-        if getattr(self.plan, "run_ctx", None) is None:
-            return
-        ctx, records, extra = self._last_run()
-        header_fields = self.build_header(ctx, records, status=outcome_status, comment="", extra=extra)
-        try:
-            write_record(ctx.raw_path, records, header_fields)
-            finalize_index_row(self.plan.data_root, ctx.sample, ctx.run_number, header_fields)
-        except Exception:
-            log.exception("Could not finalize run record")
-        self._save_run_png(ctx, records)
-
     def _on_finished(self, final_status: str) -> None:
         self._measurement_running = False
         self._set_status(final_status)
@@ -448,7 +423,6 @@ class MeasurementRunScreen(Screen):
         self.query_one("#abort_btn", Button).disabled = True
         outcome = "aborted" if self._stop_event.is_set() \
             else ("error" if final_status.startswith("ERROR") else "completed")
-        self.finalize_single_run(outcome)
         self._history_finish(outcome, final_status)
         if self._run_contexts:
             self.app.push_screen(StatusCommentScreen(), self._on_status_comment)

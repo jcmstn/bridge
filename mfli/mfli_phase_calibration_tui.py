@@ -23,12 +23,12 @@ from __future__ import annotations
 import logging
 import multiprocessing as mp
 import textwrap
+import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 
-from textual import work
 from textual.binding import Binding
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -44,7 +44,7 @@ from textual.widgets import (
     TextArea,
 )
 
-from dc.dc_sweep_utils import build_segmented_sweep, parse_sweep_rows
+from dc.dc_sweep_utils import build_segmented_sweep, parse_sweep_rows, safe_shutdown
 from mfli.mfli_dual_harmonic import (
     DemodConfig,
     FilterConfig,
@@ -87,7 +87,7 @@ from instruments.run_time import (
 from instruments.data_naming import (
     RunContext,
     allocate_run,
-    make_incremental_writer,
+    record_run,
     preview_raw_filename,
 )
 from instruments.tui_common import (
@@ -332,8 +332,8 @@ def run_costs(state: dict) -> RunCost:
     return rc
 
 
-def build_header_fields(plan: "CalibrationPlan", records: list[dict], *,
-                         status: str, comment: str) -> dict:
+def build_header_fields(plan: "CalibrationPlan", ctx: RunContext, records: list[dict], *,
+                        status: str, comment: str, extra: Optional[dict] = None) -> dict:
     """
     Universal + measurement-specific header/index fields for one run. Called
     once with the complete sweep DataFrame's records (this suite writes in
@@ -346,7 +346,6 @@ def build_header_fields(plan: "CalibrationPlan", records: list[dict], *,
     backfilled with the setpoint) whenever the MercuryiTC is disconnected
     or hasn't produced a reading yet.
     """
-    ctx = plan.run_ctx
     measured = [r["temperature_1_K"] for r in records if r.get("temperature_1_K") is not None]
     T_K = (sum(measured) / len(measured)) if measured else ""
     fields = {
@@ -363,6 +362,8 @@ def build_header_fields(plan: "CalibrationPlan", records: list[dict], *,
         "series": plan.series,
     }
     fields.update(plan.header_extra)
+    if extra:
+        fields.update(extra)
     return fields
 
 
@@ -608,16 +609,213 @@ def _save_diagnostic_png(records: list[dict], png_path: Path,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Plan + run  ── pure, shared by the TUI RunScreen and web/mfli/phase_calibration.py
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_plan(state: dict, data_root: Path) -> CalibrationPlan:
+    """One parsed, validated run request from a state dict. Pure — shared by
+    the TUI and the web page."""
+    out_cfg = OutputConfig(
+        device=state["leader_device"],
+        frequency_Hz=state["frequency_Hz"],
+        amplitude_V=state["amplitude_V"],
+        series_R_ohm=state["series_R_ohm"],
+    )
+    filt = FilterConfig(
+        time_constant_s=state["time_constant_s"],
+        order=state["order"],
+        sinc_filter=state["sinc_filter"],
+    )
+    demod1_cfg = DemodConfig(
+        device=state["leader_device"], demod_index=0, harmonic=1,
+        input_range_V=state["input_range_1f_V"],
+        sample_rate_Hz=state["sample_rate_Hz"], filter=filt,
+    )
+    demod2_cfg = DemodConfig(
+        device=state["follower_device"], demod_index=0, harmonic=2,
+        input_range_V=state["input_range_2f_V"],
+        sample_rate_Hz=state["sample_rate_Hz"], filter=filt,
+    )
+    magnet_cfg = MagnetConfig(
+        visa_resource=state["visa_resource"],
+        current_limit_A=state["current_limit_A"],
+        voltage_compliance_V=state["voltage_compliance_V"],
+        ramp_step_A=state["ramp_step_A"],
+        ramp_delay_s=state["ramp_delay_s"],
+    )
+    gauss_cfg = GaussmeterConfig(
+        visa_resource=state["gaussmeter_visa_resource"],
+        n_averages=state["gaussmeter_n_averages"],
+        read_delay_s=state["gaussmeter_read_delay_s"],
+    )
+    sweep_cfg = SweepConfig(
+        rows=state["sweep_rows_parsed"],
+        settling_time_s=state["sweep_settling_time_s"], n_averages=state["sweep_n_averages"],
+        field_settle_tolerance_mT=state["field_settle_tolerance_mT"],
+    )
+    amplitude_check_cfg = AmplitudeCheckConfig(
+        enabled=state["enable_amplitude_check"],
+        amplitudes_V=state["amplitudes_V"] or [0.05, 0.1],
+        n_averages=state["amp_n_averages"],
+    )
+    frequency_check_cfg = FrequencyCheckConfig(
+        enabled=state["enable_frequency_check"],
+        frequencies_Hz=state["frequencies_Hz"] or [263.3, 317.3, 383.3],
+        n_averages=state["freq_n_averages"],
+        max_iterations=state["freq_max_iterations"],
+        tol_deg=state["freq_tol_deg"],
+    )
+    run_ctx = allocate_run(
+        data_root, state["sample"], state["device"], MEASUREMENT_TYPE,
+        temperature_setpoint_K=state["temperature_setpoint_K"],
+    )
+    output_csv = str(run_ctx.raw_path)
+
+    temp_cfg = None
+    if state["enable_temperature"]:
+        uids = parse_sensor_uids(state["temperature_sensor_uids"])
+        if uids:
+            temp_cfg = TemperatureControllerConfig(
+                visa_resource=state["temperature_visa_resource"],
+                sensor_uids=uids,
+            )
+
+    header_extra = {
+        "excitation_frequency_Hz": state["frequency_Hz"],
+        "excitation_amplitude_V": state["amplitude_V"],
+        "series_R_ohm": state["series_R_ohm"],
+        "calibration_current_A": state["calibration_current_A"],
+        "field_sweep_rows_A": state["sweep_rows_parsed"],
+        "demod_time_constant_s": state["time_constant_s"],
+        "demod_order": state["order"],
+    }
+
+    return CalibrationPlan(
+        daq_host=state["daq_host"], daq_port=state["daq_port"],
+        leader=state["leader_device"], follower=state["follower_device"],
+        out_cfg=out_cfg, demod1_cfg=demod1_cfg, demod2_cfg=demod2_cfg,
+        magnet_cfg=magnet_cfg, gauss_cfg=gauss_cfg, sweep_cfg=sweep_cfg,
+        calibration_current_A=state["calibration_current_A"],
+        null_n_averages=state["null_n_averages"],
+        null_max_iterations=state["null_max_iterations"],
+        null_tol_deg=state["null_tol_deg"],
+        hold_tol_ratio=state["hold_tol_ratio"],
+        amplitude_check_cfg=amplitude_check_cfg,
+        frequency_check_cfg=frequency_check_cfg,
+        output_csv=output_csv,
+        run_ctx=run_ctx, data_root=data_root, temperature_setpoint_K=state["temperature_setpoint_K"],
+        cooldown=state["cooldown"], header_extra=header_extra,
+        temp_cfg=temp_cfg, run_cost=run_costs(state),
+    )
+
+def _ignore(*_args) -> None:
+    pass
+
+
+def run_plan(plan: CalibrationPlan, stop_event: threading.Event, *,
+             on_status: Callable[[str], None] = _ignore,
+             on_run_label: Callable[[str], None] = _ignore,
+             on_point: Callable[[dict], None] = _ignore,
+             on_run_finished: Optional[Callable[[RunContext, list], None]] = None,
+             run_contexts: Optional[list] = None,
+             run_extras: Optional[list] = None):
+    """Record the plan's single run (plan.run_ctx, allocated at Start): connect,
+    run the calibration, finalize the run the instant it ends — even if
+    connecting failed — then shut down, and only then save the diagnostic PNG.
+    Logs and returns the PhaseCalibrationReport (None if it never finished).
+    Pure — the TUI's RunScreen and the web page each pass their own callbacks."""
+    run_contexts = [] if run_contexts is None else run_contexts
+    run_extras = [] if run_extras is None else run_extras
+    ctx = plan.run_ctx
+    run_contexts.append(ctx)
+    run_extras.append(None)
+    daq = magnet = gaussmeter = temp_ctrl = None
+    report = None
+    recorded: list[dict] = []
+
+    def measure(point_cb, write_csv) -> None:
+        nonlocal daq, magnet, gaussmeter, temp_ctrl, report
+        on_status("Connecting to LabOne data server …")
+        daq = connect(plan.daq_host, plan.daq_port)
+        connect_device(daq, plan.leader, interface="1GbE")
+        connect_device(daq, plan.follower, interface="1GbE")
+
+        on_status("Synchronizing MDS …")
+        setup_mds(daq, leader=plan.leader, follower=plan.follower)
+
+        on_status("Configuring output & demodulators …")
+        configure_output(daq, plan.out_cfg)
+        sync_follower_oscillator(daq, plan.out_cfg, plan.follower)
+        configure_demodulator(daq, plan.demod1_cfg)
+        configure_demodulator(daq, plan.demod2_cfg)
+
+        on_status("Connecting magnet power supply …")
+        magnet = connect_magnet(plan.magnet_cfg)
+        on_status("Connecting gaussmeter …")
+        gaussmeter = connect_gaussmeter(plan.gauss_cfg)
+
+        if plan.temp_cfg is not None:
+            on_status("Connecting to MercuryiTC (temperature) …")
+            temp_ctrl = connect_temperature_controller(plan.temp_cfg)
+
+        report = run_phase_calibration(
+            daq, plan.leader, plan.follower, plan.out_cfg, plan.demod1_cfg, plan.demod2_cfg,
+            plan.sweep_cfg, magnet, plan.magnet_cfg,
+            calibration_current_A=plan.calibration_current_A,
+            null_n_averages=plan.null_n_averages,
+            null_max_iterations=plan.null_max_iterations,
+            null_tol_deg=plan.null_tol_deg,
+            output_csv=plan.output_csv,
+            gaussmeter=gaussmeter, gauss_cfg=plan.gauss_cfg,
+            hold_tol_ratio=plan.hold_tol_ratio,
+            amplitude_check_cfg=plan.amplitude_check_cfg,
+            frequency_check_cfg=plan.frequency_check_cfg,
+            stop_event=stop_event, on_point=point_cb, on_status=on_status,
+            temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg,
+            write_csv=lambda df: write_csv(df.to_dict("records")),
+        )
+        for line in format_report(report).splitlines():
+            log.info(line)
+
+    try:
+        record_run(plan.data_root, ctx,
+                   lambda records, status: build_header_fields(plan, ctx, records, status=status, comment=""),
+                   measure, stop_event,
+                   on_point=lambda record: (recorded.append(record), on_point(record)))
+    finally:
+        # Excitation output off first (immediate, no current into the DUT), so
+        # the magnet can start its ramp-down right away rather than waiting.
+        if daq is not None:
+            safe_shutdown("MFLI output", lambda: shutdown_output(daq, plan.out_cfg))
+        if magnet is not None:
+            safe_shutdown("magnet", lambda: shutdown_magnet(magnet, plan.magnet_cfg))
+        if gaussmeter is not None:
+            safe_shutdown("gaussmeter", lambda: shutdown_gaussmeter(gaussmeter))
+        if temp_ctrl is not None:
+            safe_shutdown("MercuryiTC", lambda: shutdown_temperature_controller(temp_ctrl))
+        if on_run_finished is not None:
+            try:
+                on_run_finished(ctx, recorded)
+            except Exception:
+                log.exception("Could not save the run's plot")
+    return report
+
+
+def save_run_png(plan: CalibrationPlan, records: list[dict], png_path: Path, comment: str = "") -> None:
+    """The run's diagnostic PNG (RunScreen and the web page both call this)."""
+    _save_diagnostic_png(records, png_path, plan=plan, comment=comment)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Run screen  ── executes the plan in a worker thread, shows live progress
 # ─────────────────────────────────────────────────────────────────────────────
 
 class RunScreen(MeasurementRunScreen):
+    DONE_STATUS = "Calibration complete — see log for the report."
+    ABORTED_STATUS = "Calibration aborted."
     POINT_STATUS = "Sweep point {n} / {total} complete."
     TABLE_COLUMNS = ("#", "I (A)", "B (mT)", "1f |Y|/R", "2f X (V)", "2f Y (V)", "T1 (K)", "T2 (K)")
     MEASUREMENT_TYPE = MEASUREMENT_TYPE
-
-    def save_png(self, records: list[dict], png_path: Path, comment: str = "") -> None:
-        _save_diagnostic_png(records, png_path, plan=self.plan, comment=comment)
 
     def live_plot_args(self):
         return (_live_plot_worker,)
@@ -640,96 +838,6 @@ class RunScreen(MeasurementRunScreen):
 
     def progress_index(self, record: dict) -> int:
         return record["point_index"]
-
-    def build_header(self, ctx: RunContext, records: list[dict], *, status: str, comment: str,
-                     extra: Optional[dict]) -> dict:
-        return build_header_fields(self.plan, records, status=status, comment=comment)
-
-    @work(thread=True, exclusive=True)
-    def do_run(self) -> None:
-        plan = self.plan
-        daq = None
-        magnet = None
-        gaussmeter = None
-        temp_ctrl = None
-        try:
-            self._set_status_threadsafe("Connecting to LabOne data server …")
-            daq = connect(plan.daq_host, plan.daq_port)
-            connect_device(daq, plan.leader, interface="1GbE")
-            connect_device(daq, plan.follower, interface="1GbE")
-
-            self._set_status_threadsafe("Synchronizing MDS …")
-            setup_mds(daq, leader=plan.leader, follower=plan.follower)
-
-            self._set_status_threadsafe("Configuring output & demodulators …")
-            configure_output(daq, plan.out_cfg)
-            sync_follower_oscillator(daq, plan.out_cfg, plan.follower)
-            configure_demodulator(daq, plan.demod1_cfg)
-            configure_demodulator(daq, plan.demod2_cfg)
-
-            self._set_status_threadsafe("Connecting magnet power supply …")
-            magnet = connect_magnet(plan.magnet_cfg)
-            self._set_status_threadsafe("Connecting gaussmeter …")
-            gaussmeter = connect_gaussmeter(plan.gauss_cfg)
-
-            if plan.temp_cfg is not None:
-                self._set_status_threadsafe("Connecting to MercuryiTC (temperature) …")
-                temp_ctrl = connect_temperature_controller(plan.temp_cfg)
-
-            writer = make_incremental_writer(
-                plan.run_ctx.raw_path,
-                lambda records: build_header_fields(plan, records, status="in_progress", comment=""),
-            )
-            report = run_phase_calibration(
-                daq, plan.leader, plan.follower, plan.out_cfg, plan.demod1_cfg, plan.demod2_cfg,
-                plan.sweep_cfg, magnet, plan.magnet_cfg,
-                calibration_current_A=plan.calibration_current_A,
-                null_n_averages=plan.null_n_averages,
-                null_max_iterations=plan.null_max_iterations,
-                null_tol_deg=plan.null_tol_deg,
-                output_csv=plan.output_csv,
-                gaussmeter=gaussmeter, gauss_cfg=plan.gauss_cfg,
-                hold_tol_ratio=plan.hold_tol_ratio,
-                amplitude_check_cfg=plan.amplitude_check_cfg,
-                frequency_check_cfg=plan.frequency_check_cfg,
-                stop_event=self._stop_event,
-                on_point=lambda record: self.app.call_from_thread(self._on_point, record),
-                on_status=self._set_status_threadsafe,
-                temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg,
-                write_csv=lambda df: writer(df.to_dict("records")),
-            )
-            for line in format_report(report).splitlines():
-                log.info(line)
-            final = "Calibration aborted." if self._stop_event.is_set() \
-                else "Calibration complete — see log for the report."
-        except Exception as exc:
-            log.exception("Phase calibration failed")
-            final = f"ERROR: {exc}"
-        finally:
-            # Excitation output off first (immediate, no current into the
-            # DUT), so the magnet can start its ramp-down right away rather
-            # than waiting behind it.
-            if daq is not None:
-                try:
-                    shutdown_output(daq, plan.out_cfg)
-                except Exception:
-                    log.exception("Error while shutting down output")
-            if magnet is not None:
-                try:
-                    shutdown_magnet(magnet, plan.magnet_cfg)
-                except Exception:
-                    log.exception("Error while shutting down magnet")
-            if gaussmeter is not None:
-                try:
-                    shutdown_gaussmeter(gaussmeter)
-                except Exception:
-                    log.exception("Error while shutting down gaussmeter")
-            if temp_ctrl is not None:
-                try:
-                    shutdown_temperature_controller(temp_ctrl)
-                except Exception:
-                    log.exception("Error while shutting down MercuryiTC")
-            self.app.call_from_thread(self._on_finished, final)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1039,98 +1147,7 @@ class MFLIPhaseCalibrationApp(MeasurementApp):
     # ── Start ────────────────────────────────────────────────────────────────
 
     def _build_plan(self, state: dict) -> CalibrationPlan:
-        out_cfg = OutputConfig(
-            device=state["leader_device"],
-            frequency_Hz=state["frequency_Hz"],
-            amplitude_V=state["amplitude_V"],
-            series_R_ohm=state["series_R_ohm"],
-        )
-        filt = FilterConfig(
-            time_constant_s=state["time_constant_s"],
-            order=state["order"],
-            sinc_filter=state["sinc_filter"],
-        )
-        demod1_cfg = DemodConfig(
-            device=state["leader_device"], demod_index=0, harmonic=1,
-            input_range_V=state["input_range_1f_V"],
-            sample_rate_Hz=state["sample_rate_Hz"], filter=filt,
-        )
-        demod2_cfg = DemodConfig(
-            device=state["follower_device"], demod_index=0, harmonic=2,
-            input_range_V=state["input_range_2f_V"],
-            sample_rate_Hz=state["sample_rate_Hz"], filter=filt,
-        )
-        magnet_cfg = MagnetConfig(
-            visa_resource=state["visa_resource"],
-            current_limit_A=state["current_limit_A"],
-            voltage_compliance_V=state["voltage_compliance_V"],
-            ramp_step_A=state["ramp_step_A"],
-            ramp_delay_s=state["ramp_delay_s"],
-        )
-        gauss_cfg = GaussmeterConfig(
-            visa_resource=state["gaussmeter_visa_resource"],
-            n_averages=state["gaussmeter_n_averages"],
-            read_delay_s=state["gaussmeter_read_delay_s"],
-        )
-        sweep_cfg = SweepConfig(
-            rows=state["sweep_rows_parsed"],
-            settling_time_s=state["sweep_settling_time_s"], n_averages=state["sweep_n_averages"],
-            field_settle_tolerance_mT=state["field_settle_tolerance_mT"],
-        )
-        amplitude_check_cfg = AmplitudeCheckConfig(
-            enabled=state["enable_amplitude_check"],
-            amplitudes_V=state["amplitudes_V"] or [0.05, 0.1],
-            n_averages=state["amp_n_averages"],
-        )
-        frequency_check_cfg = FrequencyCheckConfig(
-            enabled=state["enable_frequency_check"],
-            frequencies_Hz=state["frequencies_Hz"] or [263.3, 317.3, 383.3],
-            n_averages=state["freq_n_averages"],
-            max_iterations=state["freq_max_iterations"],
-            tol_deg=state["freq_tol_deg"],
-        )
-        run_ctx = allocate_run(
-            self.data_root, state["sample"], state["device"], MEASUREMENT_TYPE,
-            temperature_setpoint_K=state["temperature_setpoint_K"],
-        )
-        output_csv = str(run_ctx.raw_path)
-
-        temp_cfg = None
-        if state["enable_temperature"]:
-            uids = parse_sensor_uids(state["temperature_sensor_uids"])
-            if uids:
-                temp_cfg = TemperatureControllerConfig(
-                    visa_resource=state["temperature_visa_resource"],
-                    sensor_uids=uids,
-                )
-
-        header_extra = {
-            "excitation_frequency_Hz": state["frequency_Hz"],
-            "excitation_amplitude_V": state["amplitude_V"],
-            "series_R_ohm": state["series_R_ohm"],
-            "calibration_current_A": state["calibration_current_A"],
-            "field_sweep_rows_A": state["sweep_rows_parsed"],
-            "demod_time_constant_s": state["time_constant_s"],
-            "demod_order": state["order"],
-        }
-
-        return CalibrationPlan(
-            daq_host=state["daq_host"], daq_port=state["daq_port"],
-            leader=state["leader_device"], follower=state["follower_device"],
-            out_cfg=out_cfg, demod1_cfg=demod1_cfg, demod2_cfg=demod2_cfg,
-            magnet_cfg=magnet_cfg, gauss_cfg=gauss_cfg, sweep_cfg=sweep_cfg,
-            calibration_current_A=state["calibration_current_A"],
-            null_n_averages=state["null_n_averages"],
-            null_max_iterations=state["null_max_iterations"],
-            null_tol_deg=state["null_tol_deg"],
-            hold_tol_ratio=state["hold_tol_ratio"],
-            amplitude_check_cfg=amplitude_check_cfg,
-            frequency_check_cfg=frequency_check_cfg,
-            output_csv=output_csv,
-            run_ctx=run_ctx, data_root=self.data_root, temperature_setpoint_K=state["temperature_setpoint_K"],
-            cooldown=state["cooldown"], header_extra=header_extra,
-            temp_cfg=temp_cfg, run_cost=run_costs(state),
-        )
+        return build_plan(state, self.data_root)
 
 
 def main() -> None:

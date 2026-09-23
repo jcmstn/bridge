@@ -483,8 +483,8 @@ def program_run_fn(program: ModuleType, plan, run_contexts: list, run_extras: li
     gets its PNG the moment it ends (as in the TUI), and its RunContext +
     header extras land in `run_contexts` / `run_extras` for the post-run
     status/comment step."""
-    def run_fn(stop_event: threading.Event, cb: "RunCallbacks") -> None:
-        program.run_plan(
+    def run_fn(stop_event: threading.Event, cb: "RunCallbacks"):
+        return program.run_plan(
             plan, stop_event, on_status=cb.on_status, on_run_label=cb.on_run_label,
             on_point=cb.on_point,
             on_run_finished=lambda ctx, records: program.save_run_png(
