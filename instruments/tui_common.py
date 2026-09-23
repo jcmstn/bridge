@@ -16,13 +16,13 @@ What all 13 {suite}/*_tui.py programs used to carry as verbatim copies:
   switch -> dependent-field greying, and Start.
 
 A program subclasses both and supplies only what is its own: the form
-(compose), update_summary / parse_state / _build_plan, the run loop
-(do_run), and a few small hooks (table columns + row, live-plot args, PNG
-+ header builders). MeasurementApp reads the program's module-level names
-— SETTINGS_PATH, _DEFAULT_DATA_DIR, the *_FIELDS groups, build_summary,
-RunScreen — from the subclass's own module at call time, so each module
-stays their single source of truth (the web pages and tests import and
-monkeypatch them there).
+(compose), update_summary / _build_plan, and the run screen's display
+hooks (table columns + row, live-plot args, status texts). Everything else
+is the program MODULE's pure API, read from the subclass's own module at
+call time — SETTINGS_PATH, _DEFAULT_DATA_DIR, the *_FIELDS groups,
+resolve_state, build_summary, run_plan, build_header_fields, save_run_png,
+PNG_SUFFIX, RunScreen — so each module stays their single source of truth
+(the web pages run the same run_plan; tests import and monkeypatch there).
 
 Textual-only (never NiceGUI), and imported only by *_tui.py modules and
 bridge_tui.py — never by a measurement script (docs/architecture.md §2).

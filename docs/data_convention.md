@@ -287,6 +287,17 @@ Key functions:
   rewrites just that run's `index.csv` row (matched by `run` number).
   Call unconditionally the instant a run ends (with an outcome-derived
   status), and again if the user supplies a real status/comment.
+- **`record_run(data_root, ctx, header, measure, stop_event, *, on_point, tags, on_finished)`**
+  — steps 3–5 above for ONE allocated run, as used by every program's
+  `run_plan()`: `measure(on_point, write_csv)` does the acquisition; every
+  record is tagged with `tags` (e.g. `series_index`); when it returns or
+  raises, the raw file + index row are written with the outcome status
+  (`error` > `aborted` > `completed`), then `on_finished(ctx, records)`
+  (the PNG), then the exception is re-raised.
+- **`finish_last_run(data_root, run_contexts, run_extras, records, status, comment, header)`**
+  — step 6: applies the operator's status/comment to the LAST run of a
+  session with the header extras it was written with, honouring the
+  never-truncate guard below.
 - **`preview_raw_filename(...)`** — **pure, no I/O, no run-number
   allocation.** Renders a placeholder filename (run token `"NNNN"`, no
   timestamp) for a live "this is roughly what will be saved" hint in a

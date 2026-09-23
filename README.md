@@ -37,10 +37,15 @@ Launch button; quitting a program returns to the menu. Runs from both front
 ends are listed in the same "Recent runs" table (`runs.db` next to the data
 folder).
 
-The three SOT pulsed-switching programs are TUI-only (no web page); the two
-4200A ones need a KULT user module compiled on the 4200A — see
-[`instruments/kult/`](instruments/kult/). The nonlocal spin-current switching
-program (6221 + 2182A only) has a TUI and a web page.
+SOT pulsed switching is one TUI form (no web page) with two toggles — write
+pulse from the 4200A PMU or the 6221, read as DC R_xy or lock-in harmonic —
+covering the former SOTPS / SOT2H / SOT1I programs; the 4200A modes need a
+KULT user module compiled on the 4200A — see
+[`instruments/kult/`](instruments/kult/). The dual-harmonic program likewise
+has an AC-source toggle (MFLI output or Keithley 6221; formerly HARM and
+HARM6). Each mode still saves exactly the file format and type code it did
+as a separate program. The nonlocal spin-current switching program (6221 +
+2182A only) has a TUI and a web page.
 
 The web front end runs alongside the TUI, not instead of it — pick whichever
 is more convenient for a given session. Its port defaults to 8080; override

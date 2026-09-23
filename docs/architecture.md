@@ -23,11 +23,9 @@ reference. This file is the map, not a second copy of them.
 | Command | Opens |
 |---------|-------|
 | `uv run python bridge_tui.py` | The TUI menu — every DC / MFLI / SOT program as a card (description, collapsible wiring schematic, Launch) in three suite columns, plus the shared "Recent runs" table; mirrors the web landing page. Quitting a program returns to the menu — Textual |
-| `uv run python sot/sot_pulsed_switching_tui.py` | SOT pulsed switching (4200A PMU pulse + delayed 6221/2182 R_xy) — Textual |
-| `uv run python sot/sot_pulsed_switching_2h_tui.py` | SOT pulsed switching, 2nd-harmonic read (4200A PMU pulse + delayed 6221 AC / MFLI 1f+2f) — Textual |
-| `uv run python sot/sot_pulsed_switching_6221_tui.py` | SOT pulsed switching, 6221-only — no 4200A (software-timed 6221 DC pulse + delayed 6221 AC / MFLI harmonic, harmonic is a parameter) — Textual |
+| `uv run python sot/sot_pulsed_switching_tui.py` | SOT pulsed switching — one form, two toggles: write pulse = 4200A PMU \| 6221 WAVE, read = DC R_xy (6221 ±I + 2182) \| lock-in harmonic (6221 AC + MFLI). The three valid combinations are the former programs `SOTPS` / `SOT2H` / `SOT1I` (see §2 "Merged programs"). `sot_pulsed_switching_2h_tui.py` / `sot_pulsed_switching_6221_tui.py` still run and open this form on their mode — Textual |
 | `uv run python sot/sot_nonlocal_switching_tui.py` | Nonlocal spin-current switching, 6221 + 2182A only (optional Kepco field initialization, then a sweep of single-lobe 0 → ±I → 0 WAVE write pulses + DC nonlocal read, current-reversal averaged unless switched off; type `NLSW`) — Textual, also a web page. `sot/sot_nonlocal_switching.py` also runs standalone (plain CSV) |
-| `uv run python web/app.py`     | Browser front end — the DC and MFLI measurements plus the SOT nonlocal-switching page — NiceGUI, `http://localhost:8080` |
+| `uv run python web/app.py`     | Browser front end — the DC and MFLI measurements plus the SOT nonlocal-switching page — NiceGUI, `http://localhost:8080`. The dual-harmonic page carries the MFLI \| 6221 AC-source toggle (`/mfli/dual-harmonic?source=6221`; the old `/mfli/dual-harmonic-6221` URL redirects there) |
 | `uv run python tools/curate_sample.py <sample>` | Post-hoc curation TUI: mark runs `paper_include` / `figure_ref` |
 
 Each measurement's `*_tui.py` is also runnable on its own
@@ -68,7 +66,11 @@ verbatim by the matching `web/{suite}/{name}.py`:
 | `NUMERIC_FIELDS`, `TEXT_FIELDS`, `OPTIONAL_NUMERIC_FIELDS`, `LIST_FIELDS` | field-name groups + per-field validation metadata |
 | `MEASUREMENT_TYPE` | the locked type code (`"HALL"`, `"IV"`, …) — see `data_convention.md` |
 | `MeasurementPlan` | frozen dataclass: one parsed, validated run request |
-| `build_summary(state) -> list[str]` | the live sidebar text + warnings/errors, computed from raw field values |
+| `resolve_state(state) -> dict` | the derived values of a parsed form (sweep lists, value lists, their parse errors) — called by the TUI's `parse_state()` and the web's `form_state()` alike |
+| `build_summary(state) -> (info, warnings, errors)` | the live sidebar text + warnings/errors, computed from the parsed state |
+| `build_plan(state, data_root) -> MeasurementPlan` | the validated run request; a single-run program allocates its run here (`plan.run_ctx`) |
+| `run_plan(plan, stop_event, *, on_status, on_run_label, on_point, on_run_finished, run_contexts, run_extras)` | the whole run — connect, loop over the series (one `record_run()` per output file), teardown. Both the TUI `RunScreen` and the web page run exactly this; it fills `run_contexts` / `run_extras` for the post-run status/comment prompt |
+| `save_run_png(plan, records, png_path, comment="")` + `PNG_SUFFIX` | the per-run PNG, same in both front ends |
 | `build_header_fields(plan, ctx, …) -> dict` | the `# key: value` CSV header for this run |
 | `compute_filename_preview(state) -> str` | placeholder filename for the live preview (calls `preview_raw_filename`, never `allocate_run`) |
 | `parse_sensor_uids(text)` | MercuryiTC sensor-UID parsing, shared |
@@ -79,6 +81,36 @@ If you add a form field, it goes in `DEFAULTS` + the right `*_FIELDS`
 group + `MeasurementPlan` **once**, in the TUI module, and both front ends
 pick it up.
 
+### Merged programs (a mode toggle over several engines)
+
+Two forms put former near-duplicate programs behind a toggle. Each mode
+still runs its **own engine module** unchanged, so type codes, raw columns,
+headers, filenames and PNG names are exactly what each program wrote before:
+
+| Form (module) | Toggle | Mode → engine module (type code) |
+|---|---|---|
+| `mfli/mfli_dual_harmonic_tui.py` | `ac_source` | `mfli` → itself (`HARM`); `6221` → `mfli_dual_harmonic_6221_tui` (`HARM6`) |
+| `sot/sot_pulsed_switching_tui.py` | `pulse_source` × `read_mode` | `pmu`+`dc` → itself (`SOTPS`); `pmu`+`harmonic` → `sot_pulsed_switching_2h_tui` (`SOT2H`); `6221`+`harmonic` → `sot_pulsed_switching_6221_tui` (`SOT1I`); `6221`+`dc` is blocked by the summary |
+
+How it fits together:
+- The form's `DEFAULTS` / `*_FIELDS` are the union of the engines'; the
+  mode-only cards are hidden (`.display` in the TUI, `bind_visibility_from`
+  on the web), and `mode_errors()` drops parse errors of hidden fields.
+- `resolve_state` / `build_summary` / `compute_filename_preview` /
+  `build_plan` dispatch on the toggle; `engine(plan)` returns the module
+  whose `run_plan` / `build_header_fields` / `save_run_png` /
+  `MEASUREMENT_TYPE` / `RunScreen` handle that plan (the base
+  `MeasurementApp.run_screen()` and `web/run_controller._engine()` use it).
+- A key that means different things in two engines gets its own form id,
+  renamed back before the engine sees the state (SOT: `wave_pulse_width_s`,
+  `lock_settle_s` — `_FORM_IDS`).
+- Settings: the form also reads the former programs' `*_tui_settings.json`
+  key by key; until it has been saved with the toggle, the toggle follows
+  the program used last (newest file). The engine modules keep their
+  `SETTINGS_PATH` for exactly this.
+- An engine module has no `App`; its `main()` opens the merged form on its
+  mode.
+
 ### Shared TUI scaffolding (`instruments/tui_common.py`)
 
 Every TUI's `App` subclasses `MeasurementApp` and its `RunScreen`
@@ -88,25 +120,25 @@ subclasses `MeasurementRunScreen`; the form widgets (`field`,
 there too. A program keeps only what is its own:
 
 - **App:** `TITLE`/`SUB_TITLE`/`CSS`, `compose()` (starting with
-  `identity_bar(...)`), `parse_state()`, `refresh_summary()`,
-  `_build_plan()`, and `SWITCH_DEPENDENTS` (switch id → the widget ids it
-  greys out). Settings save/load is generic — every `Input` in the
-  `*_FIELDS` groups plus every `Switch` / `Select` / `TextArea` by widget
-  id — so a new widget is persisted just by having an `id`. The base reads
-  `SETTINGS_PATH`, `_DEFAULT_DATA_DIR`, the `*_FIELDS` groups,
+  `identity_bar(...)`), `update_summary()`, `_build_plan()` (usually
+  `build_plan(state, self.data_root)`), and `SWITCH_DEPENDENTS` (switch id
+  → the widget ids it greys out). `parse_state()` is generic: every
+  `*_FIELDS` Input (non-finite numbers are errors), every `Switch` /
+  `Select` / `TextArea` by id, the sample, then the module's
+  `resolve_state()`. `refresh_summary()` wraps `update_summary()` so an
+  exception shows up in the sidebar (and disables Start) instead of closing
+  the app. Settings save/load is generic too, so a new widget is persisted
+  just by having an `id`. The base reads `SETTINGS_PATH`,
+  `_DEFAULT_DATA_DIR`, the `*_FIELDS` groups, `resolve_state`,
   `build_summary` and `RunScreen` from the program's own module at call
   time.
-- **RunScreen:** `do_run()` (the `@work(thread=True)` loop) plus hooks —
-  `TABLE_COLUMNS` / `table_row(record)`, `live_plot_args()`,
-  `save_png(records, path, comment)`, `build_header(ctx, records, status=,
-  comment=, extra=)`, and `ABORT_LABEL` / `ABORT_STATUS` / `POINT_STATUS` /
-  `PNG_SUFFIX` text. A multi-run `do_run()` appends each run's
-  `RunContext` **and its header extras** to `_run_contexts` /
-  `_run_extras` and finalizes that run itself; a single-run plan
-  (`plan.run_ctx`) is finalized by the base the moment the run ends. The
-  base then offers the status/comment prompt for the last run and writes
-  the session's row into `runs.db` (`instruments/run_index.py`) — the same
-  history the web front end writes.
+- **RunScreen:** only display hooks — `TABLE_COLUMNS` / `table_row(record)`,
+  `live_plot_args()`, and `ABORT_LABEL` / `ABORT_STATUS` / `POINT_STATUS`
+  text. The base `do_run()` calls the module's `run_plan()` (the same one
+  the web page runs), saves each run's PNG via `save_run_png`, offers the
+  status/comment prompt for the last run (`finish_last_run()` with the
+  stored extras) and writes the session's row into `runs.db`
+  (`instruments/run_index.py`) — the same history the web front end writes.
 
 ### Data root (changed 2026-09-03)
 
@@ -312,7 +344,7 @@ The NiceGUI front end adds infrastructure the standalone scripts don't need:
 | `web/app.py` | entrypoint; registers every page (DC, MFLI, SOT nonlocal switching); `reload=False` on purpose (a file-watch restart would drop the run lock + live instrument connections mid-measurement) |
 | `web/run_manager.py` | **global** run lock (`RunHandle`) — only one measurement app-wide, because the magnet / gaussmeter / iTC are the same physical instruments shared by both suites. Also buffers live records/log so a fresh page load can repaint an in-progress run and abort it. |
 | `instruments/run_index.py` | SQLite run history at a **fixed** path (`<repo>/../data/runs.db`), deliberately independent of any run's chosen data root, so history is always findable. Written by **both** front ends (web `RunController`, TUI `RunScreen`); lives in `instruments/` because it is pure sqlite. Short-lived, always-closed connection per statement; WAL mode. |
-| `web/run_controller.py` | the shared page engine: form → parsed state → config dataclasses → background thread runs `run_measurement()` with `stop_event`/`on_point` → live updates over one `queue.Queue` drained per `ui.timer` tick. Each page supplies only the page-specific callables. |
+| `web/run_controller.py` | the shared page engine: `RunController` runs the program's `run_plan()` in a background thread and drains live points/log from one `queue.Queue` per `ui.timer` tick (`on_tick` pushes the plot + table once per tick, not per point). Page helpers every page uses: `form_state()` (the web twin of `parse_state()`), `program_run_fn()` / `program_artifacts()` / `run_png_path()`, `prompt_last_run()` (status/comment → `finish_last_run()`), `finished_handler()`, `load_settings()` / `save_settings()`, `refresh_on_busy_change()` (the summary is rebuilt on input, the timer only tracks busy/idle). |
 | `web/identity_bar.py` | the sample / device / cooldown / temperature-setpoint / data-root fields + filename preview, built once, used by every page |
 | `web/directory_picker.py` | server-side local-filesystem directory browser (safe: localhost-only, no auth) |
 | `web/sample_picker.py` | NiceGUI sample picker + "+ New sample" + post-run status/comment dialogs |
@@ -388,19 +420,22 @@ units sub-header row as data. Use `read_raw()`.
    (and a key-axis `kind` to `data_naming.py` if the run has a new fixed
    secondary axis). Nowhere else needs to know the code.
 4. **`{suite}/{name}_tui.py`** — `DEFAULTS`, the `*_FIELDS` groups,
-   `MeasurementPlan`, `build_summary`, `build_header_fields`,
+   `MeasurementPlan`, `resolve_state`, `build_summary`, `build_plan`,
+   `run_plan` (one `data_naming.record_run()` per output file),
+   `build_header_fields`, `save_run_png` (+ `PNG_SUFFIX`),
    `compute_filename_preview`, `{NAME}_DESCRIPTION`, `{NAME}_SCHEMATIC`,
    and the Textual `App` + `RunScreen` as subclasses of
    `instruments/tui_common.py`'s `MeasurementApp` / `MeasurementRunScreen`
-   (see §2).
+   (see §2). If it is a variant of an existing program (same form, other
+   instrument), consider a mode of that form instead (§2 "Merged programs").
 5. **`bridge_tui.py`** — add a `Program(...)` (key, title, description,
    schematic, App) to its suite in `PROGRAMS`.
 6. **`web/{suite}/{name}.py`** — name it so its basename matches NO module in the
    top-level `{suite}/` package: `python web/app.py` puts `web/` first on
    `sys.path`, so `web/sot/foo.py` shadows `sot/foo.py` (circular import). The
    convention `{suite}/{suite}_{name}.py` ↔ `web/{suite}/{name}.py` avoids it.
-   Import the pure names from step 4; supply
-   the page-specific callables to `RunController`. Build the layout with
+   Import the pure names from step 4; build the state with `form_state()`,
+   the plan with `build_plan()`, and run it with `program_run_fn()`. Build the layout with
    `measurement_layout()` from `web/run_controller.py`: identity bar into
    `regions.identity`, the param/stable grids into `regions.params`,
    `summary_box` + start button into `regions.summary`, and status / plot /
@@ -428,6 +463,9 @@ units sub-header row as data. Use `read_raw()`.
 | The identity bar / data-root picker | `web/identity_bar.py` + `web/directory_picker.py`; TUI side `instruments/data_dir.py` |
 | Menu card text or schematic | `{NAME}_DESCRIPTION` / `{NAME}_SCHEMATIC` in the TUI module; card title in `bridge_tui.py` `PROGRAMS` |
 | Anything every TUI form / run screen does the same way (settings file, sample picker, identity bar, abort/back, status/comment prompt, run history, run-screen CSS) | `instruments/tui_common.py` only |
+| How a program runs (connect, series loop, teardown, per-run finalize) | its `run_plan()` in `{suite}/{name}_tui.py` — both front ends call it; the per-run record/finalize block is `data_naming.record_run()` |
+| A mode of a merged program (HARM/HARM6, SOTPS/SOT2H/SOT1I) | its engine module for the run itself; the toggle, card visibility and settings fallback in the merged form's module (+ its web page for HARM) |
+| The sweep-size cap (a form error instead of a frozen form) | `dc/dc_sweep_utils.py` `MAX_SWEEP_POINTS` / `check_sweep_size` |
 
 
 ## 9. Tests
@@ -448,10 +486,15 @@ No hardware and no VISA layer is touched. The suite covers the pure logic:
 - `test_run_time.py`, `test_run_costs_*.py` — the run-time model: helper arithmetic, per-program `run_costs()` defaults / multiplicity, plan `run_cost` length == `total_points`.
 - `test_dc_gate_sweep.py`, `dc_sweep_utils` coverage — `linear_sweep`
   bidirectional shape, `parse_value_list`.
-- `test_tui_smoke.py` — every program App mounts headless and its form
-  round-trips through its settings file; `test_tui_common.py` — the shared
-  run-screen lifecycle; `test_bridge_tui.py` — the menu; `test_run_index.py`
-  — the run history. `conftest.py` points `run_index` at a temp DB for
-  every test.
+- `test_tui_smoke.py` — every program App (and every mode of a merged
+  one) mounts headless, round-trips through its settings file, and turns a
+  huge sweep into a form error instead of freezing; `test_tui_common.py` —
+  the shared run-screen lifecycle; `test_run_plans.py` — every
+  `run_plan()` end to end with the hardware faked (one finalized run per
+  series value, error status + teardown on failure);
+  `test_merged_programs.py` — the merged forms' legacy-settings fallback;
+  `test_bridge_tui.py` — the menu; `test_run_index.py` — the run history.
+  `conftest.py` points `run_index` and the merged forms' legacy settings
+  paths at temp files for every test.
 
 Anything requiring a real 6221/2182/MFLI/magnet is manual bench testing.
