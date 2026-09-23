@@ -284,6 +284,8 @@ def test_run_screen_saves_one_run_per_initial_state(tmp_path, monkeypatch, rever
     from textual.screen import Screen
     from test_sot_nonlocal_switching import _Fake6221, _FakeVoltmeter
 
+    import instruments.tui_common as tui_common
+    from instruments import run_index
     import sot.sot_nonlocal_switching as ns
     from instruments.data_naming import ensure_sample, read_raw
 
@@ -307,8 +309,8 @@ def test_run_screen_saves_one_run_per_initial_state(tmp_path, monkeypatch, rever
     monkeypatch.setattr(tui, "shutdown_magnet", lambda m, cfg: None)
     monkeypatch.setattr(tui, "shutdown_gaussmeter", lambda g: None)
     monkeypatch.setattr(tui, "initialize_with_field", fake_init)
-    monkeypatch.setattr(tui, "start_live_plot", no_live_plot)
-    monkeypatch.setattr(tui, "StatusCommentScreen", Screen)   # the shared good/short/open dialog is not under test
+    monkeypatch.setattr(tui_common, "start_live_plot", no_live_plot)
+    monkeypatch.setattr(tui_common, "StatusCommentScreen", Screen)   # the shared good/short/open dialog is not under test
     monkeypatch.setattr(ns, "read_field_mT", lambda gm, cfg: 0.5)
 
     ensure_sample(tmp_path, "A", create=True)
@@ -337,6 +339,10 @@ def test_run_screen_saves_one_run_per_initial_state(tmp_path, monkeypatch, rever
     asyncio.run(go())
 
     assert inits == [5.0, -5.0]
+    # the session is in the shared run history (runs.db), like a web run
+    (hist,) = run_index.recent_runs()
+    assert (hist["suite"], hist["status"], hist["point_count"]) == ("SOT", "completed", 8)
+    assert hist["sample"] == "A" and hist["finished_at"]
     raws = sorted((tmp_path / "A" / "raw").glob("*.csv"))
     assert len(raws) == 2 and all("_NLSW_" in p.name for p in raws)
     first, second = (read_raw(p) for p in raws)

@@ -194,7 +194,8 @@ def test_each_run_of_a_multi_current_series_gets_its_own_plot_png(tmp_path, monk
     amps = [1e-7, 2e-7, 3e-7]
     plan = app._build_plan(_state(amplitude_values="1e-7, 2e-7, 3e-7", amplitude_list=amps))
 
-    screen = SimpleNamespace(plan=plan, _png_path=None)
+    screen = tui.RunScreen.__new__(tui.RunScreen)     # bare: no __init__/mount needed
+    screen.plan, screen._png_path = plan, None
     run_strs = []
     for idx, amp in enumerate(amps):
         ctx = allocate_run(tmp_path, "A", "HB3", tui.MEASUREMENT_TYPE, series=plan.series)

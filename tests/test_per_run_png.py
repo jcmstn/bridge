@@ -113,11 +113,12 @@ def _capture_figs(fn) -> list:
 @pytest.mark.parametrize("mod, suffix, make", TUI_CASES)
 def test_every_run_gets_its_own_png_and_no_combined(tmp_path, mod, suffix, make) -> None:
     ensure_sample(tmp_path, "A", create=True)
-    screen = SimpleNamespace(
-        plan=SimpleNamespace(data_root=tmp_path, field_theta_deg=None, field_phi_deg=None,
-                             header_extra={}, read_cfg=SimpleNamespace(harmonic=2)),
-        _png_path=None,
-    )
+    # A bare RunScreen (no __init__/mount): _save_run_png only needs the plan
+    # and the program's own PNG hook.
+    screen = mod.RunScreen.__new__(mod.RunScreen)
+    screen.plan = SimpleNamespace(data_root=tmp_path, field_theta_deg=None, field_phi_deg=None,
+                                  header_extra={}, read_cfg=SimpleNamespace(harmonic=2))
+    screen._png_path = None
     run_strs = []
     for idx in range(3):
         ctx = allocate_run(tmp_path, "A", "HB3", mod.MEASUREMENT_TYPE, series="")
