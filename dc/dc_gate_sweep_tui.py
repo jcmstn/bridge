@@ -668,6 +668,7 @@ class RunScreen(Screen):
         # One RunContext per iteration of the magnet-current series -- each
         # gets its own run number/file (see allocate_run() in do_run below).
         self._run_contexts: list[RunContext] = []
+        self._run_extras: list[dict] = []     # per-run header extras, parallel to _run_contexts
         # The LAST run's PNG, stashed by _save_run_png so _on_status_comment
         # can re-save it in place once the operator's comment is known.
         self._png_path: Optional[Path] = None
@@ -771,13 +772,11 @@ class RunScreen(Screen):
         series_idx = len(self._run_contexts) - 1
         ctx = self._run_contexts[series_idx]
         iter_records = [r for r in self._records if r.get("series_index", 0) == series_idx]
-        current_A = iter_records[0].get("magnet_current_A") if iter_records else None
-        sense_current_A = iter_records[0].get("sense_current_A") if iter_records else None
-        extra = {"sense_current_A": sense_current_A} if sense_current_A is not None else None
-        if current_A is not None:
-            extra = {**(extra or {}), "magnet_current_A": current_A}
+        # The SAME extras the run was written/finalized with -- rebuilding
+        # them from the records here dropped magnet_field_mT from the header.
         header_fields = build_header_fields(
-            self.plan, ctx, iter_records, status=status, comment=comment, extra=extra,
+            self.plan, ctx, iter_records, status=status, comment=comment,
+            extra=self._run_extras[series_idx],
         )
         try:
             # Never truncate an already-written raw file to an empty stub —
@@ -878,17 +877,17 @@ class RunScreen(Screen):
                     temperature_setpoint_K=plan.temperature_setpoint_K,
                     key_axis=key_axis, series=plan.series,
                 )
+                extra = {"sense_current_A": sense_current_A, "magnet_current_A": field_current_A,
+                         "magnet_field_mT": field_mT} if field_current_A is not None \
+                    else {"sense_current_A": sense_current_A}
                 self._run_contexts.append(ctx)
+                self._run_extras.append(extra)
                 self._set_run_label_threadsafe(f"Run #{ctx.run_str}")
                 plan.acq_cfg.output_file = str(ctx.raw_path)
                 write_csv = make_incremental_writer(
                     ctx.raw_path,
-                    lambda records, _ctx=ctx, _i=field_current_A, _b=field_mT, _s=sense_current_A:
-                        build_header_fields(
-                            plan, _ctx, records, status="in_progress", comment="",
-                            extra={"sense_current_A": _s, "magnet_current_A": _i, "magnet_field_mT": _b}
-                            if _i is not None else {"sense_current_A": _s},
-                        ),
+                    lambda records, _ctx=ctx, _x=extra: build_header_fields(
+                        plan, _ctx, records, status="in_progress", comment="", extra=_x),
                 )
 
                 points = [GatePoint(gate_voltage_V=float(v)) for v in plan.gate_voltages_V]
@@ -914,9 +913,6 @@ class RunScreen(Screen):
                 iter_status = "error" if iter_error is not None \
                     else ("aborted" if self._stop_event.is_set() else "completed")
                 iter_records = [r for r in self._records if r.get("series_index", 0) == series_idx]
-                extra = {"sense_current_A": sense_current_A, "magnet_current_A": field_current_A,
-                          "magnet_field_mT": field_mT} if field_current_A is not None \
-                    else {"sense_current_A": sense_current_A}
                 header_fields = build_header_fields(
                     plan, ctx, iter_records, status=iter_status, comment="", extra=extra,
                 )
