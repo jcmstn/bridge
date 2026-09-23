@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-Textual TUI for sot/sot_pulsed_switching_2h.py
-=========================================
+4200A-pulse + lock-in-read engine of the SOT pulsed-switching form  (type SOT2H)
+=================================================================================
 Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
-Created: 2026-09-11
+Created: 2026-09-11 (a mode of sot_pulsed_switching_tui.py since 2026-09-23)
 
-Same switching-curve TUI as sot_pulsed_switching_tui.py, with the delayed
-read swapped: a 6221 AC (phase-marker on Trigger Link) drives the channel
-and a single Zurich Instruments MFLI, externally referenced to that marker
-via its Aux Input, reads V_xy at the 1st and 2nd harmonic. See
-sot/sot_pulsed_switching_2h.py's module docstring for the wiring and the
-"Bench-verify" section on the MFLI ExtRef node paths.
+The "Pulse = 4200A PMU, Read = lock-in harmonic" engine behind the switching
+form in sot_pulsed_switching_tui.py: its parameter surface, summary, plan
+builder, run loop, header, PNG and RunScreen. The delayed read is a 6221 AC
+(phase marker on Trigger Link) with a single Zurich Instruments MFLI,
+externally referenced to that marker via its Aux Input, reading V_xy at the
+1st and 2nd harmonic. See sot/sot_pulsed_switching_2h.py's module docstring
+for the wiring and the "Bench-verify" section on the MFLI ExtRef node paths.
 
-Run:  python sot_pulsed_switching_2h_tui.py
+Run:  python sot_pulsed_switching_2h_tui.py   (opens the form in this mode)
 """
 
 from __future__ import annotations
@@ -27,12 +28,6 @@ from pathlib import Path
 from typing import Callable, List, Optional
 
 
-from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.validation import Number
-from textual.widgets import (
-    Button, Collapsible, Footer, Header, Static,
-)
 
 from sot.sot_pulsed_switching_2h import (
     _READ_COMPLIANCE_CEILING_V,
@@ -72,7 +67,7 @@ from sot.sot_pulsed_switching_2h import (
 from sot.sot_pulsed_switching_2h import _six221_ac_output_off
 from dc.dc_sweep_utils import linear_sweep, parse_value_list, safe_shutdown
 from instruments.data_dir import validate_directory
-from instruments.field_geometry import field_direction_summary_line, render_ascii_field_diagram
+from instruments.field_geometry import field_direction_summary_line
 from instruments.data_naming import (
     RunContext,
     allocate_run,
@@ -89,16 +84,10 @@ from instruments.run_time import (
     RunCost,
 )
 from instruments.tui_common import (
-    MeasurementApp,
     MeasurementRunScreen,
-    card,
-    field,
     format_si,
-    identity_bar,
     parse_sensor_uids,
     run_screen_bindings,
-    select_field,
-    switch_field,
 )
 from instruments.tui_sample_picker import (
     NEW_SAMPLE_SENTINEL,
@@ -110,37 +99,6 @@ _DEFAULT_DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 SETTINGS_PATH = _DEFAULT_DATA_DIR / "sot_pulsed_switching_2h_tui_settings.json"
 
 MEASUREMENT_TYPE = "SOT2H"
-
-SOT_PULSED_2H_DESCRIPTION = (
-    "SOT switching curve, 2nd-harmonic read: the 4200A PMU fires ONE write pulse "
-    "per amplitude into the main channel through RPM1, then after a fixed delay "
-    "the 6221 sources an AC current (phase marker on its Trigger Link) while a "
-    "single Zurich MFLI, externally referenced to that marker via its Aux Input, "
-    "locks in on V_xy at the 1st and 2nd harmonic (the standard harmonic-Hall SOT "
-    "technique — 1f is the resistive AHE/PHE anchor, 2f is the switching signal). "
-    "One row per amplitude, at a static field held slightly out of plane so the "
-    "two in-plane remanent states read as different V_2f. Make the amplitude list "
-    "a full loop (up then down) — the sweep sets each pulse's starting state, "
-    "which is what gives the hysteresis. The pulse runs the KULT module "
-    "instruments/kult/bridge_sot_pulse.c, which routes RPM1 back to the SMU on "
-    "exit. Enter one or more assist-field currents (comma-separated) to scan the "
-    "assist condition — each gets its own complete amplitude sweep and its own "
-    "file; include the opposite sign for the ±H_z control. Re-run the whole sweep "
-    "(same current) for switching-probability statistics."
-)
-
-# Wiring schematic — shown on this program's card in bridge_tui.py.
-SOT_PULSED_2H_SCHEMATIC = """\
-  4200A PMU / RPM1 / I+ pad / common bus, 6221 HI→I+ , LO→common, and the Kepco +
-  Lake Shore 475 static field: wired EXACTLY as SOT pulsed switching (4200A PMU + 6221/2182). New:
-
-  KEITHLEY 6221  WAVE sine + phase marker (read phase only, OFF while pulsing)
-    Trigger Link phase marker (pin 1) ──▶ ZURICH MFLI  AUX IN 1
-  ZURICH MFLI    Signal Input (differential) ──▶ the transverse (Hall) arms
-                 ExtRef-locked to the marker; reads 1f (resistive) and 2f of V_xy
-
-  The 2182 is not used.
-"""
 
 # Current MEASURE ceiling with a 4225-RPM on the PMU 10 V range. Above this the
 # pulse current reads back overflowed rather than erroring (the KULT module sets
@@ -1047,318 +1005,11 @@ class RunScreen(MeasurementRunScreen):
         )
 
 
-# ── app / form ─────────────────────────────────────────────────────────────
-
-class SOTPulsedSwitching2HApp(MeasurementApp):
-    TITLE = "SOT pulsed switching (2nd-harmonic read)"
-    SUB_TITLE = "4200A PMU pulse · delayed 6221 AC / MFLI 1f+2f · static tilted field"
-
-    data_root: Path = _DEFAULT_DATA_DIR
-
-    CSS = """
-    #body { height: 1fr; }
-    #form { width: 1fr; padding: 1 2; }
-    #sidebar { width: 46; border-left: solid $primary; padding: 1 2; overflow-y: auto; }
-    #identity_bar { height: auto; border: round $accent; padding: 1 2; margin-bottom: 1; }
-    #filename_preview { text-style: bold; margin-bottom: 1; }
-    #data_dir_row { height: 3; margin-bottom: 1; }
-    #data_dir_row Input { width: 1fr; }
-    #data_dir_row Button { margin-left: 1; }
-    #identity_fields { layout: grid; grid-size: 4; grid-gutter: 0 2; height: auto; }
-    #identity_fields > Vertical { height: auto; }
-    .param-grid { layout: grid; grid-size: 3; grid-gutter: 1 2; height: auto; margin-bottom: 1; }
-    .param-card { border: solid $primary; padding: 1 2; height: auto; }
-    .stable-grid { layout: grid; grid-size: 3; grid-gutter: 1 2; height: auto; }
-    Collapsible { height: auto; margin: 1 0; }
-    Collapsible > Contents { padding: 1 0 0 1; }
-    CollapsibleTitle { text-style: bold; color: $text-muted; }
-    .stable-card { border: round $panel-darken-1; padding: 1 2; height: auto; }
-    .stable-card .card-title { color: $text-muted; text-style: none; }
-    .stable-card .field-label { color: $text-muted; text-style: none; }
-    .card-title { text-style: bold underline; margin-bottom: 1; }
-    .field { margin-bottom: 1; }
-    .field-label { text-style: bold; }
-    .hint { text-style: italic; color: $text-muted; }
-    .switch-row { height: 3; }
-    .switch-row Label { margin-left: 1; content-align: left middle; height: 3; }
-    .plane-btn-row { height: 3; margin-bottom: 1; }
-    .plane-btn-row Button { min-width: 5; margin-right: 1; }
-    .field-diagram { color: $text-muted; margin-top: 1; }
-    .sidebar-title { text-style: bold underline; margin-bottom: 1; }
-    .card-desc { color: $text-muted; margin-bottom: 1; }
-    #actionbar { height: 3; align: center middle; }
-    """
-
-    def compose(self) -> ComposeResult:
-        yield Header(show_clock=False)
-        with Horizontal(id="body"):
-            with VerticalScroll(id="form"):
-                yield identity_bar(DEFAULTS, _DEFAULT_DATA_DIR, self.data_root,
-                                   device_label="Device (e.g. HB3)",
-                                   temperature_hint="Filename T###K token only.")
-
-                with Vertical(classes="param-grid"):
-                    yield card(
-                        "Write pulse (4200A PMU)",
-                        field("amplitude_start_V", "Amplitude start (V)",
-                              DEFAULTS["amplitude_start_V"]),
-                        field("amplitude_stop_V", "Amplitude stop (V)",
-                              DEFAULTS["amplitude_stop_V"]),
-                        field("amplitude_step_V", "Amplitude step (V)",
-                              DEFAULTS["amplitude_step_V"],
-                              validators=[Number(minimum=1e-12, failure_description="must be > 0")],
-                              hint="One pulse per step."),
-                        switch_field("amplitude_bidirectional",
-                                     "Sweep up then back down (hysteresis loop)",
-                                     DEFAULTS["amplitude_bidirectional"]),
-                        field("pulse_width_s", "Pulse width (s)", DEFAULTS["pulse_width_s"]),
-                        field("pulse_rise_s", "Rise time (s)", DEFAULTS["pulse_rise_s"]),
-                        field("pulse_fall_s", "Fall time (s)", DEFAULTS["pulse_fall_s"]),
-                        field("pulse_period_s", "Pulse period (s)", DEFAULTS["pulse_period_s"],
-                              hint="≥ delay + width + rise + fall."),
-                    )
-                    yield card(
-                        "Delayed 1f/2f read (6221 AC + MFLI)",
-                        field("delay_after_pulse_s", "Delay after pulse (s)",
-                              DEFAULTS["delay_after_pulse_s"],
-                              validators=[Number(minimum=0.0, failure_description="must be ≥ 0")],
-                              hint="Wait between pulse end and the read."),
-                        field("sense_current_values", "6221 AC current amplitude, peak (A)",
-                              DEFAULTS["sense_current_values"], kind="text",
-                              hint="Keep well below the switching current. Single value, or "
-                                   "comma-separated list — one complete amplitude sweep runs "
-                                   "per value (own 6221 re-arm), each saved to its own file."),
-                        field("frequency_Hz", "AC excitation frequency (Hz)",
-                              DEFAULTS["frequency_Hz"],
-                              hint="Avoid exact multiples of 50/60 Hz."),
-                        field("n_averages", "MFLI samples averaged per read",
-                              DEFAULTS["n_averages"], kind="integer",
-                              validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
-                        field("settle_after_enable_s", "Settle after PLL lock (s)",
-                              DEFAULTS["settle_after_enable_s"],
-                              validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
-                        field("lock_timeout_s", "PLL lock timeout (s)",
-                              DEFAULTS["lock_timeout_s"],
-                              validators=[Number(minimum=0.0, failure_description="must be ≥ 0")],
-                              hint="A timeout is logged, not fatal — the row is tagged "
-                                   "reference_locked=False."),
-                    )
-                    yield card(
-                        "Static field (Kepco magnet)",
-                        field("magnet_current_A", "Assist current(s) (A)",
-                              DEFAULTS["magnet_current_A"], kind="text",
-                              hint="One value, or comma-separated for several — each gets its "
-                                   "own complete sweep and file. Add the opposite sign for ±H_z."),
-                        field("field_theta_deg", "θ — mount tilt from OOP (°)",
-                              DEFAULTS["field_theta_deg"],
-                              validators=[Number(0, 180, failure_description="0-180°")],
-                              hint="0° = out-of-plane, 90° = in-plane. Recorded, not set."),
-                        field("field_phi_deg", "φ — azimuth from current axis (°)",
-                              DEFAULTS["field_phi_deg"], kind="number", valid_empty=True,
-                              validators=[Number(0, 360, failure_description="0-360°")],
-                              hint="Optional. Meaningless when θ=0°."),
-                        Horizontal(
-                            Button("xy", id="plane_xy", classes="plane-btn"),
-                            Button("zx", id="plane_zx", classes="plane-btn"),
-                            Button("zy", id="plane_zy", classes="plane-btn"),
-                            classes="plane-btn-row",
-                        ),
-                        Static(render_ascii_field_diagram(
-                                   float(DEFAULTS["field_theta_deg"]) if DEFAULTS["field_theta_deg"] else None,
-                                   None),
-                               id="field_diagram", classes="field-diagram"),
-                        field("field_settle_tolerance_mT", "Field settle tolerance (mT)",
-                              DEFAULTS["field_settle_tolerance_mT"]),
-                    )
-                    yield card(
-                        "Temperature logging",
-                        switch_field("enable_temperature", "Log temperature (MercuryiTC)",
-                                     DEFAULTS["enable_temperature"]),
-                    )
-
-                with Collapsible(title="Instrument configuration & addresses", collapsed=True):
-                    with Vertical(classes="stable-grid"):
-                        yield card(
-                            "Keithley 4200A PMU (KXCI)",
-                            field("k4200_visa_resource", "KXCI VISA resource",
-                                  DEFAULTS["k4200_visa_resource"], kind="text",
-                                  hint="GPIB0::17::INSTR  or  TCPIP0::<ip>::1225::SOCKET"),
-                            field("pmu_library", "KULT pulse library",
-                                  DEFAULTS["pmu_library"], kind="text",
-                                  hint="Confirm against the `UL` output in the run log."),
-                            field("pmu_module", "KULT pulse module name", DEFAULTS["pmu_module"],
-                                  kind="text",
-                                  hint="Default = instruments/kult/bridge_sot_pulse.c — compile "
-                                       "it in KULT first (see that folder's README)."),
-                            field("pmu_channel", "PMU channel", DEFAULTS["pmu_channel"], kind="integer"),
-                            field("pmu_id", "PMU card name", DEFAULTS["pmu_id"], kind="text",
-                                  hint="e.g. PMU1 (lowest-numbered slot)."),
-                            field("pmu_return_names", "Module return params (comma-sep)",
-                                  DEFAULTS["pmu_return_names"], kind="text",
-                                  hint="Order must match the module's outputs. Blank = none, "
-                                       "and the measured pulse columns stay empty."),
-                            field("pmu_v_range_V", "PMU voltage range (V)",
-                                  DEFAULTS["pmu_v_range_V"], hint="10 or 40."),
-                            field("pmu_i_range_A", "PMU current measure range (A)",
-                                  DEFAULTS["pmu_i_range_A"],
-                                  hint="With an RPM on the 10 V range the ceiling is 0.01 A."),
-                            field("pmu_v_limit_V", "Pulse amplitude software limit (V)",
-                                  DEFAULTS["pmu_v_limit_V"]),
-                            field("pulse_delay_s", "Pulse delay before rise (s)",
-                                  DEFAULTS["pulse_delay_s"],
-                                  validators=[Number(minimum=0.0, failure_description="must be ≥ 0")],
-                                  hint="Dead time before the rise. Normally 0."),
-                            field("n_pulses", "Pulses per point (burst-average)",
-                                  DEFAULTS["n_pulses"], kind="integer",
-                                  hint="PMU averages N identical pulses for the measured V/I "
-                                       "readback only. Leave at 1 for switching — N means N "
-                                       "switching attempts per amplitude."),
-                            field("pmu_sample_rate", "PMU sample rate (S/s)",
-                                  DEFAULTS["pmu_sample_rate"]),
-                            field("pmu_meas_start_perc", "Spot-mean window start (0-1)",
-                                  DEFAULTS["pmu_meas_start_perc"]),
-                            field("pmu_meas_stop_perc", "Spot-mean window stop (0-1)",
-                                  DEFAULTS["pmu_meas_stop_perc"]),
-                            field("pmu_dut_res_ohm", "DUT resistance for load-line (Ω)",
-                                  DEFAULTS["pmu_dut_res_ohm"],
-                                  hint="Set near the real channel R (4-probe it first). "
-                                       "Also drives the sidebar current estimate."),
-                            muted=True,
-                        )
-                        yield card(
-                            "Keithley 6221 (AC)",
-                            field("source_visa_resource", "6221 (AC current source)",
-                                  DEFAULTS["source_visa_resource"], kind="text"),
-                            field("compliance_V", "6221 compliance (V)", DEFAULTS["compliance_V"],
-                                  hint="Keep low — caps what an open contact can put on the "
-                                       "shared bus. Read needs < 1 V."),
-                            field("phasemarker_line", "Trigger Link phase-marker pin (1-6)",
-                                  DEFAULTS["phasemarker_line"], kind="integer",
-                                  hint="Wire this pin to the MFLI's Aux In. Confirm it isn't the "
-                                       "6221's factory-default Trigger Link pin before assuming "
-                                       "it's free."),
-                            muted=True,
-                        )
-                        yield card(
-                            "Zurich Instruments MFLI",
-                            field("mfli_host", "LabOne data server host",
-                                  DEFAULTS["mfli_host"], kind="text"),
-                            field("mfli_port", "LabOne data server port",
-                                  DEFAULTS["mfli_port"], kind="integer"),
-                            field("mfli_device", "MFLI device ID", DEFAULTS["mfli_device"],
-                                  kind="text", hint="e.g. dev1234."),
-                            field("aux_input_ch", "Aux Input carrying the marker (0-based)",
-                                  DEFAULTS["aux_input_ch"], kind="integer",
-                                  hint="0 = Aux In 1."),
-                            field("osc_index", "Oscillator locked by the PLL", DEFAULTS["osc_index"],
-                                  kind="integer"),
-                            field("extref_index", "ExtRef/PLL module index", DEFAULTS["extref_index"],
-                                  kind="integer"),
-                            field("pll_demod_index", "PLL phase-detector demod index (≠ 1f/2f demods)",
-                                  DEFAULTS["pll_demod_index"], kind="integer",
-                                  hint="extrefs/N/adcselect is read-only on real firmware — the PLL "
-                                       "is steered via THIS dedicated demod's own adcselect/oscselect "
-                                       "instead. Must differ from both demod indices below."),
-                            select_field("automode", "PLL bandwidth adaptation",
-                                         AUTOMODE_OPTIONS, int(DEFAULTS["automode"]),
-                                         hint=AUTOMODE_HINT),
-                            field("demod1_index", "1f demodulator index", DEFAULTS["demod1_index"],
-                                  kind="integer"),
-                            field("demod2_index", "2f demodulator index", DEFAULTS["demod2_index"],
-                                  kind="integer",
-                                  hint="Defaults skip index 0 — that's the PLL phase-detector demod "
-                                       "above. See the module docstring's 'Bench-verify' section."),
-                            field("input_ch", "Signal Input channel (0-based)",
-                                  DEFAULTS["input_ch"], kind="integer"),
-                            switch_field("differential", "Differential input (IN+ / IN−)",
-                                        DEFAULTS["differential"]),
-                            switch_field("ac_coupling", "AC-couple the input", DEFAULTS["ac_coupling"]),
-                            field("input_range_V", "Signal Input range (V)",
-                                  DEFAULTS["input_range_V"]),
-                            field("sample_rate_Hz", "Demodulator output rate (Sa/s)",
-                                  DEFAULTS["sample_rate_Hz"]),
-                            field("filter_time_constant_s", "Filter time constant (s)",
-                                  DEFAULTS["filter_time_constant_s"]),
-                            field("filter_order", "Filter order (1-8)", DEFAULTS["filter_order"],
-                                  kind="integer"),
-                            switch_field("filter_sinc", "Sinc filter (extra harmonic rejection)",
-                                        DEFAULTS["filter_sinc"]),
-                            muted=True,
-                        )
-                        yield card(
-                            "Kepco magnet + Lake Shore 475",
-                            field("magnet_visa_resource", "Kepco VISA resource",
-                                  DEFAULTS["magnet_visa_resource"], kind="text"),
-                            field("current_limit_A", "Magnet current limit (A)",
-                                  DEFAULTS["current_limit_A"]),
-                            field("magnet_voltage_compliance_V", "Magnet voltage compliance (V)",
-                                  DEFAULTS["magnet_voltage_compliance_V"]),
-                            field("ramp_step_A", "Magnet ramp step (A)", DEFAULTS["ramp_step_A"]),
-                            field("ramp_delay_s", "Magnet ramp delay (s)", DEFAULTS["ramp_delay_s"]),
-                            field("gaussmeter_visa_resource", "Lake Shore 475 VISA resource",
-                                  DEFAULTS["gaussmeter_visa_resource"], kind="text"),
-                            field("gaussmeter_n_averages", "475 readings averaged",
-                                  DEFAULTS["gaussmeter_n_averages"], kind="integer"),
-                            field("gaussmeter_read_delay_s", "475 read delay (s)",
-                                  DEFAULTS["gaussmeter_read_delay_s"]),
-                            muted=True,
-                        )
-                        yield card(
-                            "Temperature (MercuryiTC)",
-                            field("temperature_visa_resource", "MercuryiTC VISA resource",
-                                  DEFAULTS["temperature_visa_resource"], kind="text"),
-                            field("temperature_sensor_uids", "Sensor board UID(s)",
-                                  DEFAULTS["temperature_sensor_uids"], kind="text",
-                                  hint="1-2 UIDs, comma-separated."),
-                            muted=True,
-                        )
-
-            with Vertical(id="sidebar"):
-                yield Static("Description", classes="sidebar-title")
-                yield Static(SOT_PULSED_2H_DESCRIPTION, classes="card-desc")
-                yield Static("Summary", classes="sidebar-title")
-                yield Static(id="summary")
-
-        with Horizontal(id="actionbar"):
-            yield Button("▶  Start measurement  (F5)", id="start", variant="success")
-        yield Footer()
-
-    # form I/O
-
-    def update_summary(self) -> None:
-        state, parse_errors = self.parse_state()
-        if parse_errors:
-            info, warnings, errors, preview = [], [], parse_errors, None
-        else:
-            info, warnings, errors = build_summary(state)
-            preview = compute_filename_preview(state)
-
-        self.query_one("#filename_preview", Static).update(
-            f"File:  [bold]{preview}[/bold]" if preview
-            else "[dim]File:  (choose a sample and device to preview)[/dim]")
-
-        lines: list[str] = []
-        if errors:
-            lines.append("[bold red]Blocking issues[/bold red]")
-            lines += [f"  [red]✗ {e}[/red]" for e in errors]
-        if warnings:
-            lines.append("[bold yellow]Warnings[/bold yellow]")
-            lines += [f"  [yellow]⚠ {w}[/yellow]" for w in warnings]
-        lines.append("[bold]Derived values[/bold]")
-        lines += [f"  [dim]•[/dim] {i}" for i in info if i]
-        self.query_one("#summary", Static).update("\n".join(lines))
-        self.query_one("#start", Button).disabled = bool(errors)
-
-        theta = None if parse_errors else state.get("field_theta_deg")
-        phi = None if parse_errors else state.get("field_phi_deg")
-        self.query_one("#field_diagram", Static).update(render_ascii_field_diagram(theta, phi))
-
-    def _build_plan(self, state: dict) -> MeasurementPlan:
-        return build_plan(state, self.data_root)
-
-
 def main() -> None:
-    SOTPulsedSwitching2HApp().run()
+    """This program is a mode of the SOT pulsed-switching form now — open that
+    form on 4200A PMU + lock-in read (SOT2H)."""
+    from sot.sot_pulsed_switching_tui import SOTPulsedSwitchingApp
+    SOTPulsedSwitchingApp(pulse_source="pmu", read_mode="harmonic").run()
 
 
 if __name__ == "__main__":

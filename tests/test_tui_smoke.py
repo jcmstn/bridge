@@ -14,19 +14,22 @@ from pathlib import Path
 import pytest
 from textual.widgets import Input, Select, TextArea
 
+# (module, App, the App's constructor kwargs — a merged form's mode, id)
 APPS = [
-    ("dc.dc_hall_measurement_tui", "DCHallMeasurementApp"),
-    ("dc.dc_iv_curve_tui", "DCIVCurveApp"),
-    ("dc.dc_gate_sweep_tui", "DCGateSweepApp"),
-    ("dc.dc_spin_valve_tui", "DCSpinValveApp"),
-    ("mfli.mfli_dual_harmonic_tui", "MFLIDualHarmonicApp"),
-    ("mfli.mfli_diff_resistance_tui", "MFLIDiffResistanceApp"),
-    ("mfli.mfli_phase_calibration_tui", "MFLIPhaseCalibrationApp"),
-    ("mfli.mfli_noise_spectrum_tui", "MFLINoiseSpectrumApp"),
-    ("sot.sot_pulsed_switching_tui", "SOTPulsedSwitchingApp"),
-    ("sot.sot_pulsed_switching_2h_tui", "SOTPulsedSwitching2HApp"),
-    ("sot.sot_pulsed_switching_6221_tui", "SOTPulsedSwitching6221App"),
-    ("sot.sot_nonlocal_switching_tui", "NonlocalSwitchingApp"),
+    ("dc.dc_hall_measurement_tui", "DCHallMeasurementApp", {}, "HALL"),
+    ("dc.dc_iv_curve_tui", "DCIVCurveApp", {}, "IV"),
+    ("dc.dc_gate_sweep_tui", "DCGateSweepApp", {}, "GSWP"),
+    ("dc.dc_spin_valve_tui", "DCSpinValveApp", {}, "BSWP"),
+    ("mfli.mfli_dual_harmonic_tui", "MFLIDualHarmonicApp", {}, "HARM"),
+    ("mfli.mfli_dual_harmonic_tui", "MFLIDualHarmonicApp", {"ac_source": "6221"}, "HARM6"),
+    ("mfli.mfli_diff_resistance_tui", "MFLIDiffResistanceApp", {}, "DIFFR"),
+    ("mfli.mfli_phase_calibration_tui", "MFLIPhaseCalibrationApp", {}, "PHCAL"),
+    ("mfli.mfli_noise_spectrum_tui", "MFLINoiseSpectrumApp", {}, "NOISE"),
+    ("sot.sot_pulsed_switching_tui", "SOTPulsedSwitchingApp", {}, "SOTPS"),
+    ("sot.sot_pulsed_switching_tui", "SOTPulsedSwitchingApp", {"read_mode": "harmonic"}, "SOT2H"),
+    ("sot.sot_pulsed_switching_tui", "SOTPulsedSwitchingApp",
+     {"pulse_source": "6221", "read_mode": "harmonic"}, "SOT1I"),
+    ("sot.sot_nonlocal_switching_tui", "NonlocalSwitchingApp", {}, "NLSW"),
 ]
 
 
@@ -36,19 +39,22 @@ def _isolate(mod, app_cls, tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(app_cls, "data_root", tmp_path)
 
 
-@pytest.mark.parametrize("module,app_name", APPS, ids=[a for _, a in APPS])
-def test_app_mounts_and_settings_round_trip(module, app_name, tmp_path, monkeypatch):
+@pytest.mark.parametrize("module,app_name,kwargs,type_code", APPS, ids=[a[3] for a in APPS])
+def test_app_mounts_and_settings_round_trip(module, app_name, kwargs, type_code, tmp_path, monkeypatch):
     mod = importlib.import_module(module)
     app_cls = getattr(mod, app_name)
     _isolate(mod, app_cls, tmp_path, monkeypatch)
     field_id = "device"      # identity-bar text field every TUI has; harmless to edit
 
     async def mount(edit: bool):
-        app = app_cls()
+        app = app_cls(**kwargs)
         async with app.run_test(size=(220, 70)) as pilot:
             await pilot.pause()
             app.refresh_summary()
             assert app.query_one("#sample_select", Select).value == "_test"
+            if hasattr(mod, "engine"):          # a merged form is on the mode it was opened in
+                state, _ = app.parse_state()
+                assert mod.engine(mod.build_plan(state, tmp_path)).MEASUREMENT_TYPE == type_code
             if edit:
                 app.query_one(f"#{field_id}", Input).value = "HB9"
                 await pilot.pause()
@@ -64,30 +70,31 @@ def test_app_mounts_and_settings_round_trip(module, app_name, tmp_path, monkeypa
 # One sweep-defining field per program, set to a value that used to allocate
 # billions of points on the next keystroke (frozen / OOM-killed form).
 HUGE_SWEEP = {
-    "DCHallMeasurementApp": ("sweep_rows", "-20, 20, 100000000"),
-    "DCIVCurveApp": ("step_A", "1e-12"),
-    "DCGateSweepApp": ("step_V", "1e-12"),
-    "DCSpinValveApp": ("sweep_rows", "-20, 20, 100000000"),
-    "MFLIDualHarmonicApp": ("sweep_rows", "-20, 20, 100000000"),
-    "MFLIDiffResistanceApp": ("n_points", "1000000000"),
-    "MFLIPhaseCalibrationApp": ("sweep_rows", "-20, 20, 100000000"),
-    "SOTPulsedSwitchingApp": ("amplitude_step_V", "1e-12"),
-    "SOTPulsedSwitching2HApp": ("amplitude_step_V", "1e-12"),
-    "SOTPulsedSwitching6221App": ("pulse_current_step_A", "1e-12"),
-    "NonlocalSwitchingApp": ("pulse_current_step_A", "1e-12"),
+    "HALL": ("sweep_rows", "-20, 20, 100000000"),
+    "IV": ("step_A", "1e-12"),
+    "GSWP": ("step_V", "1e-12"),
+    "BSWP": ("sweep_rows", "-20, 20, 100000000"),
+    "HARM": ("sweep_rows", "-20, 20, 100000000"),
+    "HARM6": ("sweep_rows", "-20, 20, 100000000"),
+    "DIFFR": ("n_points", "1000000000"),
+    "PHCAL": ("sweep_rows", "-20, 20, 100000000"),
+    "SOTPS": ("amplitude_step_V", "1e-12"),
+    "SOT2H": ("amplitude_step_V", "1e-12"),
+    "SOT1I": ("pulse_current_step_A", "1e-12"),
+    "NLSW": ("pulse_current_step_A", "1e-12"),
 }
 
 
-@pytest.mark.parametrize("module,app_name", [a for a in APPS if a[1] in HUGE_SWEEP],
-                         ids=[a for _, a in APPS if a in HUGE_SWEEP])
-def test_huge_sweep_is_a_form_error_not_a_freeze(module, app_name, tmp_path, monkeypatch):
+@pytest.mark.parametrize("module,app_name,kwargs,type_code", [a for a in APPS if a[3] in HUGE_SWEEP],
+                         ids=[a[3] for a in APPS if a[3] in HUGE_SWEEP])
+def test_huge_sweep_is_a_form_error_not_a_freeze(module, app_name, kwargs, type_code, tmp_path, monkeypatch):
     mod = importlib.import_module(module)
     app_cls = getattr(mod, app_name)
     _isolate(mod, app_cls, tmp_path, monkeypatch)
-    field_id, value = HUGE_SWEEP[app_name]
+    field_id, value = HUGE_SWEEP[type_code]
 
     async def go():
-        app = app_cls()
+        app = app_cls(**kwargs)
         async with app.run_test(size=(220, 70)) as pilot:
             await pilot.pause()
             widget = app.query_one(f"#{field_id}")

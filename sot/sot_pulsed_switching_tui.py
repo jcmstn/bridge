@@ -17,9 +17,11 @@ Run:  python sot_pulsed_switching_tui.py
 from __future__ import annotations
 
 import itertools
+import json
 import logging
 import multiprocessing as mp
 import textwrap
+import sys
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,9 +32,11 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.validation import Number
 from textual.widgets import (
-    Button, Collapsible, Footer, Header, Static,
+    Button, Collapsible, Footer, Header, Select, Static,
 )
 
+import sot.sot_pulsed_switching_2h_tui as h2
+import sot.sot_pulsed_switching_6221_tui as i1
 from sot.sot_pulsed_switching import (
     _READ_COMPLIANCE_CEILING_V,
     _READ_CURRENT_CEILING_A,
@@ -90,6 +94,7 @@ from instruments.tui_common import (
     format_si,
     identity_bar,
     parse_sensor_uids,
+    select_field,
     switch_field,
 )
 from instruments.tui_sample_picker import (
@@ -104,41 +109,36 @@ SETTINGS_PATH = _DEFAULT_DATA_DIR / "sot_pulsed_switching_tui_settings.json"
 MEASUREMENT_TYPE = "SOTPS"
 
 SOT_PULSED_DESCRIPTION = (
-    "SOT switching curve: the 4200A PMU fires ONE write pulse per amplitude into "
-    "the main channel through RPM1, then after a fixed delay the 6221 forces "
-    "±I_read through the same path while the 2182 reads V_xy across the Hall arms "
-    "(reversal-averaged, which cancels the thermal EMF and the 2182's offset). "
-    "One row per amplitude, at a static field held slightly out of plane so "
-    "the two in-plane remanent states read as different R_xy. Make the amplitude "
-    "list a full loop (up then down) — the sweep sets each pulse's starting "
-    "state, which is what gives the hysteresis. The pulse runs the KULT module "
-    "instruments/kult/bridge_sot_pulse.c, which routes RPM1 back to the SMU on "
-    "exit. Enter one or more assist-field currents (comma-separated) to scan the "
-    "assist condition — each gets its own complete amplitude sweep and its own "
-    "file; include the opposite sign for the ±H_z control. Re-run the whole "
-    "sweep (same current) for switching-probability statistics."
+    "SOT switching curve: ONE write pulse per amplitude into the main channel, then "
+    "after a fixed delay a small read of the Hall arms — at a static field held "
+    "slightly out of plane so the two in-plane remanent states read differently. "
+    "Write pulse: the 4200A PMU (ns, through RPM1; KULT module "
+    "instruments/kult/bridge_sot_pulse.c) or the 6221 WAVE (hardware-timed µs–ms). "
+    "Read: DC R_xy (6221 ±I, 2182, reversal-averaged) or the lock-in harmonic "
+    "(6221 AC + MFLI ExtRef-locked to its phase marker; 1f+2f with the PMU, one "
+    "chosen harmonic with the 6221 pulse). Make the amplitude list a full loop "
+    "(up then down) for the hysteresis; each assist-field / read current gets its "
+    "own complete sweep and file. Re-run for switching-probability statistics."
 )
 
 # Wiring schematic — shown on this program's card in bridge_tui.py.
 SOT_PULSED_SCHEMATIC = """\
-  KEITHLEY 4200A-SCS  (KXCI — GPIB 17)   — pulse only, FORCE triax, 2-wire local sense
-    PMU1-1 ──▶ RPM1 ──▶ I+ pad of the Hall-cross main channel
-                        centre = force, guard = floating, outer = circuit COMMON.
-                        The KULT module bridge_sot_pulse.c routes RPM1 to the
-                        pulse pathway for the burst and back on exit.
+  Write pulse = 4200A PMU   (SOTPS / SOT2H)
+    PMU1-1 ──▶ RPM1 ──▶ I+ pad of the Hall-cross main channel (FORCE triax,
+    centre = force, guard floating, outer = circuit COMMON). KULT module
+    bridge_sot_pulse.c routes RPM1 to the pulse path for the burst.
+    COMMON BUS ──▶ I- pad   (PMU outer shell + 6221 output LO land here)
+  Write pulse = 6221 WAVE   (SOT1I — no 4200A)
+    6221 HI ──▶ I+ pad , LO ──▶ I- pad ; ONE square cycle = the write pulse
 
-  COMMON BUS ──▶ I- pad   (PMU FORCE outer shell + 6221 output LO land here)
-
-  KEITHLEY 6221  HI ──▶ I+ pad ,  LO ──▶ common bus   (delayed R_xy read)
-                 In parallel with the PMU — OFF while pulsing.
-  KEITHLEY 2182  ──▶ transverse (Hall) arms           (V_xy, floating diff)
+  KEITHLEY 6221  HI ──▶ I+ pad , LO ──▶ common bus / I- pad — OFF while pulsing
+  Read = DC R_xy     KEITHLEY 2182 ──▶ transverse (Hall) arms (V_xy, floating)
+  Read = lock-in     6221 WAVE sine + Trigger Link phase marker (pin 1)
+                       ──▶ ZURICH MFLI AUX IN 1 (ExtRef)
+                     MFLI Signal Input (differential) ──▶ transverse (Hall) arms
 
   KEPCO BOP-GL      ──GPIB──▶ electromagnet   (ONE static tilted field)
   LAKE SHORE 475    ──GPIB──▶ Gaussmeter probe at the sample
-
-  Cycle: 6221 OFF → PMU write pulse → wait → 6221 ON, reversal-averaged
-  R_xy (6221 forces ±I, 2182 reads V_xy) → 6221 OFF. The 2182 is only the
-  reader; re-run the whole sweep for statistics.
 """
 
 # Current MEASURE ceiling with a 4225-RPM on the PMU 10 V range. Above this the
@@ -402,7 +402,7 @@ def build_header_fields(plan: "MeasurementPlan", ctx: RunContext, records: list[
 
 # ── summary ────────────────────────────────────────────────────────────────
 
-def resolve_state(state: dict) -> dict:
+def _resolve_state_ps(state: dict) -> dict:
     """Add the derived keys build_summary() / build_plan() read — the parsed
     lists/sweeps, each with its parse error — to a state of raw field values.
     Pure: shared by the TUI's and the web page's parse_state()."""
@@ -412,7 +412,7 @@ def resolve_state(state: dict) -> dict:
     return state
 
 
-def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
+def _build_summary_ps(state: dict) -> tuple[list[str], list[str], list[str]]:
     info: list[str] = []
     warnings: list[str] = []
     errors: list[str] = []
@@ -585,7 +585,7 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     return info, warnings, errors
 
 
-def compute_filename_preview(state: dict) -> Optional[str]:
+def _preview_ps(state: dict) -> Optional[str]:
     if not state.get("sample") or state["sample"] == NEW_SAMPLE_SENTINEL or not state.get("device"):
         return None
     preview = preview_raw_filename(
@@ -705,7 +705,7 @@ def _save_measurement_png(records: list[dict], png_path: Path,
 
 # ── plan + run (pure, shared by the TUI RunScreen and (no web page yet)) ──────────────
 
-def build_plan(state: dict, data_root: Path) -> MeasurementPlan:
+def _build_plan_ps(state: dict, data_root: Path) -> MeasurementPlan:
     """One parsed, validated run request from a state dict. Pure — shared by
     the TUI and the web page."""
     k4200_cfg = Keithley4200AConfig(visa_resource=state["k4200_visa_resource"])
@@ -911,6 +911,111 @@ def save_run_png(plan: MeasurementPlan, records: list[dict], png_path: Path, com
     _save_measurement_png(records, png_path, plan=plan, comment=comment)
 
 
+# ── pulse-source × read toggles (one program, three engines) ──────────────
+# One form for the three pulsed-switching programs. "Write pulse" picks the
+# 4200A PMU (ns pulses) or the 6221 WAVE (µs–ms pulses); "Read" picks the DC
+# R_xy read (6221 ±I + 2182) or the lock-in harmonic read (6221 AC + MFLI).
+# Each valid combination IS one of the former programs — its engine, type
+# code, columns and header, unchanged:
+#     4200A + DC        -> SOTPS  (this module's functions above)
+#     4200A + harmonic  -> SOT2H  (sot_pulsed_switching_2h_tui)
+#     6221  + harmonic  -> SOT1I  (sot_pulsed_switching_6221_tui)
+# 6221 + DC is not a program here (a 6221 pulse + 2182A read is the nonlocal-
+# switching program's). Two form fields mean different things per engine and
+# get their own ids, renamed back to the engine's key before it sees the state:
+# the 6221 pulse's width (ms, `wave_pulse_width_s`) vs the PMU's (ns,
+# `pulse_width_s`), and the lock-in read's settle-after-PLL-lock
+# (`lock_settle_s`) vs the DC read's settle-after-enable.
+
+PULSE_SOURCES = [("Keithley 4200A PMU (ns pulses)", "pmu"), ("Keithley 6221 WAVE (µs–ms pulses)", "6221")]
+READ_MODES = [("DC R_xy — 6221 ±I + 2182", "dc"), ("Lock-in harmonic — 6221 AC + MFLI", "harmonic")]
+_PS = sys.modules[__name__]
+_ENGINES = {("pmu", "dc"): _PS, ("pmu", "harmonic"): h2, ("6221", "harmonic"): i1}
+_FORM_IDS = {i1: {"pulse_width_s": "wave_pulse_width_s", "settle_after_enable_s": "lock_settle_s"},
+             h2: {"settle_after_enable_s": "lock_settle_s"}}    # engine key -> form id
+
+
+def _form_keys(engine, keys) -> list:
+    return [_FORM_IDS.get(engine, {}).get(k, k) for k in keys]
+
+
+def _as_form(engine, d: dict) -> dict:
+    return dict(zip(_form_keys(engine, d), d.values()))
+
+
+_ENGINE_FIELDS = {eng: set(_form_keys(eng, eng.DEFAULTS)) for eng in (h2, i1)} | {_PS: set(DEFAULTS)}
+DEFAULTS = {**_as_form(i1, i1.DEFAULTS), **_as_form(h2, h2.DEFAULTS), **DEFAULTS,
+            "pulse_source": "pmu", "read_mode": "dc"}
+NUMERIC_FIELDS = {**_as_form(i1, i1.NUMERIC_FIELDS), **_as_form(h2, h2.NUMERIC_FIELDS), **NUMERIC_FIELDS}
+TEXT_FIELDS = list(dict.fromkeys(TEXT_FIELDS + h2.TEXT_FIELDS + i1.TEXT_FIELDS))
+OPTIONAL_NUMERIC_FIELDS = list(dict.fromkeys(
+    OPTIONAL_NUMERIC_FIELDS + h2.OPTIONAL_NUMERIC_FIELDS + i1.OPTIONAL_NUMERIC_FIELDS))
+
+
+def mode(state: dict) -> tuple[str, str]:
+    return state.get("pulse_source", "pmu"), state.get("read_mode", "dc")
+
+
+def _engine_state(state: dict):
+    """(engine, the state with that engine's own keys), or (None, state) for
+    a combination that isn't a program."""
+    engine = _ENGINES.get(mode(state))
+    if engine is None:
+        return None, state
+    state = dict(state)
+    for key, form_id in _FORM_IDS.get(engine, {}).items():
+        if form_id in state:
+            state[key] = state[form_id]
+    return engine, state
+
+
+def mode_errors(state: dict, errors: list[str]) -> list[str]:
+    """Parse errors of the active engine's fields only."""
+    engine = _ENGINES.get(mode(state))
+    if engine is None:
+        return errors
+    hidden = set(DEFAULTS) - _ENGINE_FIELDS[engine]
+    return [e for e in errors if not any(e.startswith(f"'{f}'") for f in hidden)]
+
+
+def resolve_state(state: dict) -> dict:
+    engine, state = _engine_state(state)
+    if engine is None:
+        return state
+    return (_resolve_state_ps if engine is _PS else engine.resolve_state)(state)
+
+
+def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
+    engine, state = _engine_state(state)
+    if engine is None:
+        return [], [], ["A 6221 write pulse with the DC 2182 read is not a program here — use the "
+                        "lock-in read, or the nonlocal-switching program for 6221 pulses + a 2182A read."]
+    return (_build_summary_ps if engine is _PS else engine.build_summary)(state)
+
+
+def compute_filename_preview(state: dict) -> Optional[str]:
+    engine, state = _engine_state(state)
+    if engine is None:
+        return None
+    return (_preview_ps if engine is _PS else engine.compute_filename_preview)(state)
+
+
+def build_plan(state: dict, data_root: Path):
+    """The active combination's plan (its engine's own MeasurementPlan type)."""
+    engine, state = _engine_state(state)
+    if engine is None:
+        raise ValueError("6221 write pulse + DC read is not a program")
+    return (_build_plan_ps if engine is _PS else engine.build_plan)(state, data_root)
+
+
+def engine(plan):
+    """The module that runs `plan` — its run_plan / header / PNG / type code / RunScreen."""
+    for eng in (h2, i1):
+        if isinstance(plan, eng.MeasurementPlan):
+            return eng
+    return _PS
+
+
 # ── run screen ─────────────────────────────────────────────────────────────
 
 class RunScreen(MeasurementRunScreen):
@@ -941,7 +1046,27 @@ class RunScreen(MeasurementRunScreen):
 
 class SOTPulsedSwitchingApp(MeasurementApp):
     TITLE = "SOT pulsed switching"
-    SUB_TITLE = "4200A PMU pulse · delayed 6221/2182 R_xy · static tilted field"
+    SUB_TITLE = "4200A PMU or 6221 write pulse · DC R_xy or lock-in harmonic read · static tilted field"
+
+    # widget id -> shown for which (write pulse, read) combination
+    MODE_WIDGETS = {
+        "mode_pmu_pulse": lambda p, r: p == "pmu",
+        "mode_pmu_config": lambda p, r: p == "pmu",
+        "mode_6221_pulse": lambda p, r: p == "6221",
+        "mode_dc_read": lambda p, r: r == "dc",
+        "mode_dc_instruments": lambda p, r: r == "dc",
+        "mode_lockin_read": lambda p, r: r == "harmonic",
+        "mode_mfli": lambda p, r: r == "harmonic",
+        "mode_sot2h_demods": lambda p, r: (p, r) == ("pmu", "harmonic"),
+        "mode_sot1i_demod": lambda p, r: (p, r) == ("6221", "harmonic"),
+        "mode_sot1i_harmonic": lambda p, r: (p, r) == ("6221", "harmonic"),
+    }
+    # a former program's settings file -> the (write pulse, read) it was
+    LEGACY = ((h2, ("pmu", "harmonic")), (i1, ("6221", "harmonic")))
+
+    def __init__(self, pulse_source: Optional[str] = None, read_mode: Optional[str] = None) -> None:
+        super().__init__()
+        self._forced = {"pulse_source": pulse_source, "read_mode": read_mode}
 
     data_root: Path = _DEFAULT_DATA_DIR
 
@@ -989,6 +1114,12 @@ class SOTPulsedSwitchingApp(MeasurementApp):
 
                 with Vertical(classes="param-grid"):
                     yield card(
+                        "Write pulse × read",
+                        select_field("pulse_source", "Write pulse", PULSE_SOURCES, DEFAULTS["pulse_source"]),
+                        select_field("read_mode", "Read", READ_MODES, DEFAULTS["read_mode"],
+                                     hint="4200A+DC → SOTPS · 4200A+lock-in → SOT2H · 6221+lock-in → SOT1I"),
+                    )
+                    yield card(
                         "Write pulse (4200A PMU)",
                         field("amplitude_start_V", "Amplitude start (V)",
                               DEFAULTS["amplitude_start_V"]),
@@ -1006,24 +1137,77 @@ class SOTPulsedSwitchingApp(MeasurementApp):
                         field("pulse_fall_s", "Fall time (s)", DEFAULTS["pulse_fall_s"]),
                         field("pulse_period_s", "Pulse period (s)", DEFAULTS["pulse_period_s"],
                               hint="≥ delay + width + rise + fall."),
+                        id="mode_pmu_pulse",
                     )
                     yield card(
-                        "Delayed R_xy read (6221 + 2182)",
+                        "Write pulse (6221 WAVE, hardware-timed)",
+                        field("pulse_current_start_A", "Pulse current start (A)",
+                              DEFAULTS["pulse_current_start_A"]),
+                        field("pulse_current_stop_A", "Pulse current stop (A)",
+                              DEFAULTS["pulse_current_stop_A"]),
+                        field("pulse_current_step_A", "Pulse current step (A)",
+                              DEFAULTS["pulse_current_step_A"],
+                              validators=[Number(minimum=1e-12, failure_description="must be > 0")],
+                              hint="One pulse per step."),
+                        switch_field("amplitude_bidirectional",
+                                     "Sweep up then back down (hysteresis loop)",
+                                     DEFAULTS["amplitude_bidirectional"]),
+                        field("wave_pulse_width_s", "Requested pulse width (s)",
+                              DEFAULTS["wave_pulse_width_s"],
+                              hint="No rise/fall control; actual width is measured and logged "
+                                   "as pulse_width_measured_s. See the module docstring."),
+                        field("pulse_compliance_V", "Pulse voltage compliance (V)",
+                              DEFAULTS["pulse_compliance_V"]),
+                        id="mode_6221_pulse",
+                    )
+                    yield card(
+                        "Delayed read",
                         field("delay_after_pulse_s", "Delay after pulse (s)",
                               DEFAULTS["delay_after_pulse_s"],
                               validators=[Number(minimum=0.0, failure_description="must be ≥ 0")],
                               hint="Wait between pulse end and the read."),
-                        field("sense_current_values", "6221 sense current (A)",
+                        field("sense_current_values", "6221 read current (A)",
                               DEFAULTS["sense_current_values"], kind="text",
-                              hint="Keep well below the switching current. Single value, or "
+                              hint="DC read: ±I sense current; lock-in read: AC amplitude, peak. "
+                                   "Keep well below the switching current. Single value, or "
                                    "comma-separated list — one complete amplitude sweep runs "
                                    "per value, each saved to its own file."),
+                    )
+                    yield card(
+                        "DC R_xy read (6221 ±I + 2182)",
                         field("n_reversals", "Reversal pairs per read", DEFAULTS["n_reversals"],
                               kind="integer",
                               validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
                         field("settle_after_enable_s", "6221 settle after enable (s)",
                               DEFAULTS["settle_after_enable_s"],
                               validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
+                        id="mode_dc_read",
+                    )
+                    yield card(
+                        "Lock-in read (6221 AC + MFLI)",
+                        field("frequency_Hz", "AC excitation frequency (Hz)",
+                              DEFAULTS["frequency_Hz"],
+                              hint="Avoid exact multiples of 50/60 Hz."),
+                        field("n_averages", "MFLI samples averaged per read",
+                              DEFAULTS["n_averages"], kind="integer",
+                              validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
+                        field("lock_settle_s", "Settle after PLL lock (s)",
+                              DEFAULTS["lock_settle_s"],
+                              validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
+                        field("lock_timeout_s", "PLL lock timeout (s)",
+                              DEFAULTS["lock_timeout_s"],
+                              validators=[Number(minimum=0.0, failure_description="must be ≥ 0")],
+                              hint="A timeout is logged, not fatal — the row is tagged "
+                                   "reference_locked=False."),
+                        id="mode_lockin_read",
+                    )
+                    yield card(
+                        "Lock-in harmonic (6221 pulse)",
+                        field("harmonic", "Harmonic to lock in on", DEFAULTS["harmonic"],
+                              kind="integer",
+                              hint="2 = standard harmonic-Hall SOT signal (default). "
+                                   "1 = resistive AHE/PHE."),
+                        id="mode_sot1i_harmonic",
                     )
                     yield card(
                         "Static field (Kepco magnet)",
@@ -1106,20 +1290,92 @@ class SOTPulsedSwitchingApp(MeasurementApp):
                                   hint="Set near the real channel R (4-probe it first). "
                                        "Also drives the sidebar current estimate."),
                             muted=True,
+                            id="mode_pmu_config",
                         )
                         yield card(
-                            "6221 / 2182",
-                            field("source_visa_resource", "6221 (current source)",
+                            "Keithley 6221",
+                            field("source_visa_resource", "6221 VISA resource",
                                   DEFAULTS["source_visa_resource"], kind="text"),
-                            field("voltmeter_visa_resource", "2182 (Hall voltage)",
-                                  DEFAULTS["voltmeter_visa_resource"], kind="text"),
                             field("compliance_V", "6221 compliance (V)", DEFAULTS["compliance_V"],
                                   hint="Keep low — caps what an open contact can put on the "
                                        "shared bus. Read needs < 1 V."),
+                            muted=True,
+                        )
+                        yield card(
+                            "Keithley 2182 + DC read",
+                            field("voltmeter_visa_resource", "2182 (Hall voltage)",
+                                  DEFAULTS["voltmeter_visa_resource"], kind="text"),
                             field("source_delay_s", "6221 source delay (s)", DEFAULTS["source_delay_s"]),
                             field("nplc", "2182 NPLC", DEFAULTS["nplc"]),
                             switch_field("auto_range", "2182 auto-range", DEFAULTS["auto_range"]),
                             muted=True,
+                            id="mode_dc_instruments",
+                        )
+                        yield card(
+                            "Zurich Instruments MFLI + 6221 marker",
+                            field("mfli_host", "LabOne data server host",
+                                  DEFAULTS["mfli_host"], kind="text"),
+                            field("mfli_port", "LabOne data server port",
+                                  DEFAULTS["mfli_port"], kind="integer"),
+                            field("mfli_device", "MFLI device ID", DEFAULTS["mfli_device"],
+                                  kind="text", hint="e.g. dev1234."),
+                            field("aux_input_ch", "Aux Input carrying the marker (0-based)",
+                                  DEFAULTS["aux_input_ch"], kind="integer",
+                                  hint="0 = Aux In 1."),
+                            field("osc_index", "Oscillator locked by the PLL", DEFAULTS["osc_index"],
+                                  kind="integer"),
+                            field("extref_index", "ExtRef/PLL module index", DEFAULTS["extref_index"],
+                                  kind="integer"),
+                            field("pll_demod_index", "PLL phase-detector demod index (≠ 1f/2f demods)",
+                                  DEFAULTS["pll_demod_index"], kind="integer",
+                                  hint="extrefs/N/adcselect is read-only on real firmware — the PLL "
+                                       "is steered via THIS dedicated demod's own adcselect/oscselect "
+                                       "instead. Must differ from both demod indices below."),
+                            select_field("automode", "PLL bandwidth adaptation",
+                                  h2.AUTOMODE_OPTIONS, int(DEFAULTS["automode"]),
+                                  hint=h2.AUTOMODE_HINT),
+                            field("input_ch", "Signal Input channel (0-based)",
+                                  DEFAULTS["input_ch"], kind="integer"),
+                            switch_field("differential", "Differential input (IN+ / IN−)",
+                                  DEFAULTS["differential"]),
+                            switch_field("ac_coupling", "AC-couple the input", DEFAULTS["ac_coupling"]),
+                            field("input_range_V", "Signal Input range (V)",
+                                  DEFAULTS["input_range_V"]),
+                            field("sample_rate_Hz", "Demodulator output rate (Sa/s)",
+                                  DEFAULTS["sample_rate_Hz"]),
+                            field("filter_time_constant_s", "Filter time constant (s)",
+                                  DEFAULTS["filter_time_constant_s"]),
+                            field("filter_order", "Filter order (1-8)", DEFAULTS["filter_order"],
+                                  kind="integer"),
+                            switch_field("filter_sinc", "Sinc filter (extra harmonic rejection)",
+                                  DEFAULTS["filter_sinc"]),
+                            field("phasemarker_line", "Trigger Link phase-marker pin (1-6)",
+                                  DEFAULTS["phasemarker_line"], kind="integer",
+                                  hint="Wire this pin to the MFLI's Aux In. Confirm it isn't the "
+                                       "6221's factory-default Trigger Link pin before assuming "
+                                       "it's free."),
+                            muted=True,
+                            id="mode_mfli",
+                        )
+                        yield card(
+                            "MFLI demodulators (1f + 2f)",
+                            field("demod1_index", "1f demodulator index", DEFAULTS["demod1_index"],
+                                  kind="integer"),
+                            field("demod2_index", "2f demodulator index", DEFAULTS["demod2_index"],
+                                  kind="integer",
+                                  hint="Defaults skip index 0 — that's the PLL phase-detector demod "
+                                       "above. See the module docstring's 'Bench-verify' section."),
+                            muted=True,
+                            id="mode_sot2h_demods",
+                        )
+                        yield card(
+                            "MFLI demodulator",
+                            field("demod_index", "Demodulator index", DEFAULTS["demod_index"],
+                                  kind="integer",
+                                  hint="Default skips index 0 — that's the PLL phase-detector demod "
+                                       "above. See the module docstring's 'Bench-verify' section."),
+                            muted=True,
+                            id="mode_sot1i_demod",
                         )
                         yield card(
                             "Kepco magnet + Lake Shore 475",
@@ -1189,8 +1445,63 @@ class SOTPulsedSwitchingApp(MeasurementApp):
         phi = None if parse_errors else state.get("field_phi_deg")
         self.query_one("#field_diagram", Static).update(render_ascii_field_diagram(theta, phi))
 
-    def _build_plan(self, state: dict) -> MeasurementPlan:
+    def _build_plan(self, state: dict):
         return build_plan(state, self.data_root)
+
+    # ── write-pulse × read toggles ───────────────────────────────────────────
+
+    def _read_settings(self) -> dict:
+        """This form's settings plus the former 2nd-harmonic and 6221-only
+        programs' (their keys renamed to this form's ids), so no program's last
+        values are lost by the merge. Until this form has been saved with the
+        toggles, the files are merged oldest-first and the toggles follow the
+        program used last; after that, this form's own values win."""
+        files = [(SETTINGS_PATH, _PS, ("pmu", "dc"))] + [
+            (eng.SETTINGS_PATH, eng, combo) for eng, combo in self.LEGACY]
+        loaded = []
+        for path, eng, combo in files:
+            try:
+                loaded.append((path.stat().st_mtime, _as_form(eng, json.loads(path.read_text())), combo))
+            except (FileNotFoundError, json.JSONDecodeError, OSError):
+                pass
+        merged: dict = {}
+        own = next((d for _, d, c in loaded if c == ("pmu", "dc")), {})
+        if "pulse_source" in own:                       # saved since the merge
+            for _, d, _ in loaded:
+                merged.update(d)
+            merged.update(own)
+        elif loaded:
+            loaded.sort(key=lambda item: item[0])
+            for _, d, _ in loaded:
+                merged.update(d)
+            merged["pulse_source"], merged["read_mode"] = loaded[-1][2]
+        merged.update({k: v for k, v in self._forced.items() if v})
+        return merged
+
+    def on_mount(self) -> None:
+        super().on_mount()
+        for key, value in self._forced.items():
+            if value:
+                self.query_one(f"#{key}", Select).value = value
+        self._show_mode()
+
+    def _show_mode(self) -> None:
+        pulse = self.query_one("#pulse_source", Select).value
+        read = self.query_one("#read_mode", Select).value
+        for widget_id, shown in self.MODE_WIDGETS.items():
+            self.query_one(f"#{widget_id}").display = shown(pulse, read)
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id in ("pulse_source", "read_mode"):
+            self._show_mode()
+        super().on_select_changed(event)
+
+    def parse_state(self) -> tuple[dict, list[str]]:
+        state, errors = super().parse_state()
+        return state, mode_errors(state, errors)
+
+    def run_screen(self, plan):
+        return engine(plan).RunScreen(plan)
 
 
 def main() -> None:

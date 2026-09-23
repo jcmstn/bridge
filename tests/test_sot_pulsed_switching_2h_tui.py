@@ -1,5 +1,5 @@
 """
-sot/sot_pulsed_switching_2h_tui.py — build_summary validation + _build_plan
+sot/sot_pulsed_switching_2h_tui.py — build_summary validation + build_plan
 purity. Pure logic only, no Textual mount, no hardware.
 
 Mirrors tests/test_sot_pulsed_switching_tui.py; only the read-side
@@ -211,10 +211,8 @@ def test_summary_blocks_negative_lock_timeout():
 
 
 def test_build_plan_shapes(tmp_path: Path):
-    app = tui.SOTPulsedSwitching2HApp()
-    app.data_root = tmp_path
-    plan = app._build_plan(_state(amplitude_start_V=0.2, amplitude_stop_V=1.0,
-                                  amplitude_step_V=0.4, amplitude_bidirectional=False))
+    plan = tui.build_plan(_state(amplitude_start_V=0.2, amplitude_stop_V=1.0,
+                                  amplitude_step_V=0.4, amplitude_bidirectional=False), tmp_path)
 
     assert plan.amplitudes_V == pytest.approx([0.2, 0.6, 1.0])
     assert plan.total_points == 3                         # one pulse per amplitude
@@ -240,11 +238,9 @@ def test_build_plan_shapes(tmp_path: Path):
 
 
 def test_build_plan_multiple_magnet_currents(tmp_path: Path):
-    app = tui.SOTPulsedSwitching2HApp()
-    app.data_root = tmp_path
-    plan = app._build_plan(_state(amplitude_start_V=0.2, amplitude_stop_V=1.0,
+    plan = tui.build_plan(_state(amplitude_start_V=0.2, amplitude_stop_V=1.0,
                                   amplitude_step_V=0.4, amplitude_bidirectional=False,
-                                  magnet_current_A="1.5, -1.5, 3"))
+                                  magnet_current_A="1.5, -1.5, 3"), tmp_path)
 
     assert plan.magnet_currents_A == [1.5, -1.5, 3.0]
     assert plan.series_values == [(1e-4, 1.5), (1e-4, -1.5), (1e-4, 3.0)]
@@ -252,12 +248,10 @@ def test_build_plan_multiple_magnet_currents(tmp_path: Path):
 
 
 def test_build_plan_multiple_sense_currents(tmp_path: Path):
-    app = tui.SOTPulsedSwitching2HApp()
-    app.data_root = tmp_path
-    plan = app._build_plan(_state(amplitude_start_V=0.2, amplitude_stop_V=1.0,
+    plan = tui.build_plan(_state(amplitude_start_V=0.2, amplitude_stop_V=1.0,
                                   amplitude_step_V=0.4, amplitude_bidirectional=False,
                                   magnet_current_A="1.5, -1.5",
-                                  sense_current_values="1e-4, 2e-4"))
+                                  sense_current_values="1e-4, 2e-4"), tmp_path)
 
     assert plan.sense_currents_A == [1e-4, 2e-4]
     # sense current outer (needs a 6221 AC re-arm), magnet inner
@@ -268,9 +262,7 @@ def test_build_plan_multiple_sense_currents(tmp_path: Path):
 def test_build_plan_channel_resistance_field_is_gone(tmp_path: Path):
     """The Phase-6 display-only channel_resistance_ohm field is removed; the
     load-line pmu_dut_res_ohm (a real pulse parameter) is what's recorded."""
-    app = tui.SOTPulsedSwitching2HApp()
-    app.data_root = tmp_path
-    plan = app._build_plan(_state(pmu_dut_res_ohm=250.0))
+    plan = tui.build_plan(_state(pmu_dut_res_ohm=250.0), tmp_path)
     assert "channel_resistance_ohm" not in plan.header_extra
     assert plan.header_extra["pmu_dut_res_ohm"] == 250.0
     assert plan.header_extra["sense_current_A"] == 1e-4
@@ -279,18 +271,14 @@ def test_build_plan_channel_resistance_field_is_gone(tmp_path: Path):
 
 
 def test_build_plan_return_names_parsed(tmp_path: Path):
-    app = tui.SOTPulsedSwitching2HApp()
-    app.data_root = tmp_path
-    plan = app._build_plan(_state(
-        pmu_return_names="pulse_voltage_measured_V, pulse_current_measured_A"))
+    plan = tui.build_plan(_state(
+        pmu_return_names="pulse_voltage_measured_V, pulse_current_measured_A"), tmp_path)
     assert plan.pmu_cfg.return_names == ("pulse_voltage_measured_V", "pulse_current_measured_A")
 
 
 def test_build_plan_temperature_cfg_gating(tmp_path: Path):
-    app = tui.SOTPulsedSwitching2HApp()
-    app.data_root = tmp_path
-    assert app._build_plan(_state(enable_temperature=False)).temp_cfg is None
-    p = app._build_plan(_state(enable_temperature=True,
+    assert tui.build_plan(_state(enable_temperature=False), tmp_path).temp_cfg is None
+    p = tui.build_plan(_state(enable_temperature=True,
                                temperature_visa_resource="TCPIP0::x::7020::SOCKET",
-                               temperature_sensor_uids="MB1.T1"))
+                               temperature_sensor_uids="MB1.T1"), tmp_path)
     assert p.temp_cfg is not None and p.temp_cfg.sensor_uids == ("MB1.T1",)

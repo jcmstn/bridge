@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 """
-Textual TUI for sot/sot_pulsed_switching_6221.py
-=========================================
+6221-pulse + lock-in-read engine of the SOT pulsed-switching form  (type SOT1I)
+================================================================================
 Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
-Created: 2026-09-14
+Created: 2026-09-14 (a mode of sot_pulsed_switching_tui.py since 2026-09-23)
 
-Same switching-curve TUI shape as sot_pulsed_switching_2h_tui.py, with the
-4200A removed entirely: a single 6221 fires a hardware-timed current pulse
-(WAVE mode, square function, one cycle — verified against the 6220/6221
-User's Manual, no 2182 needed), then reads a chosen harmonic (default 2f)
-of V_xy via AC + a single externally-referenced MFLI. See sot/sot_pulsed_
-switching_6221.py's module docstring — especially "How the write pulse
-works" — before running this on a real device: Joule heating at a
-switching-level current still scales badly with pulse width even though
-the timing itself is now hardware-timed, not a software guess.
+The "Pulse = 6221 WAVE, Read = lock-in harmonic" engine behind the switching
+form in sot_pulsed_switching_tui.py: its parameter surface, summary, plan
+builder, run loop, header, PNG and RunScreen. No 4200A: a single 6221 fires a
+hardware-timed current pulse (WAVE mode, square function, one cycle — no 2182
+needed), then reads a chosen harmonic (default 2f) of V_xy via AC + a single
+externally-referenced MFLI. See sot/sot_pulsed_switching_6221.py's module
+docstring — especially "How the write pulse works" — before running this on a
+real device: Joule heating at a switching-level current still scales badly
+with pulse width even though the timing itself is hardware-timed.
 
-Run:  python sot_pulsed_switching_6221_tui.py
+Run:  python sot_pulsed_switching_6221_tui.py   (opens the form in this mode)
 """
 
 from __future__ import annotations
@@ -30,12 +30,6 @@ from pathlib import Path
 from typing import Callable, List, Optional
 
 
-from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.validation import Number
-from textual.widgets import (
-    Button, Collapsible, Footer, Header, Static,
-)
 
 from sot.sot_pulsed_switching_6221 import (
     _READ_COMPLIANCE_CEILING_V,
@@ -73,7 +67,7 @@ from sot.sot_pulsed_switching_6221 import (
 from sot.sot_pulsed_switching_6221 import _six221_ac_output_off
 from dc.dc_sweep_utils import linear_sweep, parse_value_list, safe_shutdown
 from instruments.data_dir import validate_directory
-from instruments.field_geometry import field_direction_summary_line, render_ascii_field_diagram
+from instruments.field_geometry import field_direction_summary_line
 from instruments.data_naming import (
     RunContext,
     allocate_run,
@@ -89,16 +83,10 @@ from instruments.run_time import (
     RunCost,
 )
 from instruments.tui_common import (
-    MeasurementApp,
     MeasurementRunScreen,
-    card,
-    field,
     format_si,
-    identity_bar,
     parse_sensor_uids,
     run_screen_bindings,
-    select_field,
-    switch_field,
 )
 from instruments.tui_sample_picker import (
     NEW_SAMPLE_SENTINEL,
@@ -110,41 +98,6 @@ _DEFAULT_DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 SETTINGS_PATH = _DEFAULT_DATA_DIR / "sot_pulsed_switching_6221_tui_settings.json"
 
 MEASUREMENT_TYPE = "SOT1I"
-
-SOT_PULSED_6221_DESCRIPTION = (
-    "SOT switching curve, 6221-only (NO 4200A, no 2182): a single Keithley 6221 "
-    "fires ONE hardware-timed current pulse per amplitude (WAVE mode, square "
-    "function, one cycle — verified against the 6220/6221 User's Manual, not "
-    "Pulse Delta), then after a fixed delay sources an AC current (phase marker "
-    "on its Trigger Link) while a single Zurich MFLI, externally referenced to "
-    "that marker via its Aux Input, locks in on a chosen harmonic of V_xy (2f by "
-    "default — the standard harmonic-Hall SOT signal; 1f reads the resistive "
-    "AHE/PHE signal instead). One row per amplitude, at a static field held "
-    "slightly out of plane. The write pulse has no independent rise/fall control "
-    "and its true floor is range/load-dependent (spec: ~1-5 µs best case) — its "
-    "actual elapsed hold time is measured and recorded every row "
-    "(pulse_width_measured_s); read the module docstring's 'How the write pulse "
-    "works' section, especially the Joule-heating scaling, before pushing width "
-    "or current up. Make the amplitude list a full loop (up then down) for the "
-    "hysteresis. Enter one or more assist-field currents (comma-separated) to "
-    "scan the assist condition — each gets its own file."
-)
-
-# Wiring schematic — shown on this program's card in bridge_tui.py.
-SOT_PULSED_6221_SCHEMATIC = """\
-  KEITHLEY 6221  (the ONLY source — no 4200A, no 2182)   HI ──▶ I+ pad ,  LO ──▶ I- pad
-    WAVE square, ONE cycle = the write pulse (hardware-timed, per amplitude)
-    then WAVE sine + phase marker = the read; wave OFF between the two.
-    Trigger Link phase marker (pin 1) ──▶ ZURICH MFLI  AUX IN 1
-  ZURICH MFLI    Signal Input (differential) ──▶ the transverse (Hall) arms
-                 ExtRef-locked to the marker; one harmonic (2f default, 1f = AHE/PHE)
-
-  KEPCO BOP-GL      ──GPIB──▶ electromagnet   (ONE static tilted field)
-  LAKE SHORE 475    ──GPIB──▶ Gaussmeter probe at the sample
-
-  Software-timed at the µs–ms scale: Joule heating is I²R·t, far above the
-  4200A's ns pulses — start well below the switching current.
-"""
 
 DEFAULTS: dict = {
     # write pulse (6221 DC) — the switching axis is now current, not voltage
@@ -916,274 +869,11 @@ class RunScreen(MeasurementRunScreen):
         )
 
 
-# ── app / form ─────────────────────────────────────────────────────────────
-
-class SOTPulsedSwitching6221App(MeasurementApp):
-    TITLE = "SOT pulsed switching (6221-only)"
-    SUB_TITLE = "6221 DC pulse · delayed 6221 AC / MFLI harmonic · static tilted field"
-
-    data_root: Path = _DEFAULT_DATA_DIR
-
-    CSS = """
-    #body { height: 1fr; }
-    #form { width: 1fr; padding: 1 2; }
-    #sidebar { width: 46; border-left: solid $primary; padding: 1 2; overflow-y: auto; }
-    #identity_bar { height: auto; border: round $accent; padding: 1 2; margin-bottom: 1; }
-    #filename_preview { text-style: bold; margin-bottom: 1; }
-    #data_dir_row { height: 3; margin-bottom: 1; }
-    #data_dir_row Input { width: 1fr; }
-    #data_dir_row Button { margin-left: 1; }
-    #identity_fields { layout: grid; grid-size: 4; grid-gutter: 0 2; height: auto; }
-    #identity_fields > Vertical { height: auto; }
-    .param-grid { layout: grid; grid-size: 2; grid-gutter: 1 2; height: auto; margin-bottom: 1; }
-    .param-card { border: solid $primary; padding: 1 2; height: auto; }
-    .stable-grid { layout: grid; grid-size: 3; grid-gutter: 1 2; height: auto; }
-    Collapsible { height: auto; margin: 1 0; }
-    Collapsible > Contents { padding: 1 0 0 1; }
-    CollapsibleTitle { text-style: bold; color: $text-muted; }
-    .stable-card { border: round $panel-darken-1; padding: 1 2; height: auto; }
-    .stable-card .card-title { color: $text-muted; text-style: none; }
-    .stable-card .field-label { color: $text-muted; text-style: none; }
-    .card-title { text-style: bold underline; margin-bottom: 1; }
-    .field { margin-bottom: 1; }
-    .field-label { text-style: bold; }
-    .hint { text-style: italic; color: $text-muted; }
-    .switch-row { height: 3; }
-    .switch-row Label { margin-left: 1; content-align: left middle; height: 3; }
-    .plane-btn-row { height: 3; margin-bottom: 1; }
-    .plane-btn-row Button { min-width: 5; margin-right: 1; }
-    .field-diagram { color: $text-muted; margin-top: 1; }
-    .sidebar-title { text-style: bold underline; margin-bottom: 1; }
-    .card-desc { color: $text-muted; margin-bottom: 1; }
-    #actionbar { height: 3; align: center middle; }
-    """
-
-    def compose(self) -> ComposeResult:
-        yield Header(show_clock=False)
-        with Horizontal(id="body"):
-            with VerticalScroll(id="form"):
-                yield identity_bar(DEFAULTS, _DEFAULT_DATA_DIR, self.data_root,
-                                   device_label="Device (e.g. HB3)",
-                                   temperature_hint="Filename T###K token only.")
-
-                with Vertical(classes="param-grid"):
-                    yield card(
-                        "Write pulse (6221 WAVE, hardware-timed)",
-                        field("pulse_current_start_A", "Pulse current start (A)",
-                              DEFAULTS["pulse_current_start_A"]),
-                        field("pulse_current_stop_A", "Pulse current stop (A)",
-                              DEFAULTS["pulse_current_stop_A"]),
-                        field("pulse_current_step_A", "Pulse current step (A)",
-                              DEFAULTS["pulse_current_step_A"],
-                              validators=[Number(minimum=1e-12, failure_description="must be > 0")],
-                              hint="One pulse per step."),
-                        switch_field("amplitude_bidirectional",
-                                     "Sweep up then back down (hysteresis loop)",
-                                     DEFAULTS["amplitude_bidirectional"]),
-                        field("pulse_width_s", "Requested pulse width (s)",
-                              DEFAULTS["pulse_width_s"],
-                              hint="No rise/fall control; actual width is measured and logged "
-                                   "as pulse_width_measured_s. See the module docstring."),
-                        field("pulse_compliance_V", "Pulse voltage compliance (V)",
-                              DEFAULTS["pulse_compliance_V"]),
-                    )
-                    yield card(
-                        "Delayed harmonic read (6221 AC + MFLI)",
-                        field("delay_after_pulse_s", "Delay after pulse (s)",
-                              DEFAULTS["delay_after_pulse_s"],
-                              validators=[Number(minimum=0.0, failure_description="must be ≥ 0")],
-                              hint="Wait between pulse end and the read."),
-                        field("sense_current_values", "6221 AC current amplitude, peak (A)",
-                              DEFAULTS["sense_current_values"], kind="text",
-                              hint="Keep well below the switching current. Single value, or "
-                                   "comma-separated list — one complete pulse-current sweep "
-                                   "runs per value (own 6221 re-arm), each saved to its own "
-                                   "file."),
-                        field("compliance_V", "6221 read compliance (V)", DEFAULTS["compliance_V"],
-                              hint="Keep low — the Hall read needs < 1 V of headroom."),
-                        field("frequency_Hz", "AC excitation frequency (Hz)",
-                              DEFAULTS["frequency_Hz"],
-                              hint="Avoid exact multiples of 50/60 Hz."),
-                        field("phasemarker_line", "Trigger Link phase-marker pin (1-6)",
-                              DEFAULTS["phasemarker_line"], kind="integer",
-                              hint="Wire this pin to the MFLI's Aux In. Confirm it isn't the "
-                                   "6221's factory-default Trigger Link pin before assuming "
-                                   "it's free."),
-                        field("harmonic", "Harmonic to lock in on", DEFAULTS["harmonic"],
-                              kind="integer",
-                              hint="2 = standard harmonic-Hall SOT signal (default). "
-                                   "1 = resistive AHE/PHE."),
-                        field("n_averages", "MFLI samples averaged per read",
-                              DEFAULTS["n_averages"], kind="integer",
-                              validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
-                        field("settle_after_enable_s", "Settle after PLL lock (s)",
-                              DEFAULTS["settle_after_enable_s"],
-                              validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
-                        field("lock_timeout_s", "PLL lock timeout (s)",
-                              DEFAULTS["lock_timeout_s"],
-                              validators=[Number(minimum=0.0, failure_description="must be ≥ 0")],
-                              hint="A timeout is logged, not fatal — the row is tagged "
-                                   "reference_locked=False."),
-                    )
-                    yield card(
-                        "Static field (Kepco magnet)",
-                        field("magnet_current_A", "Assist current(s) (A)",
-                              DEFAULTS["magnet_current_A"], kind="text",
-                              hint="One value, or comma-separated for several — each gets its "
-                                   "own complete sweep and file. Add the opposite sign for ±H_z."),
-                        field("field_theta_deg", "θ — mount tilt from OOP (°)",
-                              DEFAULTS["field_theta_deg"],
-                              validators=[Number(0, 180, failure_description="0-180°")],
-                              hint="0° = out-of-plane, 90° = in-plane. Recorded, not set."),
-                        field("field_phi_deg", "φ — azimuth from current axis (°)",
-                              DEFAULTS["field_phi_deg"], kind="number", valid_empty=True,
-                              validators=[Number(0, 360, failure_description="0-360°")],
-                              hint="Optional. Meaningless when θ=0°."),
-                        Horizontal(
-                            Button("xy", id="plane_xy", classes="plane-btn"),
-                            Button("zx", id="plane_zx", classes="plane-btn"),
-                            Button("zy", id="plane_zy", classes="plane-btn"),
-                            classes="plane-btn-row",
-                        ),
-                        Static(render_ascii_field_diagram(
-                                   float(DEFAULTS["field_theta_deg"]) if DEFAULTS["field_theta_deg"] else None,
-                                   None),
-                               id="field_diagram", classes="field-diagram"),
-                        field("field_settle_tolerance_mT", "Field settle tolerance (mT)",
-                              DEFAULTS["field_settle_tolerance_mT"]),
-                    )
-                    yield card(
-                        "Temperature logging",
-                        switch_field("enable_temperature", "Log temperature (MercuryiTC)",
-                                     DEFAULTS["enable_temperature"]),
-                    )
-
-                with Collapsible(title="Instrument configuration & addresses", collapsed=True):
-                    with Vertical(classes="stable-grid"):
-                        yield card(
-                            "Keithley 6221",
-                            field("source_visa_resource", "6221 VISA resource",
-                                  DEFAULTS["source_visa_resource"], kind="text"),
-                            muted=True,
-                        )
-                        yield card(
-                            "Zurich Instruments MFLI",
-                            field("mfli_host", "LabOne data server host",
-                                  DEFAULTS["mfli_host"], kind="text"),
-                            field("mfli_port", "LabOne data server port",
-                                  DEFAULTS["mfli_port"], kind="integer"),
-                            field("mfli_device", "MFLI device ID", DEFAULTS["mfli_device"],
-                                  kind="text", hint="e.g. dev1234."),
-                            field("aux_input_ch", "Aux Input carrying the marker (0-based)",
-                                  DEFAULTS["aux_input_ch"], kind="integer",
-                                  hint="0 = Aux In 1."),
-                            field("osc_index", "Oscillator locked by the PLL", DEFAULTS["osc_index"],
-                                  kind="integer"),
-                            field("extref_index", "ExtRef/PLL module index", DEFAULTS["extref_index"],
-                                  kind="integer"),
-                            field("pll_demod_index", "PLL phase-detector demod index (≠ demod below)",
-                                  DEFAULTS["pll_demod_index"], kind="integer",
-                                  hint="extrefs/N/adcselect is read-only on real firmware — the PLL "
-                                       "is steered via THIS dedicated demod's own adcselect/oscselect "
-                                       "instead. Must differ from the demod index below."),
-                            select_field("automode", "PLL bandwidth adaptation",
-                                         AUTOMODE_OPTIONS, int(DEFAULTS["automode"]),
-                                         hint=AUTOMODE_HINT),
-                            field("demod_index", "Demodulator index", DEFAULTS["demod_index"],
-                                  kind="integer",
-                                  hint="Default skips index 0 — that's the PLL phase-detector demod "
-                                       "above. See the module docstring's 'Bench-verify' section."),
-                            field("input_ch", "Signal Input channel (0-based)",
-                                  DEFAULTS["input_ch"], kind="integer"),
-                            switch_field("differential", "Differential input (IN+ / IN−)",
-                                        DEFAULTS["differential"]),
-                            switch_field("ac_coupling", "AC-couple the input", DEFAULTS["ac_coupling"]),
-                            field("input_range_V", "Signal Input range (V)",
-                                  DEFAULTS["input_range_V"]),
-                            field("sample_rate_Hz", "Demodulator output rate (Sa/s)",
-                                  DEFAULTS["sample_rate_Hz"]),
-                            field("filter_time_constant_s", "Filter time constant (s)",
-                                  DEFAULTS["filter_time_constant_s"]),
-                            field("filter_order", "Filter order (1-8)", DEFAULTS["filter_order"],
-                                  kind="integer"),
-                            switch_field("filter_sinc", "Sinc filter (extra harmonic rejection)",
-                                        DEFAULTS["filter_sinc"]),
-                            muted=True,
-                        )
-                        yield card(
-                            "Kepco magnet + Lake Shore 475",
-                            field("magnet_visa_resource", "Kepco VISA resource",
-                                  DEFAULTS["magnet_visa_resource"], kind="text"),
-                            field("current_limit_A", "Magnet current limit (A)",
-                                  DEFAULTS["current_limit_A"]),
-                            field("magnet_voltage_compliance_V", "Magnet voltage compliance (V)",
-                                  DEFAULTS["magnet_voltage_compliance_V"]),
-                            field("ramp_step_A", "Magnet ramp step (A)", DEFAULTS["ramp_step_A"]),
-                            field("ramp_delay_s", "Magnet ramp delay (s)", DEFAULTS["ramp_delay_s"]),
-                            field("gaussmeter_visa_resource", "Lake Shore 475 VISA resource",
-                                  DEFAULTS["gaussmeter_visa_resource"], kind="text"),
-                            field("gaussmeter_n_averages", "475 readings averaged",
-                                  DEFAULTS["gaussmeter_n_averages"], kind="integer"),
-                            field("gaussmeter_read_delay_s", "475 read delay (s)",
-                                  DEFAULTS["gaussmeter_read_delay_s"]),
-                            muted=True,
-                        )
-                        yield card(
-                            "Temperature (MercuryiTC)",
-                            field("temperature_visa_resource", "MercuryiTC VISA resource",
-                                  DEFAULTS["temperature_visa_resource"], kind="text"),
-                            field("temperature_sensor_uids", "Sensor board UID(s)",
-                                  DEFAULTS["temperature_sensor_uids"], kind="text",
-                                  hint="1-2 UIDs, comma-separated."),
-                            muted=True,
-                        )
-
-            with Vertical(id="sidebar"):
-                yield Static("Description", classes="sidebar-title")
-                yield Static(SOT_PULSED_6221_DESCRIPTION, classes="card-desc")
-                yield Static("Summary", classes="sidebar-title")
-                yield Static(id="summary")
-
-        with Horizontal(id="actionbar"):
-            yield Button("▶  Start measurement  (F5)", id="start", variant="success")
-        yield Footer()
-
-    # form I/O
-
-    def update_summary(self) -> None:
-        state, parse_errors = self.parse_state()
-        if parse_errors:
-            info, warnings, errors, preview = [], [], parse_errors, None
-        else:
-            info, warnings, errors = build_summary(state)
-            preview = compute_filename_preview(state)
-
-        self.query_one("#filename_preview", Static).update(
-            f"File:  [bold]{preview}[/bold]" if preview
-            else "[dim]File:  (choose a sample and device to preview)[/dim]")
-
-        lines: list[str] = []
-        if errors:
-            lines.append("[bold red]Blocking issues[/bold red]")
-            lines += [f"  [red]✗ {e}[/red]" for e in errors]
-        if warnings:
-            lines.append("[bold yellow]Warnings[/bold yellow]")
-            lines += [f"  [yellow]⚠ {w}[/yellow]" for w in warnings]
-        lines.append("[bold]Derived values[/bold]")
-        lines += [f"  [dim]•[/dim] {i}" for i in info if i]
-        self.query_one("#summary", Static).update("\n".join(lines))
-        self.query_one("#start", Button).disabled = bool(errors)
-
-        theta = None if parse_errors else state.get("field_theta_deg")
-        phi = None if parse_errors else state.get("field_phi_deg")
-        self.query_one("#field_diagram", Static).update(render_ascii_field_diagram(theta, phi))
-
-    def _build_plan(self, state: dict) -> MeasurementPlan:
-        return build_plan(state, self.data_root)
-
-
 def main() -> None:
-    SOTPulsedSwitching6221App().run()
+    """This program is a mode of the SOT pulsed-switching form now — open that
+    form on 6221 pulse + lock-in read (SOT1I)."""
+    from sot.sot_pulsed_switching_tui import SOTPulsedSwitchingApp
+    SOTPulsedSwitchingApp(pulse_source="6221", read_mode="harmonic").run()
 
 
 if __name__ == "__main__":

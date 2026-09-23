@@ -303,9 +303,7 @@ def test_allocate_run_is_unique_and_gap_free_under_concurrency(tmp_path: Path) -
 
 import threading  # noqa: E402
 
-import pytest  # noqa: E402
-
-from instruments.data_naming import finish_last_run, read_raw, record_run  # noqa: E402
+from instruments.data_naming import finish_last_run, record_run  # noqa: E402
 
 
 def _header(ctx):

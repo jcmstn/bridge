@@ -37,15 +37,11 @@ _NULL_WRITER = lambda recs: None
 
 def _plans(tmp_path: Path) -> dict:
     """One multi-file plan per program (4 files each, 2 for NLSW)."""
-    def app(cls):
-        a = cls()
-        a.data_root = tmp_path
-        return a
     kw = dict(magnet_current_A="1.5, -1.5", sense_current_values="1e-4, 2e-4")
     return {
-        "pulsed": app(pulsed.SOTPulsedSwitchingApp)._build_plan(pulsed_state(**kw)),
-        "2h": app(h2.SOTPulsedSwitching2HApp)._build_plan(h2_state(**kw)),
-        "6221": app(p6221.SOTPulsedSwitching6221App)._build_plan(p6221_state(**kw)),
+        "pulsed": pulsed.build_plan(pulsed_state(**kw), tmp_path),
+        "2h": h2.build_plan(h2_state(**kw), tmp_path),
+        "6221": p6221.build_plan(p6221_state(**kw), tmp_path),
         "nlsw": nlsw.build_plan(nlsw_state(tmp_path, init_magnet_currents="5, -5"), tmp_path),
     }
 

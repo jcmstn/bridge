@@ -1,5 +1,5 @@
 """
-sot/sot_pulsed_switching_6221_tui.py — build_summary validation + _build_plan
+sot/sot_pulsed_switching_6221_tui.py — build_summary validation + build_plan
 purity. Pure logic only, no Textual mount, no hardware.
 
 Mirrors tests/test_sot_pulsed_switching_2h_tui.py; no 4200A/PMU fields, the
@@ -158,10 +158,8 @@ def test_summary_warns_high_harmonic():
 
 
 def test_build_plan_shapes(tmp_path: Path):
-    app = tui.SOTPulsedSwitching6221App()
-    app.data_root = tmp_path
-    plan = app._build_plan(_state(pulse_current_start_A=1e-3, pulse_current_stop_A=5e-3,
-                                  pulse_current_step_A=2e-3, amplitude_bidirectional=False))
+    plan = tui.build_plan(_state(pulse_current_start_A=1e-3, pulse_current_stop_A=5e-3,
+                                  pulse_current_step_A=2e-3, amplitude_bidirectional=False), tmp_path)
 
     assert plan.pulse_currents_A == pytest.approx([1e-3, 3e-3, 5e-3])
     assert plan.total_points == 3
@@ -182,20 +180,16 @@ def test_build_plan_shapes(tmp_path: Path):
 
 
 def test_build_plan_respects_chosen_harmonic(tmp_path: Path):
-    app = tui.SOTPulsedSwitching6221App()
-    app.data_root = tmp_path
-    plan = app._build_plan(_state(harmonic=1))
+    plan = tui.build_plan(_state(harmonic=1), tmp_path)
     assert plan.read_cfg.harmonic == 1
     assert plan.demod_cfg.harmonic == 1
     assert plan.header_extra["harmonic"] == 1
 
 
 def test_build_plan_multiple_magnet_currents(tmp_path: Path):
-    app = tui.SOTPulsedSwitching6221App()
-    app.data_root = tmp_path
-    plan = app._build_plan(_state(pulse_current_start_A=1e-3, pulse_current_stop_A=5e-3,
+    plan = tui.build_plan(_state(pulse_current_start_A=1e-3, pulse_current_stop_A=5e-3,
                                   pulse_current_step_A=2e-3, amplitude_bidirectional=False,
-                                  magnet_current_A="1.5, -1.5, 3"))
+                                  magnet_current_A="1.5, -1.5, 3"), tmp_path)
 
     assert plan.magnet_currents_A == [1.5, -1.5, 3.0]
     assert plan.series_values == [(1e-4, 1.5), (1e-4, -1.5), (1e-4, 3.0)]
@@ -203,12 +197,10 @@ def test_build_plan_multiple_magnet_currents(tmp_path: Path):
 
 
 def test_build_plan_multiple_sense_currents(tmp_path: Path):
-    app = tui.SOTPulsedSwitching6221App()
-    app.data_root = tmp_path
-    plan = app._build_plan(_state(pulse_current_start_A=1e-3, pulse_current_stop_A=5e-3,
+    plan = tui.build_plan(_state(pulse_current_start_A=1e-3, pulse_current_stop_A=5e-3,
                                   pulse_current_step_A=2e-3, amplitude_bidirectional=False,
                                   magnet_current_A="1.5, -1.5",
-                                  sense_current_values="1e-4, 2e-4"))
+                                  sense_current_values="1e-4, 2e-4"), tmp_path)
 
     assert plan.sense_currents_A == [1e-4, 2e-4]
     # sense current outer (needs a 6221 AC re-arm), magnet inner
@@ -217,18 +209,14 @@ def test_build_plan_multiple_sense_currents(tmp_path: Path):
 
 
 def test_build_plan_temperature_cfg_gating(tmp_path: Path):
-    app = tui.SOTPulsedSwitching6221App()
-    app.data_root = tmp_path
-    assert app._build_plan(_state(enable_temperature=False)).temp_cfg is None
-    p = app._build_plan(_state(enable_temperature=True,
+    assert tui.build_plan(_state(enable_temperature=False), tmp_path).temp_cfg is None
+    p = tui.build_plan(_state(enable_temperature=True,
                                temperature_visa_resource="TCPIP0::x::7020::SOCKET",
-                               temperature_sensor_uids="MB1.T1"))
+                               temperature_sensor_uids="MB1.T1"), tmp_path)
     assert p.temp_cfg is not None and p.temp_cfg.sensor_uids == ("MB1.T1",)
 
 
 def test_build_plan_no_pmu_fields_leak_into_header(tmp_path: Path):
     """The 4200A is gone — nothing PMU-shaped should show up in header_extra."""
-    app = tui.SOTPulsedSwitching6221App()
-    app.data_root = tmp_path
-    plan = app._build_plan(_state())
+    plan = tui.build_plan(_state(), tmp_path)
     assert not any(k.startswith("pmu_") for k in plan.header_extra)

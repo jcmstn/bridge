@@ -23,8 +23,6 @@ _ALL_APPS = {
     ("mfli.mfli_phase_calibration_tui", "MFLIPhaseCalibrationApp"),
     ("mfli.mfli_noise_spectrum_tui", "MFLINoiseSpectrumApp"),
     ("sot.sot_pulsed_switching_tui", "SOTPulsedSwitchingApp"),
-    ("sot.sot_pulsed_switching_2h_tui", "SOTPulsedSwitching2HApp"),
-    ("sot.sot_pulsed_switching_6221_tui", "SOTPulsedSwitching6221App"),
     ("sot.sot_nonlocal_switching_tui", "NonlocalSwitchingApp"),
 }
 

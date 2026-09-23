@@ -46,10 +46,6 @@ from mfli.mfli_noise_spectrum_tui import (
 from mfli.mfli_phase_calibration_tui import (
     MFLI_PHASE_CALIBRATION_DESCRIPTION, MFLI_PHASE_CALIBRATION_SCHEMATIC, MFLIPhaseCalibrationApp)
 from sot.sot_nonlocal_switching_tui import NLSW_DESCRIPTION, NLSW_SCHEMATIC, NonlocalSwitchingApp
-from sot.sot_pulsed_switching_2h_tui import (
-    SOT_PULSED_2H_DESCRIPTION, SOT_PULSED_2H_SCHEMATIC, SOTPulsedSwitching2HApp)
-from sot.sot_pulsed_switching_6221_tui import (
-    SOT_PULSED_6221_DESCRIPTION, SOT_PULSED_6221_SCHEMATIC, SOTPulsedSwitching6221App)
 from sot.sot_pulsed_switching_tui import SOT_PULSED_DESCRIPTION, SOT_PULSED_SCHEMATIC, SOTPulsedSwitchingApp
 
 log = logging.getLogger("bridge_tui")
@@ -87,12 +83,8 @@ PROGRAMS: dict[str, list[Program]] = {
                 MFLI_NOISE_SPECTRUM_DESCRIPTION, MFLI_NOISE_SPECTRUM_SCHEMATIC, MFLINoiseSpectrumApp),
     ],
     "SOT Suite": [
-        Program("pulsed", "SOT pulsed switching (4200A PMU pulse + 6221/2182 R_xy)",
+        Program("pulsed", "SOT pulsed switching (4200A or 6221 pulse · DC or lock-in read)",
                 SOT_PULSED_DESCRIPTION, SOT_PULSED_SCHEMATIC, SOTPulsedSwitchingApp),
-        Program("pulsed_2h", "SOT pulsed switching, 2nd-harmonic read (4200A PMU + 6221 AC / MFLI)",
-                SOT_PULSED_2H_DESCRIPTION, SOT_PULSED_2H_SCHEMATIC, SOTPulsedSwitching2HApp),
-        Program("pulsed_6221", "SOT pulsed switching, 6221-only (6221 pulse + 6221 AC / MFLI)",
-                SOT_PULSED_6221_DESCRIPTION, SOT_PULSED_6221_SCHEMATIC, SOTPulsedSwitching6221App),
         Program("nonlocal", "Nonlocal spin-current switching (6221 pulse + 2182A nonlocal read)",
                 NLSW_DESCRIPTION, NLSW_SCHEMATIC, NonlocalSwitchingApp),
     ],

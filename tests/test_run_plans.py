@@ -13,7 +13,6 @@ from __future__ import annotations
 import asyncio
 import importlib
 import threading
-from pathlib import Path
 
 from unittest.mock import MagicMock
 
@@ -30,8 +29,10 @@ MULTI_RUN = [
     ("dc.dc_spin_valve_tui", "DCSpinValveApp", {"sense_current_values": "0.001, 0.002"}),
     ("mfli.mfli_dual_harmonic_tui", "MFLIDualHarmonicApp", {"ac_source": "6221", "amplitude_values": "1e-6, 2e-6"}),
     ("sot.sot_pulsed_switching_tui", "SOTPulsedSwitchingApp", {"sense_current_values": "1e-4, 2e-4"}),
-    ("sot.sot_pulsed_switching_2h_tui", "SOTPulsedSwitching2HApp", {"sense_current_values": "1e-4, 2e-4"}),
-    ("sot.sot_pulsed_switching_6221_tui", "SOTPulsedSwitching6221App", {"sense_current_values": "1e-4, 2e-4"}),
+    ("sot.sot_pulsed_switching_tui", "SOTPulsedSwitchingApp",
+     {"read_mode": "harmonic", "sense_current_values": "1e-4, 2e-4"}),
+    ("sot.sot_pulsed_switching_tui", "SOTPulsedSwitchingApp",
+     {"pulse_source": "6221", "read_mode": "harmonic", "sense_current_values": "1e-4, 2e-4"}),
 ]
 # single-run programs: the run is allocated at Start (build_plan) as plan.run_ctx
 SINGLE_RUN = [
@@ -40,6 +41,8 @@ SINGLE_RUN = [
     ("mfli.mfli_phase_calibration_tui", "MFLIPhaseCalibrationApp", {}),
 ]
 PROGRAMS = [(m, a, o, 2) for m, a, o in MULTI_RUN] + [(m, a, o, 1) for m, a, o in SINGLE_RUN]
+_TOGGLES = ("ac_source", "pulse_source", "read_mode")        # a merged program's mode
+_IDS = ["-".join([a, *(o[t] for t in _TOGGLES if t in o)]) for _, a, o, _ in PROGRAMS]
 
 _STUB_PREFIXES = ("connect", "shutdown", "setup_", "configure_", "sync_", "ramp_", "set_",
                   "wait_", "null_", "auto_null", "acquire", "initialize_", "check_mds", "disable_")
@@ -109,7 +112,7 @@ def _default_state(mod, app_name, overrides, tmp_path, monkeypatch) -> dict:
     return asyncio.run(go())
 
 
-@pytest.mark.parametrize("module,app_name,overrides,n", PROGRAMS, ids=[f"{p[1]}-{p[2].get('ac_source', '')}".rstrip('-') for p in PROGRAMS])
+@pytest.mark.parametrize("module,app_name,overrides,n", PROGRAMS, ids=_IDS)
 def test_run_plan_records_one_finalized_run_per_series_value(module, app_name, overrides, n,
                                                               tmp_path, monkeypatch):
     mod = importlib.import_module(module)
@@ -136,7 +139,7 @@ def test_run_plan_records_one_finalized_run_per_series_value(module, app_name, o
     assert shut, "instruments were not shut down"
 
 
-@pytest.mark.parametrize("module,app_name,overrides,n", PROGRAMS, ids=[f"{p[1]}-{p[2].get('ac_source', '')}".rstrip('-') for p in PROGRAMS])
+@pytest.mark.parametrize("module,app_name,overrides,n", PROGRAMS, ids=_IDS)
 def test_run_plan_finalizes_a_failed_run_as_error_and_still_shuts_down(module, app_name, overrides, n,
                                                                        tmp_path, monkeypatch):
     mod = importlib.import_module(module)
