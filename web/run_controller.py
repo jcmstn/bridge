@@ -22,6 +22,7 @@ per ui.timer tick.
 
 from __future__ import annotations
 
+import json
 import logging
 import queue
 import threading
@@ -32,7 +33,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable, Iterator, Optional
 
-from nicegui import ui
+from nicegui import background_tasks, ui
 
 from instruments.run_time import RunCost, eta_s, format_duration
 from instruments import run_index
@@ -539,3 +540,44 @@ async def prompt_last_run(client, program: ModuleType, plan, run_contexts: list,
             program.save_run_png(plan, done[1], run_png_path(program, plan, done[0]), comment=comment)
         except Exception:
             log.exception("Could not re-save the run's PNG with the comment")
+
+
+def load_settings(path: Path) -> dict:
+    """A page's saved form values ({} if none / unreadable)."""
+    try:
+        return json.loads(path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_settings(path: Path, raw: dict) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(raw, indent=2))
+    except OSError:
+        pass
+
+
+def finished_handler(client, controller: dict, status_label, abort_btn, start_btn,
+                     refresh_summary: Callable[[], None], program: ModuleType, plan,
+                     run_contexts: list, run_extras: list, *,
+                     done_text: str = "Measurement complete.",
+                     aborted_text: str = "Measurement aborted.",
+                     on_result: Optional[Callable[[Any], None]] = None):
+    """RunController.on_finished for a page: final status text, Abort hidden,
+    Start re-enabled, summary refreshed, `on_result(result)` if given, then the
+    post-run status/comment dialog for the last run (prompt_last_run)."""
+    def on_finished(final: "FinalStatus", result) -> None:
+        status_label.set_text({"completed": done_text, "aborted": aborted_text,
+                               "error": f"ERROR: {final.error}"}[final.status])
+        abort_btn.set_visibility(False)
+        start_btn.set_enabled(not is_busy())
+        if on_result is not None and result is not None:
+            on_result(result)
+        refresh_summary()
+        handle = controller["c"].handle if controller["c"] is not None else None
+        records = list(handle.records) if handle is not None else []
+        background_tasks.create(
+            prompt_last_run(client, program, plan, run_contexts, run_extras, records),
+            name="status_comment_prompt")
+    return on_finished

@@ -15,33 +15,33 @@ one trace pair per initial state) and the RunController callbacks.
 
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 from typing import Optional
 
 import plotly.graph_objects as go
-from nicegui import background_tasks, ui
+from nicegui import ui
 from plotly.subplots import make_subplots
 
 from instruments.data_naming import (
-    TEST_SAMPLE, RunContext, finalize_index_row, proc_path, write_record,
+    TEST_SAMPLE, RunContext,
 )
+import sot.sot_nonlocal_switching_tui as program
 from sot.sot_nonlocal_switching_tui import (
-    DEFAULTS, MEASUREMENT_TYPE, NLSW_DESCRIPTION, NUMERIC_FIELDS, TEXT_FIELDS,
-    MeasurementPlan, build_header_fields, build_plan, build_summary,
-    compute_filename_preview, resolve_state, run_plan,
-    _save_measurement_png,
+    DEFAULTS, NLSW_DESCRIPTION, NUMERIC_FIELDS, TEXT_FIELDS,
+    build_plan, build_summary,
+    compute_filename_preview, resolve_state,
 )
 from web.directory_picker import validate_directory
 from web.identity_bar import identity_bar
 from web.run_controller import (
-    FinalStatus, RunCallbacks, RunController, advanced_section, bool_switch, busy_banner,
+    RunController, advanced_section, bool_switch, busy_banner,
     is_busy, measurement_layout, num_field, optional_num_field, param_card, param_grid,
     render_summary, stable_card, stable_grid, text_field,
     refresh_on_busy_change,
+    finished_handler, load_settings, program_artifacts, program_run_fn, save_settings,
 )
-from web.sample_picker import NEW_SAMPLE_SENTINEL, prepare_data_root, status_comment_dialog
+from web.sample_picker import NEW_SAMPLE_SENTINEL, prepare_data_root
 
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data"
 _SETTINGS_PATH = _DATA_DIR / "web_settings" / "sot_nonlocal_switching_web_settings.json"
@@ -54,28 +54,8 @@ log = logging.getLogger("web.sot.nonlocal_switching")
 _COLORS = ["#2E3192", "#e34948", "#2E7D32", "#B26A00", "#7E57C2", "#0277BD"]
 
 
-def _load_settings() -> dict:
-    try:
-        return json.loads(_SETTINGS_PATH.read_text())
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return {}
-
-
-def _save_settings(raw: dict) -> None:
-    try:
-        _SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _SETTINGS_PATH.write_text(json.dumps(raw, indent=2))
-    except OSError:
-        pass
-
-
 def _optional_float(value) -> Optional[float]:
     return None if value in ("", None) else float(value)
-
-
-def _run_png_path(ctx: RunContext, data_root) -> Path:
-    return proc_path(Path(data_root), ctx.sample, ctx.run_str, ctx.device,
-                     MEASUREMENT_TYPE, "NL_vs_pulse")
 
 
 def page() -> None:
@@ -86,7 +66,7 @@ def page() -> None:
     ui.label(PAGE_TITLE).classes("text-2xl font-bold mt-1")
     ui.label(NLSW_DESCRIPTION).classes("text-sm text-grey-7 mb-3")
 
-    saved = _load_settings()
+    saved = load_settings(_SETTINGS_PATH)
 
     def d(key: str):
         if key in saved:
@@ -360,68 +340,6 @@ def page() -> None:
     def on_log(text: str, level: int) -> None:
         log_area.push(text)
 
-    async def _prompt_status_comment(plan: MeasurementPlan, run_contexts: list[RunContext],
-                                     run_extras: list[dict], records: list[dict]) -> None:
-        # With several initial states the runs before the last were implicitly
-        # "skipped" -- left at the outcome status run_plan() wrote right after
-        # each one, with no comment. Only the last run, the one the operator
-        # is looking at, gets the status/comment they entered.
-        result = await status_comment_dialog(page_client)
-        if result is None or not run_contexts:
-            return
-        status, comment = result
-        series_idx = len(run_contexts) - 1
-        ctx = run_contexts[series_idx]
-        iter_records = [r for r in records if r.get("series_index", 0) == series_idx]
-        header_fields = build_header_fields(
-            plan, ctx, iter_records, status=status, comment=comment, extra=run_extras[series_idx])
-        try:
-            # Never truncate an already-written raw file to an empty stub —
-            # only a run that never wrote a point gets a header-only write.
-            if iter_records or not ctx.raw_path.exists():
-                write_record(ctx.raw_path, iter_records, header_fields)
-            finalize_index_row(plan.data_root, ctx.sample, ctx.run_number, header_fields)
-        except Exception:
-            ui.notify("Could not save final status/comment.", type="negative")
-        if comment:
-            try:
-                _save_measurement_png(iter_records, _run_png_path(ctx, plan.data_root), comment=comment)
-            except Exception:
-                pass
-
-    def make_on_finished(plan: MeasurementPlan, run_contexts: list[RunContext],
-                         run_extras: list[dict]):
-        def on_finished(final: FinalStatus, result) -> None:
-            label = {"completed": "Measurement complete.", "aborted": "Measurement aborted.",
-                     "error": f"ERROR: {final.error}"}[final.status]
-            status_label.set_text(label)
-            abort_btn.set_visibility(False)
-            start_btn.set_enabled(not is_busy())
-            refresh_summary.refresh()
-            handle = controller["c"].handle if controller["c"] is not None else None
-            records = list(handle.records) if handle is not None else []
-            background_tasks.create(
-                _prompt_status_comment(plan, run_contexts, run_extras, records),
-                name="status_comment_prompt",
-            )
-        return on_finished
-
-    def make_run_fn(plan: MeasurementPlan, run_contexts: list[RunContext], run_extras: list[dict]):
-        def run_fn(stop_event, cb: RunCallbacks):
-            run_plan(
-                plan, stop_event, on_status=cb.on_status, on_run_label=cb.on_run_label,
-                on_point=cb.on_point,
-                on_run_finished=lambda ctx, records: _save_measurement_png(
-                    records, _run_png_path(ctx, plan.data_root)),
-                run_contexts=run_contexts, run_extras=run_extras)
-        return run_fn
-
-    def _finish_artifacts(run_contexts: list[RunContext], data_root) -> list[str]:
-        """Raw files + the per-run PNGs run_plan() already saved."""
-        paths = [str(c.raw_path) for c in run_contexts]
-        paths += [str(p) for c in run_contexts if (p := _run_png_path(c, data_root)).exists()]
-        return paths
-
     def on_start() -> None:
         state, parse_errors = parse_state()
         dir_warning, dir_error = validate_directory(identity.data_dir_input.value or "")
@@ -434,7 +352,7 @@ def page() -> None:
             return
         state["data_dir"] = prepare_data_root(identity.data_dir_input.value, state["sample"])
 
-        _save_settings(collect_raw())
+        save_settings(_SETTINGS_PATH, collect_raw())
 
         data_root = Path(state["data_dir"])
         plan = build_plan(state, data_root)
@@ -445,12 +363,14 @@ def page() -> None:
 
         rc = RunController(
             suite=SUITE, measurement=PAGE_TITLE,
-            run_fn=make_run_fn(plan, run_contexts, run_extras),
-            save_artifacts=lambda records, result, status: _finish_artifacts(run_contexts, data_root),
+            run_fn=program_run_fn(program, plan, run_contexts, run_extras),
+            save_artifacts=lambda records, result, status: program_artifacts(program, plan, run_contexts),
             parameters=state, data_dir=state["data_dir"], planned_output_paths=[],
             on_tick=lambda: (plot.update(), table.update()),
             on_record=on_record, on_status=on_status, on_run_label=on_run_label, on_log=on_log,
-            on_finished=make_on_finished(plan, run_contexts, run_extras),
+            on_finished=finished_handler(
+                page_client, controller, status_label, abort_btn, start_btn, refresh_summary.refresh,
+                program, plan, run_contexts, run_extras),
             sample=plan.sample, device=plan.device, run_cost=plan.run_cost,
         )
         if not rc.try_start():

@@ -13,30 +13,29 @@ Start click (field parked once per value, not swept).
 
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 from typing import Optional
 
 import plotly.graph_objects as go
-from nicegui import background_tasks, ui
+from nicegui import ui
 
 from dc.dc_sweep_utils import parse_value_list
 import dc.dc_gate_sweep_tui as program
 from dc.dc_gate_sweep_tui import (
     build_plan,
-    DEFAULTS, NUMERIC_FIELDS, TEXT_FIELDS, DC_GATE_SWEEP_DESCRIPTION, MeasurementPlan, build_summary,
+    DEFAULTS, NUMERIC_FIELDS, TEXT_FIELDS, DC_GATE_SWEEP_DESCRIPTION, build_summary,
     compute_filename_preview,
 )
 from instruments.data_naming import (
     TEST_SAMPLE, RunContext,
 )
 from web.run_controller import (
-    RunController, FinalStatus, num_field, text_field,
+    RunController, num_field, text_field,
     bool_switch, render_summary, busy_banner, is_busy,
     param_card, stable_card, param_grid, stable_grid, advanced_section, measurement_layout,
-    program_artifacts, program_run_fn, prompt_last_run,
-    refresh_on_busy_change,
+    program_artifacts, program_run_fn, refresh_on_busy_change,
+    finished_handler, load_settings, save_settings,
 )
 from web.directory_picker import validate_directory
 from web.identity_bar import identity_bar
@@ -49,21 +48,6 @@ PAGE_TITLE = "DC Gate Sweep"
 SUITE = "DC"
 
 log = logging.getLogger("web.dc.gate_sweep")
-
-
-def _load_settings() -> dict:
-    try:
-        return json.loads(_SETTINGS_PATH.read_text())
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return {}
-
-
-def _save_settings(raw: dict) -> None:
-    try:
-        _SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _SETTINGS_PATH.write_text(json.dumps(raw, indent=2))
-    except OSError:
-        pass
 
 
 def series_label(field_current_A: Optional[float], sense_current_A: float, n_sense: int) -> Optional[str]:
@@ -83,7 +67,7 @@ def page() -> None:
     ui.label(PAGE_TITLE).classes("text-2xl font-bold mt-1")
     ui.label(DC_GATE_SWEEP_DESCRIPTION).classes("text-sm text-grey-7 mb-3")
 
-    saved = _load_settings()
+    saved = load_settings(_SETTINGS_PATH)
 
     def d(key: str):
         if key in saved:
@@ -328,21 +312,10 @@ def page() -> None:
     def on_log(text: str, level: int) -> None:
         log_area.push(text)
 
-    def make_on_finished(plan: MeasurementPlan, run_contexts: list[RunContext], run_extras: list):
-        def on_finished(final: FinalStatus, result) -> None:
-            label = {"completed": "Measurement complete.", "aborted": "Measurement aborted.",
-                      "error": f"ERROR: {final.error}"}[final.status]
-            status_label.set_text(label)
-            abort_btn.set_visibility(False)
-            start_btn.set_enabled(not is_busy())
-            refresh_summary.refresh()
-            handle = controller["c"].handle if controller["c"] is not None else None
-            records = list(handle.records) if handle is not None else []
-            background_tasks.create(
-                prompt_last_run(page_client, program, plan, run_contexts, run_extras, records),
-                name="status_comment_prompt",
-            )
-        return on_finished
+    def make_on_finished(plan, run_contexts: list, run_extras: list):
+        return finished_handler(
+            page_client, controller, status_label, abort_btn, start_btn, refresh_summary.refresh,
+            program, plan, run_contexts, run_extras,)
 
     def on_start() -> None:
         state, parse_errors = parse_state()
@@ -356,7 +329,7 @@ def page() -> None:
             return
         state["data_dir"] = prepare_data_root(identity.data_dir_input.value, state["sample"])
 
-        _save_settings(collect_raw())
+        save_settings(_SETTINGS_PATH, collect_raw())
 
         plan = build_plan(state, Path(state["data_dir"]))
         n_sense = len(plan.sense_currents_A)

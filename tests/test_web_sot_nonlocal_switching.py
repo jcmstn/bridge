@@ -6,6 +6,8 @@ may share a basename with a module of the same-named top-level suite package.
 
 from __future__ import annotations
 
+import importlib
+
 from pathlib import Path
 
 import pytest
@@ -18,12 +20,30 @@ REPO = Path(__file__).resolve().parent.parent
 
 def test_page_reuses_the_tui_modules_pure_helpers():
     assert callable(page_mod.page)
+    assert page_mod.program is tui          # run_plan / headers / PNG come from the TUI module
     assert page_mod.build_plan is tui.build_plan
-    assert page_mod.run_plan is tui.run_plan
     assert page_mod.resolve_state is tui.resolve_state
     assert page_mod.build_summary is tui.build_summary
-    assert page_mod._save_measurement_png is tui._save_measurement_png
-    assert page_mod.MEASUREMENT_TYPE == "NLSW" and page_mod.SUITE == "SOT"
+    assert tui.MEASUREMENT_TYPE == "NLSW" and page_mod.SUITE == "SOT"
+
+
+@pytest.mark.parametrize("page,program", [
+    ("web.dc.hall", "dc.dc_hall_measurement_tui"),
+    ("web.dc.iv_curve", "dc.dc_iv_curve_tui"),
+    ("web.dc.gate_sweep", "dc.dc_gate_sweep_tui"),
+    ("web.dc.spin_valve", "dc.dc_spin_valve_tui"),
+    ("web.mfli.dual_harmonic", "mfli.mfli_dual_harmonic_tui"),
+    ("web.mfli.dual_harmonic_6221", "mfli.mfli_dual_harmonic_6221_tui"),
+    ("web.mfli.diff_resistance", "mfli.mfli_diff_resistance_tui"),
+    ("web.mfli.phase_calibration", "mfli.mfli_phase_calibration_tui"),
+    ("web.sot.nonlocal_switching", "sot.sot_nonlocal_switching_tui"),
+])
+def test_every_page_runs_its_tui_modules_plan_and_run(page, program):
+    """One plan builder + one run loop per program, shared by both front ends."""
+    page_mod, prog = importlib.import_module(page), importlib.import_module(program)
+    assert page_mod.program is prog and page_mod.build_plan is prog.build_plan
+    for name in ("run_plan", "build_header_fields", "save_run_png", "MEASUREMENT_TYPE"):
+        assert hasattr(prog, name), name
 
 
 @pytest.mark.parametrize("suite", ["dc", "mfli", "sot"])

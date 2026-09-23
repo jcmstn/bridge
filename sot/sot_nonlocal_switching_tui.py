@@ -29,7 +29,6 @@ from pathlib import Path
 from typing import Callable, List, Optional
 
 
-from textual import work
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.validation import Number
@@ -72,10 +71,8 @@ from instruments.data_dir import validate_directory
 from instruments.data_naming import (
     RunContext,
     allocate_run,
-    finalize_index_row,
-    make_incremental_writer,
+    record_run,
     preview_raw_filename,
-    write_record,
 )
 from instruments.keithley2182 import read_time_s
 from instruments.keithley6221 import reversal_avg_s, wave_pulse_s
@@ -712,6 +709,14 @@ def build_plan(state: dict, data_root: Path) -> MeasurementPlan:
     )
 
 
+PNG_SUFFIX = "NL_vs_pulse"
+
+
+def save_run_png(plan: MeasurementPlan, records: list[dict], png_path: Path, comment: str = "") -> None:
+    """One run's PNG (RunScreen and the web page both call this)."""
+    _save_measurement_png(records, png_path, comment=comment)
+
+
 def _ignore(*_args) -> None:
     pass
 
@@ -784,50 +789,23 @@ def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
             run_contexts.append(ctx)
             run_extras.append(extra)
             on_run_label(f"Run #{ctx.run_str}")
-            write_csv = make_incremental_writer(
-                ctx.raw_path,
-                lambda records, _ctx=ctx, _x=extra: build_header_fields(
-                    plan, _ctx, records, status="in_progress", comment="", extra=_x))
-
-            iter_records: list[dict] = []
-
-            def tagged_on_point(record: dict, _idx=series_idx, _label=label, _init=init_A,
-                                _iter=iter_records) -> None:
-                record["series_index"] = _idx
-                record["series_label"] = _label
-                record["init_magnet_current_A"] = _init
-                _iter.append(record)
-                on_point(record)
-
             on_status("Running the switching sweep …" if label is None
                       else f"Running the switching sweep ({label}) …")
-            iter_error: Optional[BaseException] = None
-            try:
-                run_measurement(
+            record_run(
+                plan.data_root, ctx,
+                lambda records, status, _ctx=ctx, _x=extra: build_header_fields(
+                    plan, _ctx, records, status=status, comment="", extra=_x),
+                lambda point_cb, write_csv, _init=init_A: run_measurement(
                     source, voltmeter, plan.pulse_cfg, plan.read_cfg, points,
-                    stop_event=stop_event, on_point=tagged_on_point,
+                    stop_event=stop_event, on_point=point_cb,
                     gaussmeter=gaussmeter, gauss_cfg=plan.gauss_cfg,
                     temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg,
-                    magnet_current_A=plan.sweep_magnet_current_A if init_A is not None else None,
-                    write_csv=write_csv, output_file=str(ctx.raw_path))
-            except Exception as exc:
-                iter_error = exc
-
-            # Finalize THIS run's header/index row right now — never gated on
-            # the end-of-session status/comment prompt.
-            iter_status = "error" if iter_error is not None \
-                else ("aborted" if stop_event.is_set() else "completed")
-            header_fields = build_header_fields(
-                plan, ctx, iter_records, status=iter_status, comment="", extra=extra)
-            write_record(ctx.raw_path, iter_records, header_fields)
-            finalize_index_row(plan.data_root, ctx.sample, ctx.run_number, header_fields)
-            if on_run_finished is not None:
-                try:
-                    on_run_finished(ctx, iter_records)
-                except Exception:
-                    log.exception("Could not save the per-run plot for run %s", ctx.run_str)
-            if iter_error is not None:
-                raise iter_error
+                    magnet_current_A=plan.sweep_magnet_current_A if _init is not None else None,
+                    write_csv=write_csv, output_file=str(ctx.raw_path)),
+                stop_event, on_point=on_point,
+                tags={"series_index": series_idx, "series_label": label,
+                      "init_magnet_current_A": init_A},
+                on_finished=on_run_finished)
     finally:
         if source is not None:
             safe_shutdown("6221", lambda: shutdown_source(source))
@@ -849,7 +827,7 @@ class RunScreen(MeasurementRunScreen):
     TABLE_COLUMNS = ("pt #", "I_init (A)", "I_pulse (A)", "R_NL (mΩ)", "ΔR (mΩ)", "switched",
                      "V_even (µV)", "T1 (K)")
     MEASUREMENT_TYPE = MEASUREMENT_TYPE
-    PNG_SUFFIX = "NL_vs_pulse"
+    PNG_SUFFIX = PNG_SUFFIX
 
     def live_plot_args(self):
         return (_live_plot_worker, self.plan.read_cfg.reversal_enabled)
@@ -869,29 +847,6 @@ class RunScreen(MeasurementRunScreen):
             f"{record['voltage_even_V'] * 1e6:.3f}" if record.get("voltage_even_V") is not None else "—",
             f"{t1:.3f}" if t1 is not None else "—",
         )
-
-    def save_png(self, records: list[dict], png_path: Path, comment: str = "") -> None:
-        _save_measurement_png(records, png_path, comment=comment)
-
-    def build_header(self, ctx: RunContext, records: list[dict], *, status: str, comment: str,
-                     extra: Optional[dict]) -> dict:
-        return build_header_fields(self.plan, ctx, records, status=status, comment=comment, extra=extra)
-
-    @work(thread=True, exclusive=True)
-    def do_run(self) -> None:
-        try:
-            run_plan(self.plan, self._stop_event,
-                     on_status=self._set_status_threadsafe,
-                     on_run_label=self._set_run_label_threadsafe,
-                     on_point=lambda record: self.app.call_from_thread(self._on_point, record),
-                     on_run_finished=self._save_run_png,
-                     run_contexts=self._run_contexts, run_extras=self._run_extras)
-            final = "Measurement aborted." if self._stop_event.is_set() else "Measurement complete."
-        except Exception as exc:
-            log.exception("Measurement failed")
-            final = f"ERROR: {exc}"
-        finally:
-            self.app.call_from_thread(self._on_finished, final)
 
 
 # ── app / form ─────────────────────────────────────────────────────────────
