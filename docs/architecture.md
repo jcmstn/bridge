@@ -79,6 +79,35 @@ If you add a form field, it goes in `DEFAULTS` + the right `*_FIELDS`
 group + `MeasurementPlan` **once**, in the TUI module, and both front ends
 pick it up.
 
+### Shared TUI scaffolding (`instruments/tui_common.py`)
+
+Every TUI's `App` subclasses `MeasurementApp` and its `RunScreen`
+subclasses `MeasurementRunScreen`; the form widgets (`field`,
+`switch_field`, `select_field`, `sweep_rows_field`, `card`,
+`identity_bar`), `format_si`, `parse_sensor_uids` and `LogRelay` live
+there too. A program keeps only what is its own:
+
+- **App:** `TITLE`/`SUB_TITLE`/`CSS`, `compose()` (starting with
+  `identity_bar(...)`), `parse_state()`, `refresh_summary()`,
+  `_build_plan()`, and `SWITCH_DEPENDENTS` (switch id → the widget ids it
+  greys out). Settings save/load is generic — every `Input` in the
+  `*_FIELDS` groups plus every `Switch` / `Select` / `TextArea` by widget
+  id — so a new widget is persisted just by having an `id`. The base reads
+  `SETTINGS_PATH`, `_DEFAULT_DATA_DIR`, the `*_FIELDS` groups,
+  `build_summary` and `RunScreen` from the program's own module at call
+  time.
+- **RunScreen:** `do_run()` (the `@work(thread=True)` loop) plus hooks —
+  `TABLE_COLUMNS` / `table_row(record)`, `live_plot_args()`,
+  `save_png(records, path, comment)`, `build_header(ctx, records, status=,
+  comment=, extra=)`, and `ABORT_LABEL` / `ABORT_STATUS` / `POINT_STATUS` /
+  `PNG_SUFFIX` text. A multi-run `do_run()` appends each run's
+  `RunContext` **and its header extras** to `_run_contexts` /
+  `_run_extras` and finalizes that run itself; a single-run plan
+  (`plan.run_ctx`) is finalized by the base the moment the run ends. The
+  base then offers the status/comment prompt for the last run and writes
+  the session's row into `runs.db` (`instruments/run_index.py`) — the same
+  history the web front end writes.
+
 ### Data root (changed 2026-09-03)
 
 `_DEFAULT_DATA_DIR = <repo>/../data` is now only a **fallback**. Each run's
@@ -361,7 +390,9 @@ units sub-header row as data. Use `read_raw()`.
 4. **`{suite}/{name}_tui.py`** — `DEFAULTS`, the `*_FIELDS` groups,
    `MeasurementPlan`, `build_summary`, `build_header_fields`,
    `compute_filename_preview`, `{NAME}_DESCRIPTION`, `{NAME}_SCHEMATIC`,
-   and the Textual `App`.
+   and the Textual `App` + `RunScreen` as subclasses of
+   `instruments/tui_common.py`'s `MeasurementApp` / `MeasurementRunScreen`
+   (see §2).
 5. **`bridge_tui.py`** — add a `Program(...)` (key, title, description,
    schematic, App) to its suite in `PROGRAMS`.
 6. **`web/{suite}/{name}.py`** — name it so its basename matches NO module in the
@@ -396,6 +427,7 @@ units sub-header row as data. Use `read_raw()`.
 | Web page layout skeleton (top band + params/output columns, square plot) | `web/run_controller.py` `measurement_layout()` — every page fills `regions.identity` / `.params` / `.summary` / `.output`; the app-wide colour theme is `web/app.py` (`app.colors()` + shared head CSS) |
 | The identity bar / data-root picker | `web/identity_bar.py` + `web/directory_picker.py`; TUI side `instruments/data_dir.py` |
 | Menu card text or schematic | `{NAME}_DESCRIPTION` / `{NAME}_SCHEMATIC` in the TUI module; card title in `bridge_tui.py` `PROGRAMS` |
+| Anything every TUI form / run screen does the same way (settings file, sample picker, identity bar, abort/back, status/comment prompt, run history, run-screen CSS) | `instruments/tui_common.py` only |
 
 
 ## 9. Tests
@@ -416,5 +448,10 @@ No hardware and no VISA layer is touched. The suite covers the pure logic:
 - `test_run_time.py`, `test_run_costs_*.py` — the run-time model: helper arithmetic, per-program `run_costs()` defaults / multiplicity, plan `run_cost` length == `total_points`.
 - `test_dc_gate_sweep.py`, `dc_sweep_utils` coverage — `linear_sweep`
   bidirectional shape, `parse_value_list`.
+- `test_tui_smoke.py` — every program App mounts headless and its form
+  round-trips through its settings file; `test_tui_common.py` — the shared
+  run-screen lifecycle; `test_bridge_tui.py` — the menu; `test_run_index.py`
+  — the run history. `conftest.py` points `run_index` at a temp DB for
+  every test.
 
 Anything requiring a real 6221/2182/MFLI/magnet is manual bench testing.
