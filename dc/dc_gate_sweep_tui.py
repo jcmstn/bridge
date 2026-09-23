@@ -46,9 +46,7 @@ from textual.widgets import (
     Collapsible,
     Footer,
     Header,
-    Select,
     Static,
-    Switch,
 )
 
 from dc.dc_gate_sweep import (
@@ -75,7 +73,7 @@ from dc.dc_gate_sweep import (
     shutdown_source,
     shutdown_temperature_controller,
 )
-from dc.dc_sweep_utils import linear_sweep, parse_value_list, safe_shutdown, sweep_point_count
+from dc.dc_sweep_utils import linear_sweep, safe_shutdown, sweep_point_count, try_parse
 from instruments.data_dir import validate_directory
 from instruments.data_naming import (
     RunContext,
@@ -339,6 +337,16 @@ def build_header_fields(plan: "MeasurementPlan", ctx: RunContext, records: list[
 # ─────────────────────────────────────────────────────────────────────────────
 # Live validation / derived-value summary
 # ─────────────────────────────────────────────────────────────────────────────
+
+def resolve_state(state: dict) -> dict:
+    """Add the derived keys build_summary() / build_plan() read — the parsed
+    lists/sweeps, each with its parse error — to a state of raw field values.
+    Pure: shared by the TUI's and the web page's parse_state()."""
+    state["field_current_list"], state["field_parse_error"] = \
+        try_parse(state["field_current_values"]) if state["enable_field"] else ([], None)
+    state["sense_current_list"], state["sense_current_parse_error"] = try_parse(state["sense_current_values"])
+    return state
+
 
 def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     info: list[str] = []
@@ -994,32 +1002,6 @@ class DCGateSweepApp(MeasurementApp):
         yield Footer()
 
     # ── Form state I/O ───────────────────────────────────────────────────────
-
-    def parse_state(self) -> tuple[dict, list[str]]:
-        state, errors = self._parse_fields()
-        state["auto_range"] = self.query_one("#auto_range", Switch).value
-        state["bidirectional_sweep"] = self.query_one("#bidirectional_sweep", Switch).value
-        state["enable_field"] = self.query_one("#enable_field", Switch).value
-        state["enable_temperature"] = self.query_one("#enable_temperature", Switch).value
-        sample_value = self.query_one("#sample_select", Select).value
-        state["sample"] = sample_value if sample_value not in (None, Select.BLANK) else ""
-
-        state["field_current_list"] = []
-        state["field_parse_error"] = None
-        if state["enable_field"]:
-            try:
-                state["field_current_list"] = parse_value_list(state["field_current_values"])
-            except ValueError as exc:
-                state["field_parse_error"] = str(exc)
-
-        state["sense_current_list"] = []
-        state["sense_current_parse_error"] = None
-        try:
-            state["sense_current_list"] = parse_value_list(state["sense_current_values"])
-        except ValueError as exc:
-            state["sense_current_parse_error"] = str(exc)
-
-        return state, errors
 
     # ── Reactivity ───────────────────────────────────────────────────────────
 

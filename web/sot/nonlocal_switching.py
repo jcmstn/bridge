@@ -28,9 +28,8 @@ from instruments.data_naming import (
 )
 import sot.sot_nonlocal_switching_tui as program
 from sot.sot_nonlocal_switching_tui import (
-    DEFAULTS, NLSW_DESCRIPTION, NUMERIC_FIELDS, TEXT_FIELDS,
-    build_plan, build_summary,
-    compute_filename_preview, resolve_state,
+    DEFAULTS, NLSW_DESCRIPTION, build_plan, build_summary,
+    compute_filename_preview,
 )
 from web.directory_picker import validate_directory
 from web.identity_bar import identity_bar
@@ -40,6 +39,7 @@ from web.run_controller import (
     render_summary, stable_card, stable_grid, text_field,
     refresh_on_busy_change,
     finished_handler, load_settings, program_artifacts, program_run_fn, save_settings,
+    form_state,
 )
 from web.sample_picker import NEW_SAMPLE_SENTINEL, prepare_data_root
 
@@ -225,31 +225,7 @@ def page() -> None:
             log_area = ui.log(max_lines=2000).classes("w-full h-48 font-mono text-xs")
 
     def parse_state() -> tuple[dict, list[str]]:
-        errors: list[str] = []
-        state: dict = {}
-        for fid, caster in NUMERIC_FIELDS.items():
-            try:
-                state[fid] = caster(inputs[fid].value)
-            except (TypeError, ValueError):
-                errors.append(f"'{fid}' is not a valid number.")
-                state[fid] = 0
-        for fid in TEXT_FIELDS:
-            if fid in ("device", "cooldown"):
-                continue
-            if fid == "data_dir":
-                state[fid] = (identity.data_dir_input.value or "").strip()
-                continue
-            state[fid] = (inputs[fid].value or "").strip()
-        state["R_P_ohm"] = inputs["R_P_ohm"].value
-        state["R_AP_ohm"] = inputs["R_AP_ohm"].value
-        state["device"] = (identity.device_input.value or "").strip()
-        state["cooldown"] = (identity.cooldown_input.value or "").strip()
-        state["temperature_setpoint_K"] = identity.temperature_input.value
-        for fid, sw in switches.items():
-            state[fid] = sw.value
-        sample_value = identity.sample_dropdown.value
-        state["sample"] = sample_value if sample_value not in (None, NEW_SAMPLE_SENTINEL) else ""
-        return resolve_state(state), errors
+        return form_state(program, identity, inputs=inputs, switches=switches)
 
     def collect_raw() -> dict:
         raw = {fid: inp.value for fid, inp in inputs.items()}

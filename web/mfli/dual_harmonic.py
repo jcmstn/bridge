@@ -23,13 +23,11 @@ from typing import Optional
 from plotly.subplots import make_subplots
 from nicegui import ui
 
-from dc.dc_sweep_utils import parse_sweep_rows
 import mfli.mfli_dual_harmonic_tui as program
 from mfli.mfli_dual_harmonic_tui import (
     build_plan,
     MFLI_DUAL_HARMONIC_DESCRIPTION,
-    DEFAULTS, NUMERIC_FIELDS, TEXT_FIELDS, OPTIONAL_NUMERIC_FIELDS,
-    build_summary,
+    DEFAULTS, build_summary,
     compute_filename_preview,
 )
 from instruments.data_naming import (
@@ -42,6 +40,7 @@ from web.run_controller import (
     param_card, param_grid, stable_card, stable_grid, advanced_section, measurement_layout,
     program_artifacts, program_run_fn, refresh_on_busy_change,
     finished_handler, load_settings, save_settings,
+    form_state,
 )
 from web.directory_picker import validate_directory
 from web.field_diagram import build_field_diagram_figure
@@ -257,43 +256,9 @@ def page() -> None:
             log_area = ui.log(max_lines=2000).classes("w-full h-48 font-mono text-xs")
 
     def parse_state() -> tuple[dict, list[str]]:
-        errors: list[str] = []
-        state: dict = {}
-        for fid, caster in NUMERIC_FIELDS.items():
-            raw = inputs[fid].value
-            try:
-                state[fid] = caster(raw)
-            except (TypeError, ValueError):
-                errors.append(f"'{fid}' is not a valid number.")
-                state[fid] = 0
-        for fid in TEXT_FIELDS:
-            if fid == "device":
-                state[fid] = (identity.device_input.value or "").strip()
-            elif fid == "cooldown":
-                state[fid] = (identity.cooldown_input.value or "").strip()
-            elif fid == "data_dir":
-                state[fid] = (identity.data_dir_input.value or "").strip()
-            else:
-                state[fid] = (inputs[fid].value or "").strip()
-        for fid in OPTIONAL_NUMERIC_FIELDS:
-            v = identity.temperature_input.value if fid == "temperature_setpoint_K" else optional_inputs[fid].value
-            state[fid] = float(v) if v is not None else None
-        for fid, sw in switches.items():
-            state[fid] = sw.value
-        state["order_1f"] = int(order_select_1f.value)
-        state["order_2f"] = int(order_select_2f.value)
-        sample_value = identity.sample_dropdown.value
-        state["sample"] = sample_value if sample_value not in (None, NEW_SAMPLE_SENTINEL) else ""
-
-        state["sweep_rows"] = inputs["sweep_rows"].value or ""
-        state["sweep_rows_parsed"] = []
-        state["sweep_rows_parse_error"] = None
-        try:
-            state["sweep_rows_parsed"] = parse_sweep_rows(state["sweep_rows"])
-        except ValueError as exc:
-            state["sweep_rows_parse_error"] = str(exc)
-
-        return state, errors
+        return form_state(program, identity, inputs=inputs, switches=switches,
+                          selects={"order_1f": order_select_1f, "order_2f": order_select_2f},
+                          optional_inputs=optional_inputs)
 
     def collect_raw() -> dict:
         raw = {fid: inp.value for fid, inp in inputs.items()}

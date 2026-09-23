@@ -24,7 +24,6 @@ from typing import Optional
 from plotly.subplots import make_subplots
 from nicegui import ui
 
-from dc.dc_sweep_utils import parse_sweep_rows
 from mfli.mfli_phase_calibration import (
     format_report,
 )
@@ -32,8 +31,7 @@ import mfli.mfli_phase_calibration_tui as program
 from mfli.mfli_phase_calibration_tui import (
     build_plan,
     MFLI_PHASE_CALIBRATION_DESCRIPTION,
-    DEFAULTS, NUMERIC_FIELDS, TEXT_FIELDS, LIST_FIELDS,
-    build_summary, compute_filename_preview,
+    DEFAULTS, build_summary, compute_filename_preview,
 )
 from instruments.data_naming import (
     TEST_SAMPLE,
@@ -45,6 +43,7 @@ from web.run_controller import (
     param_card, stable_card, param_grid, stable_grid, advanced_section, measurement_layout,
     program_artifacts, program_run_fn, refresh_on_busy_change,
     finished_handler, load_settings, save_settings,
+    form_state,
 )
 from web.directory_picker import validate_directory
 from web.identity_bar import identity_bar
@@ -55,23 +54,6 @@ _SETTINGS_PATH = _DATA_DIR / "web_settings" / "mfli_phase_calibration_web_settin
 
 PAGE_TITLE = "MFLI Phase Calibration"
 SUITE = "MFLI"
-
-
-def _parse_float_list(raw: str) -> tuple[list[float], list[str]]:
-    """Same manual comma-split-and-skip-blanks parsing as the TUI's LIST_FIELDS
-    handling (distinct from dc_sweep_utils.parse_value_list, which errors on
-    an all-blank string instead of silently returning [])."""
-    values: list[float] = []
-    errors: list[str] = []
-    for part in raw.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        try:
-            values.append(float(part))
-        except ValueError:
-            errors.append(f"'{part}' is not a number")
-    return values, errors
 
 
 def page() -> None:
@@ -252,44 +234,8 @@ def page() -> None:
                 "w-full font-mono text-xs whitespace-pre-wrap bg-grey-2 dark:bg-grey-9 rounded p-2")
 
     def parse_state() -> tuple[dict, list[str]]:
-        errors: list[str] = []
-        state: dict = {}
-        for fid, caster in NUMERIC_FIELDS.items():
-            raw = inputs[fid].value
-            try:
-                state[fid] = caster(raw)
-            except (TypeError, ValueError):
-                errors.append(f"'{fid}' is not a valid number.")
-                state[fid] = 0
-        for fid in TEXT_FIELDS:
-            if fid in ("device", "cooldown"):
-                continue
-            if fid == "data_dir":
-                state[fid] = (identity.data_dir_input.value or "").strip()
-                continue
-            state[fid] = (inputs[fid].value or "").strip()
-        for fid in LIST_FIELDS:
-            values, list_errors = _parse_float_list(inputs[fid].value or "")
-            state[fid] = values
-            errors += [f"'{fid}': {e}" for e in list_errors]
-        state["temperature_setpoint_K"] = identity.temperature_input.value
-        state["device"] = (identity.device_input.value or "").strip()
-        state["cooldown"] = (identity.cooldown_input.value or "").strip()
-        for fid, sw in switches.items():
-            state[fid] = sw.value
-        state["order"] = int(order_select.value)
-        sample_value = identity.sample_dropdown.value
-        state["sample"] = sample_value if sample_value not in (None, NEW_SAMPLE_SENTINEL) else ""
-
-        state["sweep_rows"] = inputs["sweep_rows"].value or ""
-        state["sweep_rows_parsed"] = []
-        state["sweep_rows_parse_error"] = None
-        try:
-            state["sweep_rows_parsed"] = parse_sweep_rows(state["sweep_rows"])
-        except ValueError as exc:
-            state["sweep_rows_parse_error"] = str(exc)
-
-        return state, errors
+        return form_state(program, identity, inputs=inputs, switches=switches,
+                          selects={"order": order_select})
 
     def collect_raw() -> dict:
         raw = {fid: inp.value for fid, inp in inputs.items()}

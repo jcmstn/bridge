@@ -36,10 +36,11 @@ from typing import Any, Callable, Iterator, Optional
 from nicegui import background_tasks, ui
 
 from instruments.run_time import RunCost, eta_s, format_duration
+from dc.dc_sweep_utils import finite
 from instruments import run_index
 from instruments.data_naming import RunContext, finish_last_run, proc_path
 from web import run_manager
-from web.sample_picker import status_comment_dialog
+from web.sample_picker import NEW_SAMPLE_SENTINEL, status_comment_dialog
 
 log = logging.getLogger(__name__)
 
@@ -581,3 +582,55 @@ def finished_handler(client, controller: dict, status_label, abort_btn, start_bt
             prompt_last_run(client, program, plan, run_contexts, run_extras, records),
             name="status_comment_prompt")
     return on_finished
+
+
+def form_state(program: ModuleType, identity, *, inputs: dict, switches: dict,
+               selects: Optional[dict] = None, optional_inputs: Optional[dict] = None
+               ) -> tuple[dict, list[str]]:
+    """A page's form as the typed state dict its program's build_summary() /
+    build_plan() take — the web twin of MeasurementApp.parse_state(): the
+    NUMERIC / TEXT / LIST / OPTIONAL_NUMERIC fields (identity-bar ones from
+    `identity`), switches, integer selects, the sample, the sweep-rows text,
+    then the program's pure resolve_state(). Non-finite numbers are errors."""
+    widgets = {**inputs, **(optional_inputs or {})}
+    from_identity = {"device": identity.device_input, "cooldown": identity.cooldown_input,
+                     "data_dir": identity.data_dir_input,
+                     "temperature_setpoint_K": identity.temperature_input}
+    errors: list[str] = []
+    state: dict = {}
+    for fid, caster in program.NUMERIC_FIELDS.items():
+        try:
+            state[fid] = finite(caster(widgets[fid].value))
+        except (TypeError, ValueError, OverflowError):
+            errors.append(f"'{fid}' is not a valid number.")
+            state[fid] = 0
+    for fid in program.TEXT_FIELDS:
+        state[fid] = ((from_identity.get(fid) or widgets[fid]).value or "").strip()
+    for fid in getattr(program, "LIST_FIELDS", []):
+        values: list[float] = []
+        for part in (widgets[fid].value or "").split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                values.append(finite(float(part)))
+            except ValueError:
+                errors.append(f"'{fid}' contains a value that isn't a number: {part!r}")
+        state[fid] = values
+    for fid in program.OPTIONAL_NUMERIC_FIELDS:
+        value = (from_identity.get(fid) or widgets[fid]).value
+        try:
+            state[fid] = None if value in (None, "") else finite(float(value))
+        except (TypeError, ValueError):
+            errors.append(f"'{fid}' is not a valid number.")
+            state[fid] = None
+    for fid, switch in switches.items():
+        state[fid] = switch.value
+    for fid, select in (selects or {}).items():
+        state[fid] = int(select.value)
+    sample_value = identity.sample_dropdown.value
+    state["sample"] = sample_value if sample_value not in (None, NEW_SAMPLE_SENTINEL) else ""
+    if "sweep_rows" in widgets:
+        state["sweep_rows"] = widgets["sweep_rows"].value or ""
+    resolve = getattr(program, "resolve_state", None)
+    return (resolve(state) if resolve is not None else state), errors

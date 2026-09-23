@@ -27,11 +27,10 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from nicegui import ui
 
-from dc.dc_sweep_utils import parse_value_list
 import dc.dc_iv_curve_tui as program
 from dc.dc_iv_curve_tui import (
     build_plan,
-    DEFAULTS, NUMERIC_FIELDS, TEXT_FIELDS, OPTIONAL_NUMERIC_FIELDS, DC_IV_DESCRIPTION, build_summary,
+    DEFAULTS, DC_IV_DESCRIPTION, build_summary,
     compute_filename_preview,
 )
 from instruments.data_naming import (
@@ -43,6 +42,7 @@ from web.run_controller import (
     param_card, stable_card, param_grid, stable_grid, advanced_section, measurement_layout,
     program_artifacts, program_run_fn, refresh_on_busy_change,
     finished_handler, load_settings, save_settings,
+    form_state,
 )
 from web.directory_picker import validate_directory
 from web.identity_bar import identity_bar
@@ -175,39 +175,7 @@ def page() -> None:
             log_area = ui.log(max_lines=2000).classes("w-full h-48 font-mono text-xs")
 
     def parse_state() -> tuple[dict, list[str]]:
-        errors: list[str] = []
-        state: dict = {}
-        for fid, caster in NUMERIC_FIELDS.items():
-            raw = inputs[fid].value
-            try:
-                state[fid] = caster(raw)
-            except (TypeError, ValueError):
-                errors.append(f"'{fid}' is not a valid number.")
-                state[fid] = 0
-        for fid in TEXT_FIELDS:
-            if fid == "device":
-                state[fid] = (identity.device_input.value or "").strip()
-            elif fid == "cooldown":
-                state[fid] = (identity.cooldown_input.value or "").strip()
-            elif fid == "data_dir":
-                state[fid] = (identity.data_dir_input.value or "").strip()
-            else:
-                state[fid] = (inputs[fid].value or "").strip()
-        for fid in OPTIONAL_NUMERIC_FIELDS:
-            state[fid] = identity.temperature_input.value if fid == "temperature_setpoint_K" \
-                else inputs[fid].value
-        for fid, sw in switches.items():
-            state[fid] = sw.value
-        sample_value = identity.sample_dropdown.value
-        state["sample"] = sample_value if sample_value not in (None, NEW_SAMPLE_SENTINEL) else ""
-        state["gate_voltage_list"] = []
-        state["gate_parse_error"] = None
-        if state["enable_gate"]:
-            try:
-                state["gate_voltage_list"] = parse_value_list(state["gate_voltage_values"])
-            except ValueError as exc:
-                state["gate_parse_error"] = str(exc)
-        return state, errors
+        return form_state(program, identity, inputs=inputs, switches=switches)
 
     def collect_raw() -> dict:
         raw = {fid: inp.value for fid, inp in inputs.items()}

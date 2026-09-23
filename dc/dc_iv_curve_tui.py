@@ -48,9 +48,7 @@ from textual.widgets import (
     Collapsible,
     Footer,
     Header,
-    Select,
     Static,
-    Switch,
 )
 
 from dc.dc_iv_curve import (
@@ -71,7 +69,7 @@ from dc.dc_iv_curve import (
     shutdown_source,
     shutdown_temperature_controller,
 )
-from dc.dc_sweep_utils import linear_sweep, parse_value_list, safe_shutdown, sweep_point_count
+from dc.dc_sweep_utils import linear_sweep, safe_shutdown, sweep_point_count, try_parse
 from instruments.data_dir import validate_directory
 from instruments.data_naming import (
     RunContext,
@@ -279,6 +277,15 @@ def build_header_fields(plan: "MeasurementPlan", ctx: RunContext, records: list[
 # ─────────────────────────────────────────────────────────────────────────────
 # Live validation / derived-value summary
 # ─────────────────────────────────────────────────────────────────────────────
+
+def resolve_state(state: dict) -> dict:
+    """Add the derived keys build_summary() / build_plan() read — the parsed
+    lists/sweeps, each with its parse error — to a state of raw field values.
+    Pure: shared by the TUI's and the web page's parse_state()."""
+    state["gate_voltage_list"], state["gate_parse_error"] = \
+        try_parse(state["gate_voltage_values"]) if state["enable_gate"] else ([], None)
+    return state
+
 
 def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     """Return (info, warnings, errors) for a fully-parsed state dict."""
@@ -832,25 +839,6 @@ class DCIVCurveApp(MeasurementApp):
         yield Footer()
 
     # ── Form state I/O ───────────────────────────────────────────────────────
-
-    def parse_state(self) -> tuple[dict, list[str]]:
-        state, errors = self._parse_fields()
-        state["auto_range"] = self.query_one("#auto_range", Switch).value
-        state["bidirectional_sweep"] = self.query_one("#bidirectional_sweep", Switch).value
-        state["enable_gate"] = self.query_one("#enable_gate", Switch).value
-        state["enable_temperature"] = self.query_one("#enable_temperature", Switch).value
-        sample_value = self.query_one("#sample_select", Select).value
-        state["sample"] = sample_value if sample_value not in (None, Select.BLANK) else ""
-
-        state["gate_voltage_list"] = []
-        state["gate_parse_error"] = None
-        if state["enable_gate"]:
-            try:
-                state["gate_voltage_list"] = parse_value_list(state["gate_voltage_values"])
-            except ValueError as exc:
-                state["gate_parse_error"] = str(exc)
-
-        return state, errors
 
     # ── Reactivity ───────────────────────────────────────────────────────────
 

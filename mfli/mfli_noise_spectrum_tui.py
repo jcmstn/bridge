@@ -46,7 +46,7 @@ from textual.widgets import (
     Switch,
 )
 
-from dc.dc_sweep_utils import parse_value_list
+from dc.dc_sweep_utils import try_parse
 from mfli.mfli_dual_harmonic_6221 import _AC_CURRENT_CEILING_A, _AC_COMPLIANCE_CEILING_V, extref_lock_s
 from instruments.tui_common import (
     LogRelay, MeasurementApp, MeasurementRunScreen, card, field, format_si, identity_bar,
@@ -239,6 +239,14 @@ def run_costs(state: dict) -> RunCost:
             rc.at("save", steps * PER_FILE_S, a * steps)
     rc.tail("save", steps * PER_FILE_S)
     return rc
+
+
+def resolve_state(state: dict) -> dict:
+    """Add the derived keys build_summary() / build_plan() read — the parsed
+    lists/sweeps, each with its parse error — to a state of raw field values.
+    Pure: shared by the TUI's and the web page's parse_state()."""
+    state["amplitude_list"], state["amplitude_parse_error"] = try_parse(state["amplitude_values"])
+    return state
 
 
 def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
@@ -687,23 +695,6 @@ class MFLINoiseSpectrumApp(MeasurementApp):
         yield Footer()
 
     # ── Form state I/O ───────────────────────────────────────────────────────
-
-    def parse_state(self) -> tuple[dict, list[str]]:
-        state, errors = self._parse_fields()
-        state["also_measure_off"] = self.query_one("#also_measure_off", Switch).value
-        state["leader_automode"] = int(self.query_one("#leader_automode", Select).value)
-        state["follower_automode"] = int(self.query_one("#follower_automode", Select).value)
-        sample_value = self.query_one("#sample_select", Select).value
-        state["sample"] = sample_value if sample_value not in (None, Select.BLANK) else ""
-
-        state["amplitude_list"] = []
-        state["amplitude_parse_error"] = None
-        try:
-            state["amplitude_list"] = parse_value_list(state["amplitude_values"])
-        except ValueError as exc:
-            state["amplitude_parse_error"] = str(exc)
-
-        return state, errors
 
     # ── Reactivity ───────────────────────────────────────────────────────────
 

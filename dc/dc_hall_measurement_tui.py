@@ -43,10 +43,7 @@ from textual.widgets import (
     Collapsible,
     Footer,
     Header,
-    Select,
     Static,
-    Switch,
-    TextArea,
 )
 
 from dc.dc_hall_measurement import (
@@ -69,7 +66,7 @@ from dc.dc_hall_measurement import (
     shutdown_source,
     shutdown_temperature_controller,
 )
-from dc.dc_sweep_utils import build_segmented_sweep, field_hops, parse_sweep_rows, parse_value_list, safe_shutdown
+from dc.dc_sweep_utils import build_segmented_sweep, field_hops, parse_sweep_rows, safe_shutdown, try_parse
 from instruments.data_dir import validate_directory
 from instruments.field_geometry import field_direction_summary_line, render_ascii_field_diagram
 from instruments.data_naming import (
@@ -346,6 +343,15 @@ def build_header_fields(plan: "MeasurementPlan", ctx: RunContext, records: list[
 # ─────────────────────────────────────────────────────────────────────────────
 # Live validation / derived-value summary
 # ─────────────────────────────────────────────────────────────────────────────
+
+def resolve_state(state: dict) -> dict:
+    """Add the derived keys build_summary() / build_plan() read — the parsed
+    lists/sweeps, each with its parse error — to a state of raw field values.
+    Pure: shared by the TUI's and the web page's parse_state()."""
+    state["sense_current_list"], state["sense_current_parse_error"] = try_parse(state["sense_current_values"])
+    state["sweep_rows_parsed"], state["sweep_rows_parse_error"] = try_parse(state["sweep_rows"], parse_sweep_rows)
+    return state
+
 
 def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     """Return (info, warnings, errors) for a fully-parsed state dict."""
@@ -1060,34 +1066,6 @@ class DCHallMeasurementApp(MeasurementApp):
         yield Footer()
 
     # ── Form state I/O ───────────────────────────────────────────────────────
-
-    def parse_state(self) -> tuple[dict, list[str]]:
-        state, errors = self._parse_fields()
-        state["auto_range"] = self.query_one("#auto_range", Switch).value
-        state["measure_rxy"] = self.query_one("#measure_rxy", Switch).value
-        state["measure_rxx"] = self.query_one("#measure_rxx", Switch).value
-        state["enable_sweep"] = self.query_one("#enable_sweep", Switch).value
-        state["bidirectional_sweep"] = self.query_one("#bidirectional_sweep", Switch).value
-        state["enable_temperature"] = self.query_one("#enable_temperature", Switch).value
-        sample_value = self.query_one("#sample_select", Select).value
-        state["sample"] = sample_value if sample_value not in (None, Select.BLANK) else ""
-
-        state["sense_current_list"] = []
-        state["sense_current_parse_error"] = None
-        try:
-            state["sense_current_list"] = parse_value_list(state["sense_current_values"])
-        except ValueError as exc:
-            state["sense_current_parse_error"] = str(exc)
-
-        state["sweep_rows"] = self.query_one("#sweep_rows", TextArea).text
-        state["sweep_rows_parsed"] = []
-        state["sweep_rows_parse_error"] = None
-        try:
-            state["sweep_rows_parsed"] = parse_sweep_rows(state["sweep_rows"])
-        except ValueError as exc:
-            state["sweep_rows_parse_error"] = str(exc)
-
-        return state, errors
 
     # ── Reactivity ───────────────────────────────────────────────────────────
 

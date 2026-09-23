@@ -26,10 +26,9 @@ from typing import Optional
 import plotly.graph_objects as go
 from nicegui import ui
 
-from dc.dc_sweep_utils import parse_sweep_rows, parse_value_list
 import dc.dc_hall_measurement_tui as program
 from dc.dc_hall_measurement_tui import (
-    build_plan, DEFAULTS, NUMERIC_FIELDS, TEXT_FIELDS, OPTIONAL_NUMERIC_FIELDS, DC_HALL_DESCRIPTION,
+    build_plan, DEFAULTS, DC_HALL_DESCRIPTION,
     build_summary,
     compute_filename_preview, QUANTITY_PLOT_LABELS, active_quantities,
 )
@@ -42,6 +41,7 @@ from web.run_controller import (
     param_card, stable_card, param_grid, stable_grid, advanced_section, measurement_layout,
     program_artifacts, program_run_fn, refresh_on_busy_change,
     finished_handler, load_settings, save_settings,
+    form_state,
 )
 from web.directory_picker import validate_directory
 from web.field_diagram import build_field_diagram_figure
@@ -271,48 +271,7 @@ def page() -> None:
         return raw
 
     def parse_state() -> tuple[dict, list[str]]:
-        errors: list[str] = []
-        state: dict = {}
-        for fid, caster in NUMERIC_FIELDS.items():
-            raw = inputs[fid].value
-            try:
-                state[fid] = caster(raw)
-            except (TypeError, ValueError):
-                errors.append(f"'{fid}' is not a valid number.")
-                state[fid] = 0
-        for fid in TEXT_FIELDS:
-            if fid == "device":
-                state[fid] = (identity.device_input.value or "").strip()
-            elif fid == "cooldown":
-                state[fid] = (identity.cooldown_input.value or "").strip()
-            elif fid == "data_dir":
-                state[fid] = (identity.data_dir_input.value or "").strip()
-            else:
-                state[fid] = (inputs[fid].value or "").strip()
-        for fid in OPTIONAL_NUMERIC_FIELDS:
-            state[fid] = identity.temperature_input.value if fid == "temperature_setpoint_K" \
-                else inputs[fid].value
-        for fid, sw in switches.items():
-            state[fid] = sw.value
-        sample_value = identity.sample_dropdown.value
-        state["sample"] = sample_value if sample_value not in (None, NEW_SAMPLE_SENTINEL) else ""
-
-        state["sense_current_list"] = []
-        state["sense_current_parse_error"] = None
-        try:
-            state["sense_current_list"] = parse_value_list(state["sense_current_values"])
-        except ValueError as exc:
-            state["sense_current_parse_error"] = str(exc)
-
-        state["sweep_rows"] = inputs["sweep_rows"].value or ""
-        state["sweep_rows_parsed"] = []
-        state["sweep_rows_parse_error"] = None
-        try:
-            state["sweep_rows_parsed"] = parse_sweep_rows(state["sweep_rows"])
-        except ValueError as exc:
-            state["sweep_rows_parse_error"] = str(exc)
-
-        return state, errors
+        return form_state(program, identity, inputs=inputs, switches=switches)
 
     @ui.refreshable
     def refresh_summary() -> None:

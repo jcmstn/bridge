@@ -34,7 +34,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.validation import Number
 from textual.widgets import (
     Button, Collapsible, Footer, Header, Label,
-    Select, Static, Switch,
+    Static,
 )
 
 from sot.sot_nonlocal_switching import (
@@ -1026,14 +1026,6 @@ class NonlocalSwitchingApp(MeasurementApp):
 
     # form I/O
 
-    def parse_state(self) -> tuple[dict, list[str]]:
-        state, errors = self._parse_fields()
-        for sid in SWITCH_FIELD_IDS:
-            state[sid] = self.query_one(f"#{sid}", Switch).value
-        sample_value = self.query_one("#sample_select", Select).value
-        state["sample"] = sample_value if sample_value not in (None, Select.BLANK) else ""
-
-        return resolve_state(state), errors
 
     def update_summary(self) -> None:
         state, parse_errors = self.parse_state()

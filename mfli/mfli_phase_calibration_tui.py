@@ -38,13 +38,10 @@ from textual.widgets import (
     Collapsible,
     Footer,
     Header,
-    Select,
     Static,
-    Switch,
-    TextArea,
 )
 
-from dc.dc_sweep_utils import build_segmented_sweep, parse_sweep_rows, safe_shutdown
+from dc.dc_sweep_utils import build_segmented_sweep, parse_sweep_rows, safe_shutdown, try_parse
 from mfli.mfli_dual_harmonic import (
     DemodConfig,
     FilterConfig,
@@ -370,6 +367,14 @@ def build_header_fields(plan: "CalibrationPlan", ctx: RunContext, records: list[
 # ─────────────────────────────────────────────────────────────────────────────
 # Live validation / derived-value summary
 # ─────────────────────────────────────────────────────────────────────────────
+
+def resolve_state(state: dict) -> dict:
+    """Add the derived keys build_summary() / build_plan() read — the parsed
+    lists/sweeps, each with its parse error — to a state of raw field values.
+    Pure: shared by the TUI's and the web page's parse_state()."""
+    state["sweep_rows_parsed"], state["sweep_rows_parse_error"] = try_parse(state["sweep_rows"], parse_sweep_rows)
+    return state
+
 
 def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     """Return (info, warnings, errors) for a fully-parsed state dict."""
@@ -1095,26 +1100,6 @@ class MFLIPhaseCalibrationApp(MeasurementApp):
         yield Footer()
 
     # ── Form state I/O ───────────────────────────────────────────────────────
-
-    def parse_state(self) -> tuple[dict, list[str]]:
-        state, errors = self._parse_fields()
-        state["sinc_filter"] = self.query_one("#sinc_filter", Switch).value
-        state["enable_amplitude_check"] = self.query_one("#enable_amplitude_check", Switch).value
-        state["enable_frequency_check"] = self.query_one("#enable_frequency_check", Switch).value
-        state["enable_temperature"] = self.query_one("#enable_temperature", Switch).value
-        state["order"] = int(self.query_one("#order", Select).value)
-        sample_value = self.query_one("#sample_select", Select).value
-        state["sample"] = sample_value if sample_value not in (None, Select.BLANK) else ""
-
-        state["sweep_rows"] = self.query_one("#sweep_rows", TextArea).text
-        state["sweep_rows_parsed"] = []
-        state["sweep_rows_parse_error"] = None
-        try:
-            state["sweep_rows_parsed"] = parse_sweep_rows(state["sweep_rows"])
-        except ValueError as exc:
-            state["sweep_rows_parse_error"] = str(exc)
-
-        return state, errors
 
     # ── Reactivity ───────────────────────────────────────────────────────────
 

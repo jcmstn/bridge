@@ -51,6 +51,7 @@ from textual.widgets import (
     Switch, TextArea,
 )
 
+from dc.dc_sweep_utils import finite
 from instruments import run_index
 from instruments.data_dir import DataDirPickerScreen
 from instruments.data_naming import (
@@ -84,13 +85,6 @@ def parse_sensor_uids(raw: str) -> tuple:
     """Parse a comma-separated "MB1.T1, DB5.T1" field into a 1- or 2-tuple of UIDs."""
     uids = [u.strip() for u in raw.split(",") if u.strip()]
     return tuple(uids[:2])
-
-
-def _finite(value):
-    """`value`, or ValueError if it is a float inf/nan."""
-    if isinstance(value, float) and not math.isfinite(value):
-        raise ValueError(f"not a finite number: {value!r}")
-    return value
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -556,7 +550,24 @@ class MeasurementApp(App):
                 start.disabled = True
 
     def parse_state(self) -> tuple[dict, list[str]]:
-        raise NotImplementedError
+        """The form as a typed state dict: every field Input (_parse_fields),
+        every Switch / Select / TextArea by widget id, and the sample — then the
+        program module's pure `resolve_state(state)` (the derived lists/sweeps
+        with their parse errors), the same function its web page calls."""
+        state, errors = self._parse_fields()
+        for switch in self.query(Switch):
+            if switch.id:
+                state[switch.id] = switch.value
+        for select in self.query(Select):
+            if select.id and select.id != "sample_select":
+                state[select.id] = select.value
+        for area in self.query(TextArea):
+            if area.id:
+                state[area.id] = area.text
+        sample_value = self.query_one("#sample_select", Select).value
+        state["sample"] = sample_value if sample_value not in (None, Select.BLANK) else ""
+        resolve = getattr(self.program, "resolve_state", None)
+        return (resolve(state) if resolve is not None else state), errors
 
     def _parse_fields(self) -> tuple[dict, list[str]]:
         """The shared head of every parse_state(): the NUMERIC_FIELDS (cast
@@ -569,7 +580,7 @@ class MeasurementApp(App):
         for fid, caster in p.NUMERIC_FIELDS.items():
             raw = self.query_one(f"#{fid}", Input).value.strip()
             try:
-                state[fid] = _finite(caster(raw))
+                state[fid] = finite(caster(raw))
             except ValueError:
                 errors.append(f"'{fid}' is not a valid number: {raw!r}")
                 state[fid] = 0
@@ -583,7 +594,7 @@ class MeasurementApp(App):
                 if not part:
                     continue
                 try:
-                    values.append(_finite(float(part)))
+                    values.append(finite(float(part)))
                 except ValueError:
                     errors.append(f"'{fid}' contains a value that isn't a number: {part!r}")
             state[fid] = values
@@ -591,7 +602,7 @@ class MeasurementApp(App):
             raw = self.query_one(f"#{fid}", Input).value.strip()
             if raw:
                 try:
-                    state[fid] = _finite(float(raw))
+                    state[fid] = finite(float(raw))
                 except ValueError:
                     errors.append(f"'{fid}' is not a valid number: {raw!r}")
                     state[fid] = None

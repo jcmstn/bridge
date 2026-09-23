@@ -20,11 +20,10 @@ from typing import Optional
 import plotly.graph_objects as go
 from nicegui import ui
 
-from dc.dc_sweep_utils import parse_value_list
 import dc.dc_gate_sweep_tui as program
 from dc.dc_gate_sweep_tui import (
     build_plan,
-    DEFAULTS, NUMERIC_FIELDS, TEXT_FIELDS, DC_GATE_SWEEP_DESCRIPTION, build_summary,
+    DEFAULTS, DC_GATE_SWEEP_DESCRIPTION, build_summary,
     compute_filename_preview,
 )
 from instruments.data_naming import (
@@ -36,6 +35,7 @@ from web.run_controller import (
     param_card, stable_card, param_grid, stable_grid, advanced_section, measurement_layout,
     program_artifacts, program_run_fn, refresh_on_busy_change,
     finished_handler, load_settings, save_settings,
+    form_state,
 )
 from web.directory_picker import validate_directory
 from web.identity_bar import identity_bar
@@ -193,43 +193,7 @@ def page() -> None:
             log_area = ui.log(max_lines=2000).classes("w-full h-48 font-mono text-xs")
 
     def parse_state() -> tuple[dict, list[str]]:
-        errors: list[str] = []
-        state: dict = {}
-        for fid, caster in NUMERIC_FIELDS.items():
-            raw = inputs[fid].value
-            try:
-                state[fid] = caster(raw)
-            except (TypeError, ValueError):
-                errors.append(f"'{fid}' is not a valid number.")
-                state[fid] = 0
-        for fid in TEXT_FIELDS:
-            if fid in ("device", "cooldown"):
-                continue
-            if fid == "data_dir":
-                state[fid] = (identity.data_dir_input.value or "").strip()
-                continue
-            state[fid] = (inputs[fid].value or "").strip()
-        state["device"] = (identity.device_input.value or "").strip()
-        state["cooldown"] = (identity.cooldown_input.value or "").strip()
-        state["temperature_setpoint_K"] = identity.temperature_input.value
-        for fid, sw in switches.items():
-            state[fid] = sw.value
-        sample_value = identity.sample_dropdown.value
-        state["sample"] = sample_value if sample_value not in (None, NEW_SAMPLE_SENTINEL) else ""
-        state["field_current_list"] = []
-        state["field_parse_error"] = None
-        if state["enable_field"]:
-            try:
-                state["field_current_list"] = parse_value_list(state["field_current_values"])
-            except ValueError as exc:
-                state["field_parse_error"] = str(exc)
-        state["sense_current_list"] = []
-        state["sense_current_parse_error"] = None
-        try:
-            state["sense_current_list"] = parse_value_list(state["sense_current_values"])
-        except ValueError as exc:
-            state["sense_current_parse_error"] = str(exc)
-        return state, errors
+        return form_state(program, identity, inputs=inputs, switches=switches)
 
     def collect_raw() -> dict:
         raw = {fid: inp.value for fid, inp in inputs.items()}

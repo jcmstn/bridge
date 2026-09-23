@@ -165,6 +165,22 @@ def parse_value_list(text: str) -> list[float]:
     return values
 
 
+def finite(value):
+    """`value`, or ValueError if it is a float inf/nan ("1e999" parses to inf)."""
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(f"not a finite number: {value!r}")
+    return value
+
+
+def try_parse(text: str, parser: Callable[[str], list] = parse_value_list) -> tuple[list, "str | None"]:
+    """(parser(text), None), or ([], the parse error) — how every form keeps a
+    bad list/sweep field as a summary error instead of an exception."""
+    try:
+        return parser(text), None
+    except ValueError as exc:
+        return [], str(exc)
+
+
 def safe_shutdown(label: str, fn: Callable[[], None]) -> None:
     """
     Run one shutdown_*() cleanup step, logging (not raising) on failure so
