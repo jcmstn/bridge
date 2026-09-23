@@ -132,7 +132,7 @@ def _cfgs(**read_overrides):
     for k, v in read_overrides.items():
         setattr(read, k, v)
     demod = ps.DemodConfig(device="dev1234", demod_index=1, harmonic=read.harmonic)
-    extref = ps.ExtRefConfig(device="dev1234")
+    extref = ps.ExtRefConfig(device="dev1234", pll_demod_index=0)   # ≠ the signal demod 1
     return pulse, read, demod, extref
 
 

@@ -17,6 +17,12 @@ acquire_averaged() below only need an object with the right attribute
 rather than a shared OutputConfig/DemodConfig type, so each script's own
 differently-shaped config classes work with them unchanged.
 
+The external-reference PLL (ExtRefConfig, configure_external_reference,
+wait_for_reference_lock, check_reference_locked) IS the same everywhere —
+every program that locks an MFLI to the Keithley 6221's Trigger Link phase
+marker (dual-harmonic 6221 source, SOT 2nd-harmonic and 6221-only reads)
+used byte-identical copies — so it lives here once.
+
 Usage example:
     from instruments.mfli_daq import connect, connect_device, setup_mds, acquire_averaged
 
@@ -35,6 +41,8 @@ Usage example:
 
 import time
 import logging
+import threading
+from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
@@ -393,3 +401,134 @@ def acquire_averaged_pair(daq: zi.ziDAQServer, cfg_a, cfg_b, n_averages: int) ->
 
     return (_finish_average(daq, cfg_a, raw[path_a], n_averages),
             _finish_average(daq, cfg_b, raw[path_b], n_averages))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# External reference (ExtRef PLL) — lock an oscillator to the 6221's phase
+# marker on an Aux Input. Bench-verify the node names against the
+# listNodesJSON dump configure_external_reference() logs on first use.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class ExtRefConfig:
+    """One MFLI's oscillator, phase-locked to the 6221's Trigger Link
+    marker via an Aux Input. One of these per device (with two MDS-synced
+    MFLIs, BOTH need their own — see mfli/mfli_dual_harmonic_6221.py).
+
+    `pll_demod_index` is a demodulator DEDICATED to being the ExtRef PLL's
+    phase detector — it must be different from the demod actually reading
+    the Signal Input for 1f/2f (demod1_cfg/demod2_cfg's demod_index). Per
+    Zurich's own node-tree reference (docs.zhinst.com/mfli_user_manual/
+    nodedoc.html, confirmed against a real device's listNodesJSON dump),
+    `extrefs/N/adcselect` and `extrefs/N/oscselect` are READ-ONLY — they
+    only report whichever demodulator is wired in via `extrefs/N/
+    demodselect`. There is no way to point the PLL at an Aux Input
+    directly; you point a demodulator at that Aux Input (its own
+    `adcselect`) and at the target oscillator (its own `oscselect`), then
+    tell `extrefs/N/demodselect` to use that demodulator. Needs the target
+    MFLI to have a free demod slot beyond the one used for the real signal
+    (MF-MD / multi-demod option) — verify against the `demods/*`
+    node count if this index doesn't exist on your unit."""
+    device: str            = "dev1234"
+    extref_index: int      = 0     # which ExtRef/PLL module (0-based)
+    aux_input_ch: int      = 0     # which Aux Input carries the marker (0-based; 0 = Aux In 1)
+    osc_index: int         = 0     # oscillator the PLL steers — demod1_cfg/demod2_cfg reference this
+    pll_demod_index: int   = 1     # demod DEDICATED as the PLL's phase detector (≠ the signal demod)
+    automode: int          = 4     # extrefs/N/automode — PID bandwidth adaptation for the lock loop:
+
+# ZI demods/n/adcselect enum (docs.zhinst.com/mfli_user_manual/nodedoc.html):
+# 8 = Aux In 1, 9 = Aux In 2 — NOT the same numbering as ExtRefConfig.aux_input_ch
+# (0-based channel index), so the two must be added, not used interchangeably.
+_ADCSELECT_AUX_IN_BASE = 8
+
+# demods/n/rate is "number of samples sent to the host / LabOne Data
+# Server per second" (node doc). MFLI's spec sheet lists 200 kSa/s as the
+# "maximum transfer rate over 1 GbE (all demodulators)" — but that's an
+# explicitly-labeled NETWORK/STORAGE limit, not the demodulator's native
+# rate (docs.zhinst.com/mfli_user_manual/specifications.html). Requested
+# value here (15 MSa/s) matches the Aux Input's own raw ADC spec (16-bit,
+# 15 MSa/s, 5 MHz analog bandwidth, same page) — the fastest this input
+# could physically need resolving at, so asking for more wouldn't mean
+# anything. Whether the on-device PLL's phase detection depends on this
+# demod's own decimated rate at all still isn't documented either way, and
+# demods/n/rate's own true max isn't documented independent of the network
+# figure above — the node doc says a requested value "may be approximated
+# to the nearest value supported by the instrument", so this may still get
+# clamped down; read back and log what was actually applied rather than
+# assume.
+_PLL_DETECTOR_RATE_REQUEST_HZ = 15e6
+
+def configure_external_reference(daq: "zi.ziDAQServer", cfg: ExtRefConfig,
+                                  frequency_Hz: float) -> None:
+    """Arm cfg.device's ExtRef PLL to lock cfg.osc_index to the incoming
+    marker, seeded with `frequency_Hz` as the search target (the 6221's
+    commanded frequency — the PLL then tracks the marker's true frequency,
+    which is the value actually worth trusting; see build_run_metadata()).
+
+    See ExtRefConfig's docstring for why this goes through a dedicated
+    `pll_demod_index` demodulator rather than writing extrefs/N/adcselect
+    directly (that node is read-only on real firmware).
+    """
+    d = cfg.device
+    daq.setDouble(f"/{d}/oscs/{cfg.osc_index}/freq", frequency_Hz)
+    try:
+        nodes = daq.listNodesJSON(f"/{d}/extrefs/{cfg.extref_index}/*")
+        log.info("MFLI %s extrefs/%d node tree (verify against this on first "
+                 "bench run):\n%s", d, cfg.extref_index, nodes)
+    except Exception:
+        log.exception("Could not list /%s/extrefs/%d/* — node names below are "
+                      "unverified for this device/firmware.", d, cfg.extref_index)
+    daq.setInt(f"/{d}/demods/{cfg.pll_demod_index}/adcselect",
+              _ADCSELECT_AUX_IN_BASE + cfg.aux_input_ch)
+    daq.setInt(f"/{d}/demods/{cfg.pll_demod_index}/oscselect", cfg.osc_index)
+    # Phase detector must track the marker's FUNDAMENTAL, not whatever
+    # harmonic this demod index was last left at (e.g. 2, from a previous
+    # run's demod2_cfg reusing the same index) — a stale harmonic here has
+    # the PLL searching the wrong frequency entirely and never locking.
+    daq.setInt(f"/{d}/demods/{cfg.pll_demod_index}/harmonic", 1)
+    daq.setDouble(f"/{d}/demods/{cfg.pll_demod_index}/rate", _PLL_DETECTOR_RATE_REQUEST_HZ)
+    daq.setInt(f"/{d}/demods/{cfg.pll_demod_index}/enable", 1)
+    daq.setInt(f"/{d}/extrefs/{cfg.extref_index}/demodselect", cfg.pll_demod_index)
+    daq.setInt(f"/{d}/extrefs/{cfg.extref_index}/automode", cfg.automode)
+    daq.setInt(f"/{d}/extrefs/{cfg.extref_index}/enable", 1)
+    daq.sync()
+    applied_rate = daq.getDouble(f"/{d}/demods/{cfg.pll_demod_index}/rate")
+    log.info("MFLI %s: oscillator %d locking to Aux In %d via extrefs/%d "
+             "(phase detector demod%d, target %.4f Hz, detector rate "
+             "requested %.4g Sa/s -> device applied %.4g Sa/s)", d, cfg.osc_index,
+             cfg.aux_input_ch + 1, cfg.extref_index, cfg.pll_demod_index, frequency_Hz,
+             _PLL_DETECTOR_RATE_REQUEST_HZ, applied_rate)
+
+def wait_for_reference_lock(daq: "zi.ziDAQServer", cfg: ExtRefConfig,
+                             timeout_s: float,
+                             stop_event: Optional[threading.Event] = None) -> bool:
+    """Never raises; an unreadable/unlocked PLL degrades to False, logged
+    once by the caller. See configure_external_reference()'s docstring."""
+    path = f"/{cfg.device}/extrefs/{cfg.extref_index}/locked"
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < timeout_s:
+        if stop_event is not None and stop_event.is_set():
+            return False
+        try:
+            if daq.getInt(path):
+                return True
+        except Exception:
+            log.warning("Could not read ExtRef lock node %s — check the node "
+                       "name against configure_external_reference()'s "
+                       "listNodesJSON log.", path)
+            return False
+        time.sleep(0.05)
+    return False
+
+def check_reference_locked(daq: "zi.ziDAQServer", cfg: ExtRefConfig) -> Optional[bool]:
+    """Cheap, non-blocking re-check that cfg's ExtRef PLL is still locked,
+    mid-measurement — the ExtRef analogue of instruments/mfli_daq.py's
+    check_mds_status(): never raises, no retry/wait (a transient unlocked
+    read is exactly the signal a caller wants to flag and log per-point,
+    not paper over)."""
+    try:
+        return bool(daq.getInt(f"/{cfg.device}/extrefs/{cfg.extref_index}/locked"))
+    except Exception:
+        log.warning("Could not read ExtRef lock node for %s — reference lock "
+                    "status unknown this point.", cfg.device)
+        return None

@@ -107,7 +107,7 @@ def _pulsed_cfgs():
     pmu = PMUPulseConfig(library="lib", module="m", return_names=())
     demod1 = ps.DemodConfig(device="dev1234", demod_index=0, harmonic=1)
     demod2 = ps.DemodConfig(device="dev1234", demod_index=1, harmonic=2)
-    extref = ps.ExtRefConfig(device="dev1234")
+    extref = ps.ExtRefConfig(device="dev1234", pll_demod_index=2)   # ≠ the 1f/2f demods 0/1
     return pmu, read, demod1, demod2, extref
 
 
