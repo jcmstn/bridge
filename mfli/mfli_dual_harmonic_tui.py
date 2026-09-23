@@ -26,10 +26,12 @@ Requirements:
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import multiprocessing as mp
 import textwrap
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -46,10 +48,12 @@ from textual.widgets import (
     Collapsible,
     Footer,
     Header,
+    Select,
     Static,
 )
 
 from dc.dc_sweep_utils import build_segmented_sweep, parse_sweep_rows, safe_shutdown, try_parse
+import mfli.mfli_dual_harmonic_6221_tui as six
 from mfli.mfli_dual_harmonic import (
     AcquisitionConfig,
     DemodConfig,
@@ -130,23 +134,32 @@ MEASUREMENT_TYPE = "HARM"
 MFLI_DUAL_HARMONIC_DESCRIPTION = (
     "Drives an AC current through the sample and reads the 1st-harmonic response "
     "on the leader while the follower reads the 2nd-harmonic response — the "
-    "standard setup for e.g. a nonlinear/planar Hall measurement. Optionally "
-    "sweeps a Kepco electromagnet's field (bidirectionally, for hysteresis) with "
-    "the field measured live via a Lake Shore 475 Gaussmeter at every point."
+    "standard setup for e.g. a nonlinear/planar Hall measurement. The current "
+    "comes from the leader MFLI's Signal Output through a series resistor, or "
+    "— 'AC current source' toggle — from a Keithley 6221 ideal current source "
+    "whose phase marker both MFLIs lock to (a list of currents and an R_xx mode "
+    "too). Optionally sweeps a Kepco electromagnet's field (bidirectionally, for "
+    "hysteresis) with the field measured live via a Lake Shore 475 Gaussmeter at "
+    "every point."
 )
 
 MFLI_DUAL_HARMONIC_SCHEMATIC = """\
-  LEADER MFLI  (current source, 1f)
-    Signal Output 1 ──[ R_series ]──▶ sample/DUT ── common ground
-    Signal Input 1  (differential)  ──▶ demod 1f   (V_Rseries → I)
+  AC current source = MFLI (type HARM)
+    Leader Signal Output 1 ──[ R_series ]──▶ sample/DUT ── common ground
+    Leader Signal Input 1  (differential)  ──▶ demod 1f   (V_Rseries → I)
 
-  FOLLOWER MFLI  (2f)
-    Signal Input 1  (differential)  ──▶ demod 2f   (across the sample)
+  AC current source = Keithley 6221 (type HARM6)
+    6221 HI/LO ──▶ sample/DUT ── common ground
+    Trigger Link phase marker ──▶ split (BNC T, equal lengths) to Aux In 1
+      on BOTH the leader AND the follower — each locks its oscillator to it
+
+  LEADER MFLI    (1f)  Signal Input 1 (differential) ──▶ demod 1f
+  FOLLOWER MFLI  (2f)  Signal Input 1 (differential) ──▶ demod 2f
+                       (or R_xx's 1f in the 6221 source's R_xx mode)
 
   MDS cabling  (both units)
     Leader Ref Out      ───BNC───▶ Follower Ref In
     Leader Trigger Out 1 ──▶ fanned out to Trigger In 1 on BOTH units
-    (equal cable lengths on the fan-out)
 
   Magnet field sweep  (optional, "Sweep magnetic field" switch)
     Kepco BOP-GL      ──GPIB──▶ electromagnet coil
@@ -372,7 +385,7 @@ def build_header_fields(plan: "MeasurementPlan", ctx: RunContext, records: list[
 # Live validation / derived-value summary
 # ─────────────────────────────────────────────────────────────────────────────
 
-def resolve_state(state: dict) -> dict:
+def _resolve_state_mfli(state: dict) -> dict:
     """Add the derived keys build_summary() / build_plan() read — the parsed
     lists/sweeps, each with its parse error — to a state of raw field values.
     Pure: shared by the TUI's and the web page's parse_state()."""
@@ -380,7 +393,7 @@ def resolve_state(state: dict) -> dict:
     return state
 
 
-def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
+def _build_summary_mfli(state: dict) -> tuple[list[str], list[str], list[str]]:
     """Return (info, warnings, errors) for a fully-parsed state dict."""
     info: list[str] = []
     warnings: list[str] = []
@@ -563,7 +576,7 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     return info, warnings, errors
 
 
-def compute_filename_preview(state: dict) -> Optional[str]:
+def _preview_mfli(state: dict) -> Optional[str]:
     """Raw-file name the run will be saved as, or None until sample+device
     are both set -- drives the identity bar's #filename_preview."""
     if not state.get("sample") or state["sample"] == NEW_SAMPLE_SENTINEL or not state.get("device"):
@@ -701,7 +714,7 @@ def _save_measurement_png(records: list[dict], png_path: Path,
 # Plan + run  ── pure, shared by the TUI RunScreen and web/mfli/dual_harmonic.py
 # ─────────────────────────────────────────────────────────────────────────────
 
-def build_plan(state: dict, data_root: Path) -> MeasurementPlan:
+def _build_plan_mfli(state: dict, data_root: Path) -> MeasurementPlan:
     """One parsed, validated run request from a state dict. Pure — shared by
     the TUI and the web page."""
     out_cfg = OutputConfig(
@@ -957,6 +970,62 @@ def save_run_png(plan: MeasurementPlan, records: list[dict], png_path: Path, com
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# AC-source toggle  ── one program, two excitation-current sources
+# ─────────────────────────────────────────────────────────────────────────────
+# "mfli": the leader's Signal Output through a series resistor — type HARM, the
+# functions above. "6221": a Keithley 6221 current source whose Trigger-Link
+# phase marker both MFLIs ExtRef-lock to — type HARM6, mfli_dual_harmonic_6221_tui.
+# Each source keeps its own type code, columns and header, so a run's files are
+# exactly what that source's program always wrote. The form is the union of the
+# two (44 shared fields; the source-only ones are hidden in the other mode).
+
+AC_SOURCES = [("MFLI Signal Output (+ series resistor)", "mfli"),
+              ("Keithley 6221 (phase marker → ExtRef)", "6221")]
+_MFLI_ONLY_FIELDS = tuple(k for k in DEFAULTS if k not in six.DEFAULTS)
+_6221_ONLY_FIELDS = tuple(k for k in six.DEFAULTS if k not in DEFAULTS)
+DEFAULTS = {**six.DEFAULTS, **DEFAULTS, "ac_source": "mfli"}
+NUMERIC_FIELDS = {**six.NUMERIC_FIELDS, **NUMERIC_FIELDS}
+TEXT_FIELDS = TEXT_FIELDS + [f for f in six.TEXT_FIELDS if f not in TEXT_FIELDS]
+OPTIONAL_NUMERIC_FIELDS = OPTIONAL_NUMERIC_FIELDS + [
+    f for f in six.OPTIONAL_NUMERIC_FIELDS if f not in OPTIONAL_NUMERIC_FIELDS]
+
+
+def _uses_6221(state: dict) -> bool:
+    return state.get("ac_source") == "6221"
+
+
+def mode_errors(state: dict, errors: list[str]) -> list[str]:
+    """Parse errors of the ACTIVE source only — a hidden field of the other
+    source never blocks a run."""
+    hidden = _MFLI_ONLY_FIELDS if _uses_6221(state) else _6221_ONLY_FIELDS
+    return [e for e in errors if not any(e.startswith(f"'{f}'") for f in hidden)]
+
+
+def resolve_state(state: dict) -> dict:
+    return six.resolve_state(state) if _uses_6221(state) else _resolve_state_mfli(state)
+
+
+def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
+    return six.build_summary(state) if _uses_6221(state) else _build_summary_mfli(state)
+
+
+def compute_filename_preview(state: dict) -> Optional[str]:
+    return six.compute_filename_preview(state) if _uses_6221(state) else _preview_mfli(state)
+
+
+def build_plan(state: dict, data_root: Path):
+    """The active source's plan (its own MeasurementPlan type)."""
+    return six.build_plan(state, data_root) if _uses_6221(state) else _build_plan_mfli(state, data_root)
+
+
+def engine(plan):
+    """The module that runs `plan` — its run_plan / header / PNG / type code
+    (both front ends take them from here, never from the toggle)."""
+    return six if isinstance(plan, six.MeasurementPlan) else sys.modules[__name__]
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Run screen  ── executes the plan in a worker thread, shows live progress
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -994,7 +1063,15 @@ class RunScreen(MeasurementRunScreen):
 
 class MFLIDualHarmonicApp(MeasurementApp):
     TITLE = "MFLI Dual-Harmonic Measurement"
-    SUB_TITLE = "1f / 2f lock-in · magnet field sweep"
+    SUB_TITLE = "1f / 2f lock-in · MFLI or Keithley 6221 excitation · magnet field sweep"
+
+    # widgets shown only for one AC source (see compose)
+    SOURCE_WIDGETS = {"mfli": ("mode_mfli_excitation",),
+                      "6221": ("mode_6221_excitation", "mode_6221_quantities", "mode_6221_extref")}
+
+    def __init__(self, ac_source: Optional[str] = None) -> None:
+        super().__init__()
+        self._forced_source = ac_source      # e.g. "6221" from the old 6221 entry point
 
     # Session data root — fallback until _load_settings()/the identity bar's
     # "Data root" field replaces it. Read in compose(), so it must exist here.
@@ -1052,12 +1129,18 @@ class MFLIDualHarmonicApp(MeasurementApp):
                 # ── Tier 1: what defines this run — always visible ──────────
                 with Vertical(classes="param-grid"):
                     yield card(
-                        "Excitation (current source)",
+                        "Excitation",
+                        select_field("ac_source", "AC current source", AC_SOURCES,
+                                     DEFAULTS["ac_source"],
+                                     hint="MFLI → saved as HARM · 6221 → HARM6"),
                         field("frequency_Hz", "Excitation frequency (Hz)",
                               DEFAULTS["frequency_Hz"],
                               hint="Recommended ~300-1000 Hz — avoid exact multiples of 50/60 Hz "
                                    "(mains pickup).",
                               validators=[Number(minimum=1e-3, failure_description="must be > 0")]),
+                    )
+                    yield card(
+                        "MFLI Signal Output",
                         field("amplitude_V", "Output amplitude (V, peak)",
                               DEFAULTS["amplitude_V"],
                               validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
@@ -1065,6 +1148,35 @@ class MFLIDualHarmonicApp(MeasurementApp):
                               DEFAULTS["series_R_ohm"],
                               hint="Sets excitation current: I ≈ V / R.",
                               validators=[Number(minimum=1.0, failure_description="must be > 0")]),
+                        id="mode_mfli_excitation",
+                    )
+                    yield card(
+                        "Keithley 6221 AC current",
+                        field("amplitude_values", "Excitation current (A, peak)",
+                              DEFAULTS["amplitude_values"], kind="text",
+                              hint="Ideal current source — no series resistor. Single value, "
+                                   "or comma-separated list — one complete sweep runs per "
+                                   "value (own 6221 re-arm), each saved to its own file."),
+                        field("ac_compliance_V", "6221 voltage compliance (V)",
+                              DEFAULTS["ac_compliance_V"],
+                              validators=[Number(minimum=0.1, failure_description="must be > 0")]),
+                        id="mode_6221_excitation",
+                    )
+                    yield card(
+                        "Quantities",
+                        switch_field(
+                            "measure_rxx", "R_xx mode — follower reads R_xx's 1f "
+                            "instead of R_xy's 2f",
+                            DEFAULTS["measure_rxx"],
+                        ),
+                        Static(
+                            "Only two physical MFLIs, so this trades 2f for R_xx — "
+                            "move the follower's Signal Input cable by hand to match. "
+                            "The '2f lock-in filter'/'2f input range' fields below "
+                            "configure the follower either way.",
+                            classes="hint",
+                        ),
+                        id="mode_6221_quantities",
                     )
                     yield card(
                         "Magnet & field sweep",
@@ -1181,15 +1293,56 @@ class MFLIDualHarmonicApp(MeasurementApp):
                     with Vertical(classes="stable-grid"):
                         yield card(
                             "Devices & connection",
-                            field("leader_device", "Leader MFLI (current source + 1f)",
+                            field("leader_device", "Leader MFLI (1f; the source in MFLI mode)",
                                   DEFAULTS["leader_device"], kind="text"),
-                            field("follower_device", "Follower MFLI (2f)",
+                            field("follower_device", "Follower MFLI (2f, or R_xx 1f in R_xx mode)",
                                   DEFAULTS["follower_device"], kind="text"),
                             field("daq_host", "LabOne data server host",
                                   DEFAULTS["daq_host"], kind="text"),
                             field("daq_port", "LabOne data server port",
                                   DEFAULTS["daq_port"], kind="integer"),
                             muted=True,
+                        )
+                        yield card(
+                            "6221 & ExtRef (phase marker → both MFLIs' Aux In)",
+                            field("ac_visa_resource", "6221 VISA resource",
+                                  DEFAULTS["ac_visa_resource"], kind="text"),
+                            field("phasemarker_line", "6221 Trigger Link phase-marker pin",
+                                  DEFAULTS["phasemarker_line"], kind="integer",
+                                  hint="Confirm your unit's factory default before assuming.",
+                                  validators=[Number(minimum=1, maximum=6,
+                                                     failure_description="must be 1-6")]),
+                            field("extref_lock_timeout_s", "ExtRef PLL lock timeout (s)",
+                                  DEFAULTS["extref_lock_timeout_s"]),
+                            field("leader_extref_index", "Leader ExtRef module index",
+                                  DEFAULTS["leader_extref_index"], kind="integer"),
+                            field("leader_aux_input_ch", "Leader Aux In channel (0 = Aux In 1)",
+                                  DEFAULTS["leader_aux_input_ch"], kind="integer"),
+                            field("leader_osc_index", "Leader oscillator index",
+                                  DEFAULTS["leader_osc_index"], kind="integer"),
+                            field("leader_pll_demod_index", "Leader PLL phase-detector demod index",
+                                  DEFAULTS["leader_pll_demod_index"], kind="integer",
+                                  hint="Must differ from demod 0 (used for the real 1f signal) — "
+                                       "extrefs/N/adcselect is read-only on real firmware, this "
+                                       "demod's OWN adcselect is what actually selects Aux In.",
+                                  validators=[Number(minimum=0, failure_description="must be ≥ 0")]),
+                            select_field("leader_automode", "Leader PLL bandwidth adaptation",
+                                         six.AUTOMODE_OPTIONS, int(DEFAULTS["leader_automode"]),
+                                         hint=six.AUTOMODE_HINT),
+                            field("follower_extref_index", "Follower ExtRef module index",
+                                  DEFAULTS["follower_extref_index"], kind="integer"),
+                            field("follower_aux_input_ch", "Follower Aux In channel (0 = Aux In 1)",
+                                  DEFAULTS["follower_aux_input_ch"], kind="integer"),
+                            field("follower_osc_index", "Follower oscillator index",
+                                  DEFAULTS["follower_osc_index"], kind="integer"),
+                            field("follower_pll_demod_index", "Follower PLL phase-detector demod index",
+                                  DEFAULTS["follower_pll_demod_index"], kind="integer",
+                                  hint="Must differ from demod 0 (used for the real 2f signal).",
+                                  validators=[Number(minimum=0, failure_description="must be ≥ 0")]),
+                            select_field("follower_automode", "Follower PLL bandwidth adaptation",
+                                         six.AUTOMODE_OPTIONS, int(DEFAULTS["follower_automode"]),
+                                         hint=six.AUTOMODE_HINT),
+                            muted=True, id="mode_6221_extref",
                         )
                         yield card(
                             "Magnet & gaussmeter addresses",
@@ -1294,8 +1447,53 @@ class MFLIDualHarmonicApp(MeasurementApp):
 
     # ── Start ────────────────────────────────────────────────────────────────
 
-    def _build_plan(self, state: dict) -> MeasurementPlan:
+    def _build_plan(self, state: dict):
         return build_plan(state, self.data_root)
+
+    # ── AC-source toggle ─────────────────────────────────────────────────────
+
+    def _read_settings(self) -> dict:
+        """This form's settings, falling back to the former 6221-program form's
+        (key by key) — so neither source's last values are lost by the merge.
+        A file saved before the toggle existed picks the source of whichever
+        of the two forms was used last."""
+        files = [(path, path.stat().st_mtime) for path in (six.SETTINGS_PATH, SETTINGS_PATH)
+                 if path.is_file()]
+        merged: dict = {}
+        for path, _ in files:
+            try:
+                merged.update(json.loads(path.read_text()))
+            except (json.JSONDecodeError, OSError):
+                pass
+        if merged and "ac_source" not in merged:
+            newest = max(files, key=lambda f: f[1])[0]
+            merged["ac_source"] = "6221" if newest == six.SETTINGS_PATH else "mfli"
+        if self._forced_source:
+            merged["ac_source"] = self._forced_source
+        return merged
+
+    def on_mount(self) -> None:
+        super().on_mount()
+        if self._forced_source:
+            self.query_one("#ac_source", Select).value = self._forced_source
+        self._show_source(self.query_one("#ac_source", Select).value)
+
+    def _show_source(self, source) -> None:
+        for mode, widget_ids in self.SOURCE_WIDGETS.items():
+            for widget_id in widget_ids:
+                self.query_one(f"#{widget_id}").display = mode == source
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id == "ac_source":
+            self._show_source(event.value)
+        super().on_select_changed(event)
+
+    def parse_state(self) -> tuple[dict, list[str]]:
+        state, errors = super().parse_state()
+        return state, mode_errors(state, errors)
+
+    def run_screen(self, plan):
+        return engine(plan).RunScreen(plan)
 
 
 def main() -> None:

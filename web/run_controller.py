@@ -490,12 +490,20 @@ class RunController:
 # ─────────────────────────────────────────────────────────────────────────────
 # `program` is the program's TUI module ({suite}/{name}_tui.py), which exports
 # the same pure functions its RunScreen runs: run_plan(), build_header_fields(),
-# save_run_png(), MEASUREMENT_TYPE and (optionally) PNG_SUFFIX.
+# save_run_png(), MEASUREMENT_TYPE and (optionally) PNG_SUFFIX. A program with a
+# mode toggle (e.g. dual-harmonic's AC source) also exports engine(plan): the
+# module that actually runs that plan — the run-level API is taken from there.
+
+def _engine(program: ModuleType, plan) -> ModuleType:
+    engine = getattr(program, "engine", None)
+    return engine(plan) if engine is not None else program
+
 
 def run_png_path(program: ModuleType, plan, ctx: RunContext) -> Path:
     """The per-run PNG path, named exactly as the TUI names it."""
+    eng = _engine(program, plan)
     return proc_path(plan.data_root, ctx.sample, ctx.run_str, ctx.device,
-                     program.MEASUREMENT_TYPE, getattr(program, "PNG_SUFFIX", "plot"))
+                     eng.MEASUREMENT_TYPE, getattr(eng, "PNG_SUFFIX", "plot"))
 
 
 def program_run_fn(program: ModuleType, plan, run_contexts: list, run_extras: list):
@@ -503,11 +511,13 @@ def program_run_fn(program: ModuleType, plan, run_contexts: list, run_extras: li
     gets its PNG the moment it ends (as in the TUI), and its RunContext +
     header extras land in `run_contexts` / `run_extras` for the post-run
     status/comment step."""
+    eng = _engine(program, plan)
+
     def run_fn(stop_event: threading.Event, cb: "RunCallbacks"):
-        return program.run_plan(
+        return eng.run_plan(
             plan, stop_event, on_status=cb.on_status, on_run_label=cb.on_run_label,
             on_point=cb.on_point,
-            on_run_finished=lambda ctx, records: program.save_run_png(
+            on_run_finished=lambda ctx, records: eng.save_run_png(
                 plan, records, run_png_path(program, plan, ctx)),
             run_contexts=run_contexts, run_extras=run_extras)
     return run_fn
@@ -528,17 +538,18 @@ async def prompt_last_run(client, program: ModuleType, plan, run_contexts: list,
     if result is None:
         return
     status, comment = result
+    eng = _engine(program, plan)
     try:
         done = finish_last_run(
             plan.data_root, run_contexts, run_extras, records, status, comment,
-            lambda ctx, recs, **kw: program.build_header_fields(plan, ctx, recs, **kw))
+            lambda ctx, recs, **kw: eng.build_header_fields(plan, ctx, recs, **kw))
     except Exception:
         log.exception("Could not save the final status/comment")
         ui.notify("Could not save final status/comment.", type="negative")
         return
     if done is not None and comment:
         try:
-            program.save_run_png(plan, done[1], run_png_path(program, plan, done[0]), comment=comment)
+            eng.save_run_png(plan, done[1], run_png_path(program, plan, done[0]), comment=comment)
         except Exception:
             log.exception("Could not re-save the run's PNG with the comment")
 
@@ -627,7 +638,10 @@ def form_state(program: ModuleType, identity, *, inputs: dict, switches: dict,
     for fid, switch in switches.items():
         state[fid] = switch.value
     for fid, select in (selects or {}).items():
-        state[fid] = int(select.value)
+        try:
+            state[fid] = int(select.value)        # filter orders, automodes …
+        except (TypeError, ValueError):
+            state[fid] = select.value            # a mode choice, e.g. "mfli" / "6221"
     sample_value = identity.sample_dropdown.value
     state["sample"] = sample_value if sample_value not in (None, NEW_SAMPLE_SENTINEL) else ""
     if "sweep_rows" in widgets:

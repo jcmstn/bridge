@@ -24,14 +24,12 @@ def test_follower_naming_rxx_mode_is_rxx_1f():
 
 def test_build_plan_rxx_mode_sets_demod2_harmonic_to_1(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(tui, "_DEFAULT_DATA_DIR", tmp_path)
-    app = tui.MFLIDualHarmonic6221App()
-    app.data_root = tmp_path
 
-    plan_off = app._build_plan(_state())
+    plan_off = tui.build_plan(_state(), tmp_path)
     assert plan_off.demod2_cfg.harmonic == 2
     assert plan_off.measure_rxx is False
 
-    plan_on = app._build_plan(_state(measure_rxx=True))
+    plan_on = tui.build_plan(_state(measure_rxx=True), tmp_path)
     assert plan_on.demod2_cfg.harmonic == 1
     assert plan_on.measure_rxx is True
     # Leader (R_xy 1f) is unaffected either way.
@@ -81,10 +79,8 @@ def test_build_plan_does_not_allocate_a_run_upfront(tmp_path, monkeypatch) -> No
     # just from opening the run screen.
     monkeypatch.setattr(tui, "_DEFAULT_DATA_DIR", tmp_path)
     ensure_sample(tmp_path, "A", create=True)
-    app = tui.MFLIDualHarmonic6221App()
-    app.data_root = tmp_path
 
-    plan1 = app._build_plan(_state(time_constant_1f_s=0.1, time_constant_2f_s=0.5))
+    plan1 = tui.build_plan(_state(time_constant_1f_s=0.1, time_constant_2f_s=0.5), tmp_path)
     assert plan1.acq_cfg.output_file == ""
     assert plan1.ac_cfg.amplitude_A == 1e-7
     assert plan1.amplitudes_A == [1e-7]
@@ -101,11 +97,9 @@ def test_build_plan_does_not_allocate_a_run_upfront(tmp_path, monkeypatch) -> No
 def test_build_plan_multiple_amplitudes(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(tui, "_DEFAULT_DATA_DIR", tmp_path)
     ensure_sample(tmp_path, "A", create=True)
-    app = tui.MFLIDualHarmonic6221App()
-    app.data_root = tmp_path
 
-    plan = app._build_plan(_state(amplitude_values="1e-7, 2e-7",
-                                    amplitude_list=[1e-7, 2e-7]))
+    plan = tui.build_plan(_state(amplitude_values="1e-7, 2e-7",
+                                    amplitude_list=[1e-7, 2e-7]), tmp_path)
     assert plan.amplitudes_A == [1e-7, 2e-7]
     assert plan.ac_cfg.amplitude_A == 1e-7  # first value, mutated per iteration by do_run()
     assert plan.total_files == 2
@@ -135,13 +129,11 @@ def test_build_summary_flags_pll_demod_collision_with_signal_demod(tmp_path) -> 
 def test_build_plan_multi_row_sweep(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(tui, "_DEFAULT_DATA_DIR", tmp_path)
     ensure_sample(tmp_path, "A", create=True)
-    app = tui.MFLIDualHarmonic6221App()
-    app.data_root = tmp_path
 
-    plan = app._build_plan(_state(
+    plan = tui.build_plan(_state(
         enable_sweep=True,
         sweep_rows_parsed=[(-1.0, 1.0, 10), (1.0, 10.0, 10)],
-    ))
+    ), tmp_path)
     assert len(plan.currents_A) == 37
     assert plan.header_extra["field_sweep_rows_A"] == [(-1.0, 1.0, 10), (1.0, 10.0, 10)]
 
@@ -187,10 +179,8 @@ def test_each_run_of_a_multi_current_series_gets_its_own_plot_png(tmp_path, monk
 
     monkeypatch.setattr(tui, "_DEFAULT_DATA_DIR", tmp_path)
     ensure_sample(tmp_path, "A", create=True)
-    app = tui.MFLIDualHarmonic6221App()
-    app.data_root = tmp_path
     amps = [1e-7, 2e-7, 3e-7]
-    plan = app._build_plan(_state(amplitude_values="1e-7, 2e-7, 3e-7", amplitude_list=amps))
+    plan = tui.build_plan(_state(amplitude_values="1e-7, 2e-7, 3e-7", amplitude_list=amps), tmp_path)
 
     screen = tui.RunScreen.__new__(tui.RunScreen)     # bare: no __init__/mount needed
     screen.plan, screen._png_path = plan, None

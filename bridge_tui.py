@@ -39,8 +39,6 @@ from dc.dc_spin_valve_tui import DC_SPIN_VALVE_DESCRIPTION, DC_SPIN_VALVE_SCHEMA
 from instruments import run_index
 from mfli.mfli_diff_resistance_tui import (
     MFLI_DIFF_RESISTANCE_DESCRIPTION, MFLI_DIFF_RESISTANCE_SCHEMATIC, MFLIDiffResistanceApp)
-from mfli.mfli_dual_harmonic_6221_tui import (
-    MFLI_DUAL_HARMONIC_6221_DESCRIPTION, MFLI_DUAL_HARMONIC_6221_SCHEMATIC, MFLIDualHarmonic6221App)
 from mfli.mfli_dual_harmonic_tui import (
     MFLI_DUAL_HARMONIC_DESCRIPTION, MFLI_DUAL_HARMONIC_SCHEMATIC, MFLIDualHarmonicApp)
 from mfli.mfli_noise_spectrum_tui import (
@@ -78,11 +76,8 @@ PROGRAMS: dict[str, list[Program]] = {
                 DC_SPIN_VALVE_DESCRIPTION, DC_SPIN_VALVE_SCHEMATIC, DCSpinValveApp),
     ],
     "MFLI Suite": [
-        Program("dual", "Dual-Harmonic Measurement (1f / 2f)",
+        Program("dual", "Dual-Harmonic Measurement (1f / 2f; MFLI or 6221 source)",
                 MFLI_DUAL_HARMONIC_DESCRIPTION, MFLI_DUAL_HARMONIC_SCHEMATIC, MFLIDualHarmonicApp),
-        Program("dual_6221", "Dual-Harmonic Measurement, 6221 AC source (1f / 2f)",
-                MFLI_DUAL_HARMONIC_6221_DESCRIPTION, MFLI_DUAL_HARMONIC_6221_SCHEMATIC,
-                MFLIDualHarmonic6221App),
         Program("diff", "Differential Resistance vs. Bias (dV/dI)",
                 MFLI_DIFF_RESISTANCE_DESCRIPTION, MFLI_DIFF_RESISTANCE_SCHEMATIC, MFLIDiffResistanceApp),
         Program("phase_cal", "Phase Calibration (1f Y-null + 2f channel ID)",

@@ -28,7 +28,7 @@ MULTI_RUN = [
     ("dc.dc_iv_curve_tui", "DCIVCurveApp", {"enable_gate": True, "gate_voltage_values": "0, 1"}),
     ("dc.dc_gate_sweep_tui", "DCGateSweepApp", {"sense_current_values": "1e-6, 2e-6"}),
     ("dc.dc_spin_valve_tui", "DCSpinValveApp", {"sense_current_values": "0.001, 0.002"}),
-    ("mfli.mfli_dual_harmonic_6221_tui", "MFLIDualHarmonic6221App", {"amplitude_values": "1e-6, 2e-6"}),
+    ("mfli.mfli_dual_harmonic_tui", "MFLIDualHarmonicApp", {"ac_source": "6221", "amplitude_values": "1e-6, 2e-6"}),
 ]
 # single-run programs: the run is allocated at Start (build_plan) as plan.run_ctx
 SINGLE_RUN = [
@@ -106,13 +106,14 @@ def _default_state(mod, app_name, overrides, tmp_path, monkeypatch) -> dict:
     return asyncio.run(go())
 
 
-@pytest.mark.parametrize("module,app_name,overrides,n", PROGRAMS, ids=[p[1] for p in PROGRAMS])
+@pytest.mark.parametrize("module,app_name,overrides,n", PROGRAMS, ids=[f"{p[1]}-{p[2].get('ac_source', '')}".rstrip('-') for p in PROGRAMS])
 def test_run_plan_records_one_finalized_run_per_series_value(module, app_name, overrides, n,
                                                               tmp_path, monkeypatch):
     mod = importlib.import_module(module)
     ensure_sample(tmp_path, "_test", create=True)
     state = _default_state(mod, app_name, overrides, tmp_path, monkeypatch)
     plan = mod.build_plan(state, tmp_path)
+    mod = getattr(mod, "engine", lambda _plan: mod)(plan)     # a merged program runs the plan's engine
     shut = _stub_hardware(mod, monkeypatch)
     _fake_acquisition(mod, monkeypatch)
 
@@ -132,13 +133,14 @@ def test_run_plan_records_one_finalized_run_per_series_value(module, app_name, o
     assert shut, "instruments were not shut down"
 
 
-@pytest.mark.parametrize("module,app_name,overrides,n", PROGRAMS, ids=[p[1] for p in PROGRAMS])
+@pytest.mark.parametrize("module,app_name,overrides,n", PROGRAMS, ids=[f"{p[1]}-{p[2].get('ac_source', '')}".rstrip('-') for p in PROGRAMS])
 def test_run_plan_finalizes_a_failed_run_as_error_and_still_shuts_down(module, app_name, overrides, n,
                                                                        tmp_path, monkeypatch):
     mod = importlib.import_module(module)
     ensure_sample(tmp_path, "_test", create=True)
     state = _default_state(mod, app_name, overrides, tmp_path, monkeypatch)
     plan = mod.build_plan(state, tmp_path)
+    mod = getattr(mod, "engine", lambda _plan: mod)(plan)
     shut = _stub_hardware(mod, monkeypatch)
 
     def boom(*args, **kwargs):

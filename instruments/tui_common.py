@@ -140,7 +140,7 @@ def sweep_rows_field(field_id: str, default: str) -> list:
     return [label, area, hint]
 
 
-def card(title: str, *groups, muted: bool = False) -> Vertical:
+def card(title: str, *groups, muted: bool = False, id: Optional[str] = None) -> Vertical:
     """A bordered grid cell: a title plus its fields (each a flat list from
     field(), or a single widget like switch_field()'s Horizontal -- see
     field() for why fields must stay flat here). `muted` = stable/rarely
@@ -148,7 +148,7 @@ def card(title: str, *groups, muted: bool = False) -> Vertical:
     children: list = [Static(title, classes="card-title")]
     for group in groups:
         children.extend(group) if isinstance(group, list) else children.append(group)
-    return Vertical(*children, classes="stable-card" if muted else "param-card")
+    return Vertical(*children, classes="stable-card" if muted else "param-card", id=id)
 
 
 def identity_bar(defaults: dict, data_dir: Path, data_root: Path, *,
@@ -674,10 +674,16 @@ class MeasurementApp(App):
             raw["sample"] = sample_value
         return raw
 
-    def _load_settings(self) -> None:
+    def _read_settings(self) -> dict:
+        """The saved form ({} if none). Override to merge in older files."""
         try:
-            saved = json.loads(self.program.SETTINGS_PATH.read_text())
+            return json.loads(self.program.SETTINGS_PATH.read_text())
         except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return {}
+
+    def _load_settings(self) -> None:
+        saved = self._read_settings()
+        if not saved:
             return
         for fid in self._all_field_ids():
             if fid in saved:
@@ -758,4 +764,8 @@ class MeasurementApp(App):
         self.data_root = Path(state["data_dir"]).expanduser()
         ensure_sample(self.data_root, state["sample"], create=True)
         self._save_settings(self.collect_raw())
-        self.push_screen(self.program.RunScreen(self._build_plan(state)))
+        self.push_screen(self.run_screen(self._build_plan(state)))
+
+    def run_screen(self, plan):
+        """The RunScreen for `plan` — the program module's, by default."""
+        return self.program.RunScreen(plan)

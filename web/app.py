@@ -39,7 +39,7 @@ import os
 from nicegui import app, ui
 
 from web.dc import hall, iv_curve, gate_sweep, spin_valve
-from web.mfli import dual_harmonic, dual_harmonic_6221, diff_resistance, phase_calibration
+from web.mfli import dual_harmonic, diff_resistance, phase_calibration
 from web.sot import nonlocal_switching
 from instruments import run_index
 from web.run_controller import busy_banner
@@ -106,13 +106,14 @@ def _dc_spin_valve_page() -> None:
 
 
 @ui.page("/mfli/dual-harmonic")
-def _mfli_dual_harmonic_page() -> None:
-    dual_harmonic.page()
+def _mfli_dual_harmonic_page(source: str = "") -> None:
+    dual_harmonic.page(source)
 
 
 @ui.page("/mfli/dual-harmonic-6221")
 def _mfli_dual_harmonic_6221_page() -> None:
-    dual_harmonic_6221.page()
+    # the 6221 source is a mode of the dual-harmonic page now (old bookmarks)
+    ui.navigate.to("/mfli/dual-harmonic?source=6221")
 
 
 @ui.page("/mfli/diff-resistance")
@@ -191,10 +192,8 @@ def landing() -> None:
             _card("DC Spin-Valve / Field Sweep", spin_valve.DC_SPIN_VALVE_DESCRIPTION, "/dc/spin-valve")
         with ui.column().classes("flex-1 gap-3"):
             ui.label("MFLI Suite").classes("text-xl font-bold")
-            _card("MFLI Dual-Harmonic Measurement",
+            _card("MFLI Dual-Harmonic Measurement (MFLI or 6221 source)",
                   dual_harmonic.MFLI_DUAL_HARMONIC_DESCRIPTION, "/mfli/dual-harmonic")
-            _card("MFLI Dual-Harmonic Measurement (6221 AC source)",
-                  dual_harmonic_6221.MFLI_DUAL_HARMONIC_6221_DESCRIPTION, "/mfli/dual-harmonic-6221")
             _card("MFLI Differential Resistance vs. Bias",
                   diff_resistance.MFLI_DIFF_RESISTANCE_DESCRIPTION, "/mfli/diff-resistance")
             _card("MFLI Phase Calibration",

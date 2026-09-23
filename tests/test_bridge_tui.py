@@ -19,7 +19,6 @@ _ALL_APPS = {
     ("dc.dc_gate_sweep_tui", "DCGateSweepApp"),
     ("dc.dc_spin_valve_tui", "DCSpinValveApp"),
     ("mfli.mfli_dual_harmonic_tui", "MFLIDualHarmonicApp"),
-    ("mfli.mfli_dual_harmonic_6221_tui", "MFLIDualHarmonic6221App"),
     ("mfli.mfli_diff_resistance_tui", "MFLIDiffResistanceApp"),
     ("mfli.mfli_phase_calibration_tui", "MFLIPhaseCalibrationApp"),
     ("mfli.mfli_noise_spectrum_tui", "MFLINoiseSpectrumApp"),

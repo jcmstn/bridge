@@ -1,47 +1,47 @@
 #!/usr/bin/env python3
 """
-NiceGUI page for mfli_dual_harmonic.py
-===========================================
+NiceGUI page for the dual-harmonic program (MFLI or Keithley 6221 AC source)
+===========================================================================
 Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
-Created: 2026-08-07
+Created: 2026-08-07 (6221 source merged in as a toggle 2026-09-23)
 
-Web equivalent of mfli_dual_harmonic_tui.py. Reuses that TUI module's pure
-DEFAULTS/NUMERIC_FIELDS/TEXT_FIELDS/OPTIONAL_NUMERIC_FIELDS/build_summary()/
-parse_sensor_uids() so validation stays identical to the TUI.
-
-Supports optional pre-run phase calibration (auto_null_phase) and
-sample-geometry metadata, both flowing straight through
-run_measurement()'s existing on_point/stop_event hooks.
+Web equivalent of mfli_dual_harmonic_tui.py: the same form, summary, plan and
+run (that module's pure DEFAULTS/*_FIELDS/resolve_state/build_summary/
+build_plan, and the plan's engine's run_plan). "AC current source" picks the
+leader MFLI's Signal Output (type HARM) or a Keithley 6221 (type HARM6); the
+other source's cards are hidden. /mfli/dual-harmonic-6221 opens this page with
+the 6221 selected.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from typing import Optional
 
+import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from nicegui import ui
 
 import mfli.mfli_dual_harmonic_tui as program
+from mfli.mfli_dual_harmonic_6221_tui import follower_naming
 from mfli.mfli_dual_harmonic_tui import (
-    build_plan,
-    MFLI_DUAL_HARMONIC_DESCRIPTION,
-    DEFAULTS, build_summary,
-    compute_filename_preview,
+    AC_SOURCES, DEFAULTS, MFLI_DUAL_HARMONIC_DESCRIPTION, build_plan, build_summary,
+    compute_filename_preview, mode_errors,
 )
 from instruments.data_naming import (
-    TEST_SAMPLE,
+    TEST_SAMPLE, RunContext,
 )
-from web import run_manager
 from web.run_controller import (
     RunController, num_field, text_field, textarea_field, bool_switch,
     optional_num_field, render_summary, busy_banner, is_busy,
     param_card, param_grid, stable_card, stable_grid, advanced_section, measurement_layout,
     program_artifacts, program_run_fn, refresh_on_busy_change,
-    finished_handler, load_settings, save_settings,
+    finished_handler, save_settings,
     form_state,
 )
+from web import run_manager
 from web.directory_picker import validate_directory
 from web.field_diagram import build_field_diagram_figure
 from web.identity_bar import identity_bar
@@ -51,20 +51,49 @@ log = logging.getLogger("web.mfli.dual_harmonic")
 
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data"
 _SETTINGS_PATH = _DATA_DIR / "web_settings" / "mfli_dual_harmonic_web_settings.json"
+# the former separate 6221-source page's settings — read as key-by-key fallbacks
+_LEGACY_6221_SETTINGS_PATH = _DATA_DIR / "web_settings" / "mfli_dual_harmonic_6221_web_settings.json"
 
 PAGE_TITLE = "MFLI Dual-Harmonic Measurement"
 SUITE = "MFLI"
 
 
-def page() -> None:
+def _load_page_settings(source: str) -> dict:
+    """This page's saved form, falling back key by key to the former 6221 page's.
+    A save from before the toggle existed picks the source of whichever page was
+    used last; `source` ("mfli"/"6221", from the URL) wins over both."""
+    files = [(path, path.stat().st_mtime) for path in (_LEGACY_6221_SETTINGS_PATH, _SETTINGS_PATH)
+             if path.is_file()]
+    merged: dict = {}
+    for path, _ in files:
+        try:
+            merged.update(json.loads(path.read_text()))
+        except (json.JSONDecodeError, OSError):
+            pass
+    if merged and "ac_source" not in merged:
+        newest = max(files, key=lambda f: f[1])[0]
+        merged["ac_source"] = "6221" if newest == _LEGACY_6221_SETTINGS_PATH else "mfli"
+    if source in dict((v, k) for k, v in AC_SOURCES):
+        merged["ac_source"] = source
+    return merged
+
+
+# extrefs/N/automode options — see ExtRefConfig.automode's docstring in
+# mfli_dual_harmonic_6221.py for the full rationale.
+AUTOMODE_OPTIONS = {2: "2 — low bandwidth", 3: "3 — high bandwidth", 4: "4 — dynamic (auto)"}
+AUTOMODE_HINT = ("2=most forgiving acquisition (marginal/noisy signal), "
+                 "3=fastest tracking once locked, 4=auto-adapts (default).")
+
+
+def page(source: str = "") -> None:
     ui.page_title(PAGE_TITLE)
-    page_client = ui.context.client  # has slot context now; reused by the detached status/comment task
+    page_client = ui.context.client
     busy_banner()
     ui.link("← Back to measurement suite", "/").classes("text-sm")
     ui.label(PAGE_TITLE).classes("text-2xl font-bold mt-1")
     ui.label(MFLI_DUAL_HARMONIC_DESCRIPTION).classes("text-sm text-grey-7 mb-3")
 
-    saved = load_settings(_SETTINGS_PATH)
+    saved = _load_page_settings(source)
 
     def d(key: str):
         if key in saved:
@@ -91,13 +120,48 @@ def page() -> None:
         with regions.params:
             # ── Tier 1: what defines this run — always visible ───────────────
             with param_grid():
-                with param_card("Excitation (current source)"):
+                with param_card("Excitation"):
+                    ac_select = ui.select(
+                        dict((v, k) for k, v in AC_SOURCES), value=d("ac_source"),
+                        label="AC current source").classes("w-full")
+                    ui.label("MFLI → saved as HARM · 6221 → saved as HARM6").classes(
+                        "text-xs text-grey-6 -mt-2 mb-2")
                     inputs["frequency_Hz"] = num_field(
                         "Excitation frequency (Hz)", float(d("frequency_Hz")),
                         hint="Avoid exact multiples of 50/60 Hz (mains pickup).")
-                    inputs["amplitude_V"] = num_field("Output amplitude (V, peak)", float(d("amplitude_V")))
+
+                def only_for(card, source: str) -> None:
+                    card.bind_visibility_from(ac_select, "value", backward=lambda v: v == source)
+
+                with param_card("MFLI Signal Output") as mfli_card:
+                    inputs["amplitude_V"] = num_field(
+                        "Output amplitude (V, peak)", float(d("amplitude_V")))
                     inputs["series_R_ohm"] = num_field(
-                        "Series resistor (Ω)", float(d("series_R_ohm")), hint="Sets excitation current: I ≈ V / R.")
+                        "Series resistor (Ω)", float(d("series_R_ohm")),
+                        hint="Sets excitation current: I ≈ V / R.")
+                only_for(mfli_card, "mfli")
+
+                with param_card("Keithley 6221 AC current") as ac6221_card:
+                    inputs["amplitude_values"] = text_field(
+                        "Excitation current (A, peak)", d("amplitude_values"),
+                        hint="Ideal current source — no series resistor. Single value, or "
+                             "comma-separated list — one complete sweep runs per value "
+                             "(own 6221 re-arm), each saved to its own file.")
+                    inputs["ac_compliance_V"] = num_field(
+                        "6221 voltage compliance (V)", float(d("ac_compliance_V")))
+                only_for(ac6221_card, "6221")
+
+                with param_card("Quantities") as quantities_card:
+                    switches["measure_rxx"] = bool_switch(
+                        "R_xx mode — follower reads R_xx's 1f instead of R_xy's 2f",
+                        d("measure_rxx"))
+                    ui.label(
+                        "Only two physical MFLIs, so this trades 2f for R_xx — move the "
+                        "follower's Signal Input cable by hand to match. The '2f lock-in "
+                        "filter'/'2f input range' fields below configure the follower "
+                        "either way."
+                    ).classes("text-xs text-grey-6")
+                only_for(quantities_card, "6221")
 
                 with param_card("Magnet & field sweep"):
                     switches["enable_sweep"] = bool_switch("Sweep magnetic field (Kepco magnet)", d("enable_sweep"))
@@ -181,10 +245,51 @@ def page() -> None:
             with advanced_section("Instrument configuration & addresses", icon="settings"):
                 with stable_grid():
                     with stable_card("Devices & connection"):
-                        inputs["leader_device"] = text_field("Leader MFLI (current source + 1f)", d("leader_device"))
-                        inputs["follower_device"] = text_field("Follower MFLI (2f)", d("follower_device"))
+                        inputs["leader_device"] = text_field(
+                            "Leader MFLI (1f; the source in MFLI mode)", d("leader_device"))
+                        inputs["follower_device"] = text_field(
+                            "Follower MFLI (2f, or R_xx 1f in R_xx mode)", d("follower_device"))
                         inputs["daq_host"] = text_field("LabOne data server host", d("daq_host"))
                         inputs["daq_port"] = num_field("LabOne data server port", float(d("daq_port")), integer=True)
+
+                    with stable_card("6221 & ExtRef (phase marker → both MFLIs' Aux In)") as extref_card:
+                        inputs["ac_visa_resource"] = text_field("6221 VISA resource", d("ac_visa_resource"))
+                        inputs["phasemarker_line"] = num_field(
+                            "6221 Trigger Link phase-marker pin", float(d("phasemarker_line")), integer=True,
+                            hint="Confirm your unit's factory default before assuming.")
+                        inputs["extref_lock_timeout_s"] = num_field(
+                            "ExtRef PLL lock timeout (s)", float(d("extref_lock_timeout_s")))
+                        inputs["leader_extref_index"] = num_field(
+                            "Leader ExtRef module index", float(d("leader_extref_index")), integer=True)
+                        inputs["leader_aux_input_ch"] = num_field(
+                            "Leader Aux In channel (0 = Aux In 1)", float(d("leader_aux_input_ch")), integer=True)
+                        inputs["leader_osc_index"] = num_field(
+                            "Leader oscillator index", float(d("leader_osc_index")), integer=True)
+                        inputs["leader_pll_demod_index"] = num_field(
+                            "Leader PLL phase-detector demod index", float(d("leader_pll_demod_index")),
+                            integer=True,
+                            hint="Must differ from demod 0 (used for the real 1f signal) — "
+                                 "extrefs/N/adcselect is read-only on real firmware, this demod's "
+                                 "OWN adcselect is what actually selects Aux In.")
+                        leader_automode_select = ui.select(
+                            AUTOMODE_OPTIONS, value=int(d("leader_automode")),
+                            label="Leader PLL bandwidth adaptation").classes("w-full")
+                        ui.label(AUTOMODE_HINT).classes("text-xs text-grey-6 -mt-2 mb-2")
+                        inputs["follower_extref_index"] = num_field(
+                            "Follower ExtRef module index", float(d("follower_extref_index")), integer=True)
+                        inputs["follower_aux_input_ch"] = num_field(
+                            "Follower Aux In channel (0 = Aux In 1)", float(d("follower_aux_input_ch")), integer=True)
+                        inputs["follower_osc_index"] = num_field(
+                            "Follower oscillator index", float(d("follower_osc_index")), integer=True)
+                        inputs["follower_pll_demod_index"] = num_field(
+                            "Follower PLL phase-detector demod index", float(d("follower_pll_demod_index")),
+                            integer=True,
+                            hint="Must differ from demod 0 (used for the real follower signal).")
+                        follower_automode_select = ui.select(
+                            AUTOMODE_OPTIONS, value=int(d("follower_automode")),
+                            label="Follower PLL bandwidth adaptation").classes("w-full")
+                        ui.label(AUTOMODE_HINT).classes("text-xs text-grey-6 -mt-2 mb-2")
+                    only_for(extref_card, "6221")
 
                     with stable_card("Magnet & gaussmeter addresses"):
                         inputs["visa_resource"] = text_field("Magnet VISA resource", d("visa_resource"))
@@ -235,9 +340,7 @@ def page() -> None:
             fig.update_yaxes(title_text="1f  R (V)", row=1, col=1)
             fig.update_yaxes(title_text="2f  R (V)", row=2, col=1)
             fig.update_xaxes(title_text="Magnetic field (mT)", row=2, col=1)
-            fig.update_layout(margin=dict(l=60, r=20, t=20, b=50), showlegend=False)
-            fig.add_scatter(x=[], y=[], mode="lines+markers", name="1f R", line=dict(color="#1f77b4"), row=1, col=1)
-            fig.add_scatter(x=[], y=[], mode="lines+markers", name="2f R", line=dict(color="#ff7f0e"), row=2, col=1)
+            fig.update_layout(margin=dict(l=60, r=20, t=20, b=50), showlegend=True)
             with ui.element("div").classes("w-full").style("aspect-ratio: 1 / 2; max-height: 90vh"):
                 plot = ui.plotly(fig).classes("w-full h-full")
 
@@ -256,9 +359,13 @@ def page() -> None:
             log_area = ui.log(max_lines=2000).classes("w-full h-48 font-mono text-xs")
 
     def parse_state() -> tuple[dict, list[str]]:
-        return form_state(program, identity, inputs=inputs, switches=switches,
-                          selects={"order_1f": order_select_1f, "order_2f": order_select_2f},
-                          optional_inputs=optional_inputs)
+        state, errors = form_state(
+            program, identity, inputs=inputs, switches=switches, optional_inputs=optional_inputs,
+            selects={"ac_source": ac_select,
+                     "order_1f": order_select_1f, "order_2f": order_select_2f,
+                     "leader_automode": leader_automode_select,
+                     "follower_automode": follower_automode_select})
+        return state, mode_errors(state, errors)     # a hidden source's field never blocks
 
     def collect_raw() -> dict:
         raw = {fid: inp.value for fid, inp in inputs.items()}
@@ -266,8 +373,11 @@ def page() -> None:
             raw[fid] = inp.value if inp.value is not None else ""
         for fid, sw in switches.items():
             raw[fid] = sw.value
+        raw["ac_source"] = ac_select.value
         raw["order_1f"] = order_select_1f.value
         raw["order_2f"] = order_select_2f.value
+        raw["leader_automode"] = leader_automode_select.value
+        raw["follower_automode"] = follower_automode_select.value
         raw["data_dir"] = identity.data_dir_input.value
         raw["device"] = identity.device_input.value
         raw["cooldown"] = identity.cooldown_input.value
@@ -309,32 +419,76 @@ def page() -> None:
         inp.on_value_change(refresh_summary.refresh)
     for sw in switches.values():
         sw.on_value_change(refresh_summary.refresh)
+    ac_select.on_value_change(refresh_summary.refresh)
     order_select_1f.on_value_change(refresh_summary.refresh)
     order_select_2f.on_value_change(refresh_summary.refresh)
+    leader_automode_select.on_value_change(refresh_summary.refresh)
+    follower_automode_select.on_value_change(refresh_summary.refresh)
     refresh_summary()
     refresh_on_busy_change(refresh_summary.refresh)
 
     # ── Run wiring ───────────────────────────────────────────────────────
 
+    series_state: dict = {}
+
+    def init_series(n_series: int, labels: list[Optional[str]], measure_rxx: bool = False) -> None:
+        follower_prefix, follower_display = follower_naming(measure_rxx)
+        series_state["follower_prefix"] = follower_prefix
+        fig.data = []
+        fig.update_yaxes(title_text=f"{follower_display}  R (V)", row=2, col=1)
+        table.columns = [
+            {"name": "n", "label": "#", "field": "n"},
+            {"name": "I", "label": "I (A)", "field": "I"},
+            {"name": "B", "label": "B (mT)", "field": "B"},
+            {"name": "R1", "label": "1f R (V)", "field": "R1"},
+            {"name": "th1", "label": "1f θ (°)", "field": "th1"},
+            {"name": "R2", "label": f"{follower_display} R (V)", "field": "R2"},
+            {"name": "th2", "label": f"{follower_display} θ (°)", "field": "th2"},
+            {"name": "T1", "label": "T1 (K)", "field": "T1"},
+            {"name": "T2", "label": "T2 (K)", "field": "T2"},
+        ]
+        series_state["traces"] = {}
+        cmap = ["#2E3192", "#e34948", "#2ca02c", "#9467bd", "#8c564b", "#17becf", "#ff7f0e", "#7f7f7f"]
+        for i in range(n_series):
+            # One current: 1f and the follower keep their own colors, as in a
+            # manual run. Several: color by current, dotted follower.
+            c1, c2 = (cmap[i % len(cmap)],) * 2 if n_series > 1 else ("#1f77b4", "#ff7f0e")
+            name = labels[i]
+            fig.add_trace(go.Scatter(x=[], y=[], mode="lines+markers",
+                                      name=f"1f {name}" if name else "1f R",
+                                      line=dict(color=c1), legendgroup=f"s{i}"), row=1, col=1)
+            fig.add_trace(go.Scatter(x=[], y=[], mode="lines+markers",
+                                      name=f"{follower_display} {name}" if name else f"{follower_display} R",
+                                      line=dict(color=c2, dash="dot" if n_series > 1 else "solid"),
+                                      legendgroup=f"s{i}"),
+                          row=2, col=1)
+            series_state["traces"][i] = (2 * i, 2 * i + 1)
+
     def on_record(record: dict) -> None:
+        idx = record.get("series_index", 0)
+        fp = series_state.get("follower_prefix", "2f")
+        t1, t2 = series_state["traces"][idx]
         has_field = record.get("magnet_field_mT") is not None
         x = record["magnet_field_mT"] if has_field else record["point_index"]
-        fig.data[0].x = fig.data[0].x + (x,)
-        fig.data[0].y = fig.data[0].y + (record["1f_R_V"],)
-        fig.data[1].x = fig.data[1].x + (x,)
-        fig.data[1].y = fig.data[1].y + (record["2f_R_V"],)
+        fig.data[t1].x = fig.data[t1].x + (x,)
+        fig.data[t1].y = fig.data[t1].y + (record["1f_R_V"],)
+        fig.data[t2].x = fig.data[t2].x + (x,)
+        fig.data[t2].y = fig.data[t2].y + (record[f"{fp}_R_V"],)
         table.rows.append({
             "n": record["point_index"] + 1,
             "I": f"{record['magnet_current_A']:.4f}" if record.get("magnet_current_A") is not None else "—",
             "B": f"{record['magnet_field_mT']:.2f}" if record.get("magnet_field_mT") is not None else "—",
             "R1": f"{record['1f_R_V']:.4e}", "th1": f"{record['1f_theta_deg']:.2f}",
-            "R2": f"{record['2f_R_V']:.4e}", "th2": f"{record['2f_theta_deg']:.2f}",
+            "R2": f"{record[f'{fp}_R_V']:.4e}", "th2": f"{record[f'{fp}_theta_deg']:.2f}",
             "T1": f"{record['temperature_1_K']:.3f}" if record.get("temperature_1_K") is not None else "—",
             "T2": f"{record['temperature_2_K']:.3f}" if record.get("temperature_2_K") is not None else "—",
         })
 
     def on_status(text: str) -> None:
         status_label.set_text(text)
+
+    def on_run_label(text: str) -> None:
+        run_label.set_text(text)
 
     def on_log(text: str, level: int) -> None:
         log_area.push(text)
@@ -358,35 +512,37 @@ def page() -> None:
 
         save_settings(_SETTINGS_PATH, collect_raw())
 
-        # build_plan() allocates the run number -- check the global lock
-        # first, or a busy lock would leave an in_progress index row that is
-        # never finalized. (Same event-loop tick as try_start() below, so no
-        # other page can take the lock in between.)
+        # The MFLI source's build_plan() allocates its run number -- check the
+        # global lock first, or a busy lock would leave an in_progress index
+        # row that is never finalized. (Same event-loop tick as try_start().)
         if run_manager.snapshot() is not None:
             ui.notify("Another measurement is already running — see the banner above.", type="warning")
             return
         plan = build_plan(state, Path(state["data_dir"]))
-        run_contexts: list = []
-        run_extras: list = []
-        run_label.set_text(f"Run #{plan.run_ctx.run_str}")
+        amps = getattr(plan, "amplitudes_A", [None])       # the MFLI source: one run
+        labels = [f"I={amp:g}A" if len(amps) > 1 else None for amp in amps]
+        run_ctx = getattr(plan, "run_ctx", None)            # allocated up front by the MFLI source
+        run_contexts: list[RunContext] = []
+        run_extras: list[dict] = []
 
         rc = RunController(
             suite=SUITE, measurement=PAGE_TITLE, run_fn=program_run_fn(program, plan, run_contexts, run_extras),
             save_artifacts=lambda records, result, status: program_artifacts(program, plan, run_contexts),
-            parameters=state, data_dir=state["data_dir"], planned_output_paths=[plan.acq_cfg.output_file],
+            parameters=state, data_dir=state["data_dir"], planned_output_paths=[],
             on_tick=lambda: (plot.update(), table.update()),
-            on_record=on_record, on_status=on_status, on_log=on_log,
+            on_record=on_record, on_status=on_status, on_run_label=on_run_label, on_log=on_log,
             on_finished=make_on_finished(plan, run_contexts, run_extras),
-            sample=plan.run_ctx.sample, device=plan.run_ctx.device,
-            run_number=plan.run_ctx.run_number, run_cost=plan.run_cost,
+            sample=run_ctx.sample if run_ctx else plan.sample,
+            device=run_ctx.device if run_ctx else plan.device,
+            run_number=run_ctx.run_number if run_ctx else None, run_cost=plan.run_cost,
         )
         if not rc.try_start():
             ui.notify("Another measurement is already running — see the banner above.", type="warning")
             return
         controller["c"] = rc
 
-        fig.data[0].x = (); fig.data[0].y = ()
-        fig.data[1].x = (); fig.data[1].y = ()
+        init_series(len(amps), labels, measure_rxx=getattr(plan, "measure_rxx", False))
+        run_label.set_text(f"Run #{run_ctx.run_str}" if run_ctx else "")
         plot.update()
         table.rows.clear()
         table.update()

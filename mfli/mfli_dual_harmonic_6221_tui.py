@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Textual TUI front-end for mfli_dual_harmonic_6221.py
-======================================================
+Keithley-6221 AC source of the dual-harmonic program  (type HARM6)
+==================================================================
 Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
-Created: 2026-09-14
+Created: 2026-09-14 (a mode of mfli_dual_harmonic_tui.py since 2026-09-23)
 
-Same TUI as mfli_dual_harmonic_tui.py — same filters/timing/magnet-sweep/
-temperature/phase-cal/geometry parameter surface — with the excitation
-section swapped for the 6221 AC source + dual ExtRef lock (see
+The "AC current source = Keithley 6221" engine behind the dual-harmonic form
+in mfli_dual_harmonic_tui.py: its parameter surface, summary, plan builder,
+run loop, header, PNG and RunScreen. The form there dispatches here when the
+toggle is on the 6221 (see
 mfli_dual_harmonic_6221.py's module docstring for why BOTH MFLIs must have
 their Aux In 1 wired to the 6221's phase marker, not just the leader's).
 
@@ -33,16 +34,6 @@ from typing import Callable, List, Optional
 
 import numpy as np
 
-from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.validation import Number
-from textual.widgets import (
-    Button,
-    Collapsible,
-    Footer,
-    Header,
-    Static,
-)
 
 from dc.dc_sweep_utils import build_segmented_sweep, parse_sweep_rows, safe_shutdown, try_parse
 from mfli.mfli_dual_harmonic_6221 import (
@@ -83,7 +74,7 @@ from mfli.mfli_dual_harmonic_6221 import (
 )
 from mfli.mfli_dual_harmonic import phase_cal_s
 from instruments.data_dir import validate_directory
-from instruments.field_geometry import field_direction_summary_line, render_ascii_field_diagram
+from instruments.field_geometry import field_direction_summary_line
 from instruments.data_naming import (
     RunContext,
     allocate_run,
@@ -99,16 +90,9 @@ from instruments.run_time import (
     RunCost,
 )
 from instruments.tui_common import (
-    MeasurementApp,
     MeasurementRunScreen,
-    card,
-    field,
     format_si,
-    identity_bar,
     parse_sensor_uids,
-    select_field,
-    switch_field,
-    sweep_rows_field,
 )
 from instruments.tui_sample_picker import (
     NEW_SAMPLE_SENTINEL,
@@ -123,39 +107,6 @@ SETTINGS_PATH = _DEFAULT_DATA_DIR / "mfli_dual_harmonic_6221_tui_settings.json"
 # never deviates.
 MEASUREMENT_TYPE = "HARM6"
 
-# One-paragraph blurb + wiring schematic — shown on this program's card in
-# bridge_tui.py, and the description also on its web page.
-MFLI_DUAL_HARMONIC_6221_DESCRIPTION = (
-    "Same 1f/2f dual-harmonic measurement as the pure-MFLI version, but the AC "
-    "excitation current is sourced by a Keithley 6221 (an ideal current source) "
-    "instead of an MFLI Signal Output — its Trigger Link phase marker drives "
-    "BOTH MFLIs' Aux In 1, and each locks its own oscillator to it (ExtRef). "
-    "Filters, magnet field sweep, temperature logging, phase calibration and "
-    "sample geometry all match the pure-MFLI version."
-)
-
-MFLI_DUAL_HARMONIC_6221_SCHEMATIC = """\
-  Keithley 6221  (WAVE, sine, continuous — the current source)
-    HI/LO ──▶ sample/DUT ── common ground
-    Trigger Link phase marker ──▶ split (BNC T, equal lengths) to
-      Aux In 1 on BOTH the leader AND the follower — REQUIRED on both,
-      not leader-only (see module docstring: a follower synced only via
-      MDS silently loses 2f signal as the two clocks drift apart).
-
-  LEADER MFLI  (ExtRef-locked, 1f)
-    Signal Input 1  (differential)  ──▶ demod 1f
-
-  FOLLOWER MFLI  (ExtRef-locked, 2f)
-    Signal Input 1  (differential)  ──▶ demod 2f
-
-  MDS cabling  (both units — common sample clock, not oscillator frequency)
-    Leader Ref Out      ───BNC───▶ Follower Ref In
-    Leader Trigger Out 1 ──▶ fanned out to Trigger In 1 on BOTH units
-
-  Magnet field sweep  (optional, "Sweep magnetic field" switch)
-    Kepco BOP-GL      ──GPIB──▶ electromagnet coil
-    Lake Shore 475    ──GPIB──▶ Gaussmeter probe at the sample
-"""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1184,372 +1135,11 @@ class RunScreen(MeasurementRunScreen):
         )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Main app  ── the parameter form
-# ─────────────────────────────────────────────────────────────────────────────
-
-class MFLIDualHarmonic6221App(MeasurementApp):
-    TITLE = "MFLI Dual-Harmonic Measurement (6221 AC source)"
-    SUB_TITLE = "1f / 2f lock-in · Keithley 6221 excitation · magnet field sweep"
-
-    data_root: Path = _DEFAULT_DATA_DIR
-
-    SWITCH_DEPENDENTS = {
-        "enable_sweep": (*MAGNET_FIELD_IDS, "sweep_rows"),
-        "enable_temperature": tuple(TEMPERATURE_FIELD_IDS),
-    }
-
-    CSS = """
-    #body { height: 1fr; }
-    #form { width: 1fr; padding: 1 2; }
-    #sidebar { width: 48; border-left: solid $primary; padding: 1 2; overflow-y: auto; }
-    .field-label { text-style: bold; }
-    .hint { text-style: italic; color: $text-muted; }
-    .sweep-rows { height: 5; margin-bottom: 1; }
-    .switch-row { height: 3; }
-    .switch-row Label { margin-left: 1; content-align: left middle; height: 3; }
-    .plane-btn-row { height: 3; margin-bottom: 1; }
-    .plane-btn-row Button { min-width: 5; margin-right: 1; }
-    .field-diagram { color: $text-muted; margin-top: 1; }
-    .sidebar-title { text-style: bold underline; margin-bottom: 1; }
-    #actionbar { height: 3; align: center middle; }
-
-    #identity_bar { border: round $accent; padding: 1 2; height: auto; margin-bottom: 1; }
-    #filename_preview { margin-bottom: 1; }
-    #data_dir_row { height: 3; margin-bottom: 1; }
-    #data_dir_row Input { width: 1fr; }
-    #data_dir_row Button { margin-left: 1; }
-    #identity_fields { layout: grid; grid-size: 4; grid-gutter: 1 2; height: auto; }
-    #identity_fields > Vertical { height: auto; }
-    .field { margin-bottom: 1; }
-    .section-title { text-style: bold underline; margin: 1 0; }
-    .param-grid { layout: grid; grid-size: 3; grid-gutter: 1 2; height: auto; }
-    .param-card { border: round $primary; padding: 1 2; height: auto; }
-    .stable-grid { layout: grid; grid-size: 3; grid-gutter: 1 2; height: auto; }
-
-    Collapsible { height: auto; margin: 1 0; }
-    Collapsible > Contents { padding: 1 0 0 1; }
-    CollapsibleTitle { text-style: bold; color: $text-muted; }
-    .stable-card { border: round $panel-darken-1; padding: 1 2; height: auto; }
-    .stable-card .card-title { color: $text-muted; }
-    .stable-card .field-label { color: $text-muted; }
-    .card-title { text-style: bold underline; margin-bottom: 1; }
-    """
-
-    def compose(self) -> ComposeResult:
-        yield Header(show_clock=False)
-        with Horizontal(id="body"):
-            with VerticalScroll(id="form"):
-                yield identity_bar(DEFAULTS, _DEFAULT_DATA_DIR, self.data_root)
-
-                # ── Tier 1: what defines this run — always visible ──────────
-                with Vertical(classes="param-grid"):
-                    yield card(
-                        "Excitation (Keithley 6221 AC current source)",
-                        field("frequency_Hz", "Excitation frequency (Hz)",
-                              DEFAULTS["frequency_Hz"],
-                              hint="Recommended ~300-1000 Hz — avoid exact multiples of 50/60 Hz "
-                                   "(mains pickup).",
-                              validators=[Number(minimum=1e-3, failure_description="must be > 0")]),
-                        field("amplitude_values", "Excitation current (A, peak)",
-                              DEFAULTS["amplitude_values"], kind="text",
-                              hint="Ideal current source — no series resistor. Single value, "
-                                   "or comma-separated list — one complete sweep runs per "
-                                   "value (own 6221 re-arm), each saved to its own file."),
-                        field("ac_compliance_V", "6221 voltage compliance (V)",
-                              DEFAULTS["ac_compliance_V"],
-                              validators=[Number(minimum=0.1, failure_description="must be > 0")]),
-                    )
-                    yield card(
-                        "Quantities",
-                        switch_field(
-                            "measure_rxx", "R_xx mode — follower reads R_xx's 1f "
-                            "instead of R_xy's 2f",
-                            DEFAULTS["measure_rxx"],
-                        ),
-                        Static(
-                            "Only two physical MFLIs, so this trades 2f for R_xx — "
-                            "move the follower's Signal Input cable by hand to match. "
-                            "The '2f lock-in filter'/'2f input range' fields below "
-                            "configure the follower either way.",
-                            classes="hint",
-                        ),
-                    )
-                    yield card(
-                        "Magnet & field sweep",
-                        switch_field("enable_sweep", "Sweep magnetic field (Kepco magnet)",
-                                     DEFAULTS["enable_sweep"]),
-                        sweep_rows_field("sweep_rows", DEFAULTS["sweep_rows"]),
-                    )
-                    yield card(
-                        "Temperature logging",
-                        switch_field("enable_temperature",
-                                     "Log temperature (Oxford Instruments MercuryiTC)",
-                                     DEFAULTS["enable_temperature"]),
-                    )
-                    yield card(
-                        "Phase calibration",
-                        switch_field(
-                            "enable_phase_cal",
-                            "Auto-null 1f phase before run (leader demod phaseshift)",
-                            DEFAULTS["enable_phase_cal"],
-                        ),
-                        field(
-                            "phase_cal_current_A", "Calibration magnet current (A)",
-                            DEFAULTS["phase_cal_current_A"], kind="text", valid_empty=True,
-                            hint="Blank = null at the present field. Otherwise pick a point near "
-                                 "saturation (e.g. matching i_max). Only used if the field sweep "
-                                 "above is enabled.",
-                        ),
-                    )
-                    yield card(
-                        "Sample geometry & field direction (optional)",
-                        field("hall_bar_length_um", "Hall bar length (µm)",
-                              DEFAULTS["hall_bar_length_um"], kind="text", valid_empty=True,
-                              hint="Current-path length between voltage probes. Leave blank if "
-                                   "unknown — doesn't block the run."),
-                        field("hall_bar_width_um", "Hall bar width (µm)",
-                              DEFAULTS["hall_bar_width_um"], kind="text", valid_empty=True),
-                        field("hall_bar_thickness_nm", "Film/channel thickness (nm)",
-                              DEFAULTS["hall_bar_thickness_nm"], kind="text", valid_empty=True),
-                        field("field_theta_deg", "θ — tilt from out-of-plane (°)",
-                              DEFAULTS["field_theta_deg"], kind="number", valid_empty=True,
-                              validators=[Number(0, 180, failure_description="0-180°")],
-                              hint="0° = fully out-of-plane (film normal), 90° = in-plane."),
-                        field("field_phi_deg", "φ — azimuth from current axis (°)",
-                              DEFAULTS["field_phi_deg"], kind="number", valid_empty=True,
-                              validators=[Number(0, 360, failure_description="0-360°")],
-                              hint="Meaningless when θ=0°."),
-                        Horizontal(
-                            Button("xy", id="plane_xy", classes="plane-btn"),
-                            Button("zx", id="plane_zx", classes="plane-btn"),
-                            Button("zy", id="plane_zy", classes="plane-btn"),
-                            classes="plane-btn-row",
-                        ),
-                        Static(render_ascii_field_diagram(None, None),
-                               id="field_diagram", classes="field-diagram"),
-                    )
-
-                # ── Tier 2: precision / speed knobs — collapsed ─────────────
-                with Collapsible(title="Acquisition & filter settings", collapsed=True):
-                    with Vertical(classes="param-grid"):
-                        yield card(
-                            "1f lock-in filter",
-                            field("time_constant_1f_s", "Filter time constant (s)",
-                                  DEFAULTS["time_constant_1f_s"],
-                                  hint="Bigger = quieter but slower & longer settling.",
-                                  validators=[Number(minimum=1e-6, failure_description="must be > 0")]),
-                            select_field("order_1f", "Filter order", list(range(1, 9)),
-                                         int(DEFAULTS["order_1f"])),
-                            switch_field("sinc_filter_1f", "Sinc filter (extra harmonic rejection)",
-                                         DEFAULTS["sinc_filter_1f"]),
-                        )
-                        yield card(
-                            "2f lock-in filter",
-                            field("time_constant_2f_s", "Filter time constant (s)",
-                                  DEFAULTS["time_constant_2f_s"],
-                                  hint="2f bleed-through from 1f is the usual reason "
-                                       "this needs a longer TC / higher order than 1f.",
-                                  validators=[Number(minimum=1e-6, failure_description="must be > 0")]),
-                            select_field("order_2f", "Filter order", list(range(1, 9)),
-                                         int(DEFAULTS["order_2f"])),
-                            switch_field("sinc_filter_2f", "Sinc filter (extra harmonic rejection)",
-                                         DEFAULTS["sinc_filter_2f"]),
-                        )
-                        yield card(
-                            "Input channels",
-                            switch_field("differential", "Differential input (IN+/IN-)",
-                                         DEFAULTS["differential"]),
-                            switch_field("ac_coupling", "AC-couple the input",
-                                         DEFAULTS["ac_coupling"]),
-                            field("input_range_1f_V", "1f input range (V)",
-                                  DEFAULTS["input_range_1f_V"],
-                                  hint="Match expected 1f signal size.",
-                                  validators=[Number(minimum=1e-6, failure_description="must be > 0")]),
-                            field("input_range_2f_V", "2f input range (V)",
-                                  DEFAULTS["input_range_2f_V"],
-                                  hint="2f is usually much smaller than 1f.",
-                                  validators=[Number(minimum=1e-6, failure_description="must be > 0")]),
-                            field("sample_rate_Hz", "Demodulator sample rate (Sa/s)",
-                                  DEFAULTS["sample_rate_Hz"],
-                                  validators=[Number(minimum=1e-3, failure_description="must be > 0")]),
-                        )
-                        yield card(
-                            "Acquisition timing",
-                            field("settling_time_s", "Settling time per point (s)",
-                                  DEFAULTS["settling_time_s"],
-                                  hint="Rule of thumb: ≥ 5×TC (order 1), ≥ 10×TC (order 3-4, default).",
-                                  validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
-                            field("n_averages", "Samples to average per point",
-                                  DEFAULTS["n_averages"], kind="integer",
-                                  validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
-                        )
-
-                # ── Tier 3: instrument wiring — collapsed ───────────────────
-                with Collapsible(title="Instrument configuration & addresses", collapsed=True):
-                    with Vertical(classes="stable-grid"):
-                        yield card(
-                            "Devices & connection",
-                            field("leader_device", "Leader MFLI (1f)",
-                                  DEFAULTS["leader_device"], kind="text"),
-                            field("follower_device", "Follower MFLI (2f, or R_xx 1f if R_xx mode is on)",
-                                  DEFAULTS["follower_device"], kind="text"),
-                            field("daq_host", "LabOne data server host",
-                                  DEFAULTS["daq_host"], kind="text"),
-                            field("daq_port", "LabOne data server port",
-                                  DEFAULTS["daq_port"], kind="integer"),
-                            muted=True,
-                        )
-                        yield card(
-                            "6221 & ExtRef (phase marker → both MFLIs' Aux In)",
-                            field("ac_visa_resource", "6221 VISA resource",
-                                  DEFAULTS["ac_visa_resource"], kind="text"),
-                            field("phasemarker_line", "6221 Trigger Link phase-marker pin",
-                                  DEFAULTS["phasemarker_line"], kind="integer",
-                                  hint="Confirm your unit's factory default before assuming.",
-                                  validators=[Number(minimum=1, maximum=6,
-                                                     failure_description="must be 1-6")]),
-                            field("extref_lock_timeout_s", "ExtRef PLL lock timeout (s)",
-                                  DEFAULTS["extref_lock_timeout_s"]),
-                            field("leader_extref_index", "Leader ExtRef module index",
-                                  DEFAULTS["leader_extref_index"], kind="integer"),
-                            field("leader_aux_input_ch", "Leader Aux In channel (0 = Aux In 1)",
-                                  DEFAULTS["leader_aux_input_ch"], kind="integer"),
-                            field("leader_osc_index", "Leader oscillator index",
-                                  DEFAULTS["leader_osc_index"], kind="integer"),
-                            field("leader_pll_demod_index", "Leader PLL phase-detector demod index",
-                                  DEFAULTS["leader_pll_demod_index"], kind="integer",
-                                  hint="Must differ from demod 0 (used for the real 1f signal) — "
-                                       "extrefs/N/adcselect is read-only on real firmware, this "
-                                       "demod's OWN adcselect is what actually selects Aux In.",
-                                  validators=[Number(minimum=0, failure_description="must be ≥ 0")]),
-                            select_field("leader_automode", "Leader PLL bandwidth adaptation",
-                                         AUTOMODE_OPTIONS, int(DEFAULTS["leader_automode"]),
-                                         hint=AUTOMODE_HINT),
-                            field("follower_extref_index", "Follower ExtRef module index",
-                                  DEFAULTS["follower_extref_index"], kind="integer"),
-                            field("follower_aux_input_ch", "Follower Aux In channel (0 = Aux In 1)",
-                                  DEFAULTS["follower_aux_input_ch"], kind="integer"),
-                            field("follower_osc_index", "Follower oscillator index",
-                                  DEFAULTS["follower_osc_index"], kind="integer"),
-                            field("follower_pll_demod_index", "Follower PLL phase-detector demod index",
-                                  DEFAULTS["follower_pll_demod_index"], kind="integer",
-                                  hint="Must differ from demod 0 (used for the real 2f signal).",
-                                  validators=[Number(minimum=0, failure_description="must be ≥ 0")]),
-                            select_field("follower_automode", "Follower PLL bandwidth adaptation",
-                                         AUTOMODE_OPTIONS, int(DEFAULTS["follower_automode"]),
-                                         hint=AUTOMODE_HINT),
-                            muted=True,
-                        )
-                        yield card(
-                            "Magnet & gaussmeter addresses",
-                            field("visa_resource", "Magnet VISA resource",
-                                  DEFAULTS["visa_resource"], kind="text"),
-                            field("current_limit_A", "Software current limit (A)",
-                                  DEFAULTS["current_limit_A"],
-                                  hint="Hard safety ceiling — independent of the supply's own range."),
-                            field("voltage_compliance_V", "Voltage compliance (V)",
-                                  DEFAULTS["voltage_compliance_V"]),
-                            field("ramp_step_A", "Ramp step (A)", DEFAULTS["ramp_step_A"]),
-                            field("ramp_delay_s", "Ramp delay (s)", DEFAULTS["ramp_delay_s"]),
-                            field("gaussmeter_visa_resource", "Gaussmeter VISA resource",
-                                  DEFAULTS["gaussmeter_visa_resource"], kind="text",
-                                  hint="Lake Shore 475 — measures the actual field at each point."),
-                            field("gaussmeter_n_averages", "Field readings averaged per point",
-                                  DEFAULTS["gaussmeter_n_averages"], kind="integer",
-                                  validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
-                            field("gaussmeter_read_delay_s", "Delay between readings (s)",
-                                  DEFAULTS["gaussmeter_read_delay_s"]),
-                            field("field_settle_tolerance_mT", "Field-settle tolerance (mT)",
-                                  DEFAULTS["field_settle_tolerance_mT"],
-                                  hint="Advanced: after each magnet step, wait until a short "
-                                       "window of gaussmeter readings spans less than this before "
-                                       "the settling time above. Raise if points stall.",
-                                  validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
-                            muted=True,
-                        )
-                        yield card(
-                            "Temperature controller",
-                            field("temperature_visa_resource", "MercuryiTC VISA resource",
-                                  DEFAULTS["temperature_visa_resource"], kind="text",
-                                  hint="e.g. TCPIP0::<ip>::7020::SOCKET (Ethernet) or an ASRL resource."),
-                            field("temperature_sensor_uids", "Sensor board UID(s)",
-                                  DEFAULTS["temperature_sensor_uids"], kind="text",
-                                  hint="1 or 2 board UIDs, comma-separated, e.g. 'MB1.T1, DB5.T1'. "
-                                       "Missing readings just leave the column empty."),
-                            muted=True,
-                        )
-                        yield card(
-                            "Phase-cal advanced",
-                            field("phase_cal_n_averages", "Averages per phase read",
-                                  DEFAULTS["phase_cal_n_averages"], kind="integer",
-                                  validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
-                            field("phase_cal_max_iterations", "Max null iterations",
-                                  DEFAULTS["phase_cal_max_iterations"], kind="integer",
-                                  validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
-                            Static(
-                                "Nulls the leader's 1f Y quadrature by adjusting its demod "
-                                "phaseshift node — the resistive PHE/AHE response at 1f must be "
-                                "exactly in phase with the drive current, so any measured Y there is "
-                                "pure instrumental delay. X and Y at 2f are both already recorded per "
-                                "point in the CSV — check which one actually tracks field there before "
-                                "trusting it (V₂ω ∝ cos, not sin, so X₁f being right says nothing "
-                                "about X₂f).",
-                                classes="hint",
-                            ),
-                            muted=True,
-                        )
-
-            with Vertical(id="sidebar"):
-                yield Static("Summary", classes="sidebar-title")
-                yield Static(id="summary")
-
-        with Horizontal(id="actionbar"):
-            yield Button("▶  Start measurement  (F5)", id="start", variant="success")
-        yield Footer()
-
-    # ── Form state I/O ───────────────────────────────────────────────────────
-
-    # ── Reactivity ───────────────────────────────────────────────────────────
-
-    def update_summary(self) -> None:
-        state, parse_errors = self.parse_state()
-        if parse_errors:
-            info, warnings, errors = [], [], parse_errors
-            preview = None
-        else:
-            info, warnings, errors = build_summary(state)
-            preview = compute_filename_preview(state)
-
-        self.query_one("#filename_preview", Static).update(
-            f"File:  [bold]{preview}[/bold]" if preview
-            else "[dim]File:  (choose a sample and device to preview the filename)[/dim]"
-        )
-        lines: list[str] = []
-        if errors:
-            lines.append("[bold red]Blocking issues[/bold red]")
-            lines += [f"  [red]✗ {e}[/red]" for e in errors]
-        if warnings:
-            lines.append("[bold yellow]Warnings[/bold yellow]")
-            lines += [f"  [yellow]⚠ {w}[/yellow]" for w in warnings]
-        lines.append("[bold]Derived values[/bold]")
-        lines += [f"  [dim]•[/dim] {i}" for i in info]
-
-        self.query_one("#summary", Static).update("\n".join(lines))
-        self.query_one("#start", Button).disabled = bool(errors)
-
-        theta = None if parse_errors else state.get("field_theta_deg")
-        phi = None if parse_errors else state.get("field_phi_deg")
-        self.query_one("#field_diagram", Static).update(render_ascii_field_diagram(theta, phi))
-
-    # ── Start ────────────────────────────────────────────────────────────────
-
-    def _build_plan(self, state: dict) -> MeasurementPlan:
-        return build_plan(state, self.data_root)
-
-
 def main() -> None:
-    MFLIDualHarmonic6221App().run()
+    """The 6221 source is a mode of the dual-harmonic program now — open that
+    form with 'AC current source' set to the 6221."""
+    from mfli.mfli_dual_harmonic_tui import MFLIDualHarmonicApp
+    MFLIDualHarmonicApp(ac_source="6221").run()
 
 
 if __name__ == "__main__":

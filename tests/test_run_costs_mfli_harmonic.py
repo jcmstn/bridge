@@ -160,10 +160,8 @@ def test_harmonic_summary_and_bad_inputs_do_not_crash(tmp_path) -> None:
 def test_6221_points_span_every_amplitude_file(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(t6221, "_DEFAULT_DATA_DIR", tmp_path)
     ensure_sample(tmp_path, "A", create=True)
-    app = t6221.MFLIDualHarmonic6221App()
-    app.data_root = tmp_path
-    plan = app._build_plan(_h6state(enable_sweep=True, amplitude_values="1e-7, 2e-7, 3e-7",
-                                    amplitude_list=[1e-7, 2e-7, 3e-7]))
+    plan = t6221.build_plan(_h6state(enable_sweep=True, amplitude_values="1e-7, 2e-7, 3e-7",
+                                     amplitude_list=[1e-7, 2e-7, 3e-7]), tmp_path)
     assert plan.total_points == 41 and plan.total_files == 3
     assert len(plan.run_cost.points) == plan.total_points * plan.total_files == 123
 
