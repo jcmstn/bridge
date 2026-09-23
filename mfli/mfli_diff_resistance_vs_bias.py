@@ -99,7 +99,7 @@ from typing import Optional, Callable, List
 import zhinst.core as zi
 import zhinst.utils as ziutils
 
-from dc.dc_sweep_utils import check_sweep_size
+from dc.dc_sweep_utils import check_sweep_size, safe_shutdown
 from instruments.run_time import GPIB_TXN_S
 from instruments.mfli_daq import (
     connect,
@@ -647,9 +647,9 @@ def main() -> None:
         import matplotlib.pyplot as plt
         plt.show()
     finally:
-        ramp_bias_to_zero(daq, out_cfg)
-        shutdown_output(daq, out_cfg)
-        shutdown_temperature_controller(temp_ctrl)
+        safe_shutdown("MFLI bias (ramp)", lambda: ramp_bias_to_zero(daq, out_cfg))
+        safe_shutdown("MFLI output", lambda: shutdown_output(daq, out_cfg))
+        safe_shutdown("MercuryiTC", lambda: shutdown_temperature_controller(temp_ctrl))
 
 
 if __name__ == "__main__":

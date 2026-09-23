@@ -95,7 +95,7 @@ from instruments.lakeshore475 import (
     read_field_mT,
     shutdown_gaussmeter,
 )
-from dc.dc_sweep_utils import build_segmented_sweep
+from dc.dc_sweep_utils import build_segmented_sweep, safe_shutdown
 from instruments.mercury_itc import (
     MercuryITC,
     TemperatureControllerConfig,
@@ -1026,10 +1026,10 @@ def main() -> None:
                               geometry_cfg=geometry_cfg, mds=mds)
         print("\n", df.to_string(index=False))
     finally:
-        shutdown_output(daq, out_cfg)
-        shutdown_magnet(magnet, magnet_cfg)
-        shutdown_gaussmeter(gaussmeter)
-        shutdown_temperature_controller(temp_ctrl)
+        safe_shutdown("MFLI output", lambda: shutdown_output(daq, out_cfg))
+        safe_shutdown("magnet", lambda: shutdown_magnet(magnet, magnet_cfg))
+        safe_shutdown("gaussmeter", lambda: shutdown_gaussmeter(gaussmeter))
+        safe_shutdown("MercuryiTC", lambda: shutdown_temperature_controller(temp_ctrl))
 
 
 if __name__ == "__main__":

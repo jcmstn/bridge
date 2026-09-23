@@ -92,7 +92,7 @@ from instruments.mercury_itc import (
     shutdown_temperature_controller,
 )
 
-from dc.dc_sweep_utils import linear_sweep
+from dc.dc_sweep_utils import linear_sweep, safe_shutdown
 
 # Data lives outside "bridge" (a sibling of it) so measurement output never
 # ends up inside the git-tracked source tree.
@@ -414,10 +414,10 @@ def main() -> None:
                               field_theta_deg=None, field_phi_deg=None)  # from film normal / current axis
         print("\n", df.to_string(index=False))
     finally:
-        shutdown_source(source)
-        shutdown_magnet(magnet, magnet_cfg)
-        shutdown_gaussmeter(gaussmeter)
-        shutdown_temperature_controller(temp_ctrl)
+        safe_shutdown("6221", lambda: shutdown_source(source))
+        safe_shutdown("magnet", lambda: shutdown_magnet(magnet, magnet_cfg))
+        safe_shutdown("gaussmeter", lambda: shutdown_gaussmeter(gaussmeter))
+        safe_shutdown("MercuryiTC", lambda: shutdown_temperature_controller(temp_ctrl))
 
 
 if __name__ == "__main__":

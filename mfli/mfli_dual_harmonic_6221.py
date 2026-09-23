@@ -111,6 +111,7 @@ from typing import Callable, List, Optional
 import pandas as pd
 import zhinst.core as zi
 
+from dc.dc_sweep_utils import safe_shutdown
 from instruments.keithley6221 import ACSourceConfig, connect_ac_source, shutdown_ac_source
 from instruments.mfli_daq import (
     connect, connect_device, setup_mds, check_mds_status,
@@ -553,10 +554,10 @@ def main() -> None:
                               geometry_cfg=geometry_cfg, mds=mds)
         print("\n", df.to_string(index=False))
     finally:
-        shutdown_ac_source(source)
-        shutdown_magnet(magnet, magnet_cfg)
-        shutdown_gaussmeter(gaussmeter)
-        shutdown_temperature_controller(temp_ctrl)
+        safe_shutdown("6221", lambda: shutdown_ac_source(source))
+        safe_shutdown("magnet", lambda: shutdown_magnet(magnet, magnet_cfg))
+        safe_shutdown("gaussmeter", lambda: shutdown_gaussmeter(gaussmeter))
+        safe_shutdown("MercuryiTC", lambda: shutdown_temperature_controller(temp_ctrl))
 
 
 if __name__ == "__main__":

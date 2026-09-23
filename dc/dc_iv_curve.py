@@ -84,7 +84,7 @@ from instruments.mercury_itc import (
     shutdown_temperature_controller,
 )
 
-from dc.dc_sweep_utils import linear_sweep
+from dc.dc_sweep_utils import linear_sweep, safe_shutdown
 
 # Data lives outside "bridge" (a sibling of it).
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
@@ -338,9 +338,9 @@ def main() -> None:
         import matplotlib.pyplot as plt
         plt.show()
     finally:
-        ramp_current_to_zero(source)
-        shutdown_source(source)
-        shutdown_temperature_controller(temp_ctrl)
+        safe_shutdown("6221 (ramp)", lambda: ramp_current_to_zero(source))
+        safe_shutdown("6221", lambda: shutdown_source(source))
+        safe_shutdown("MercuryiTC", lambda: shutdown_temperature_controller(temp_ctrl))
 
 
 if __name__ == "__main__":

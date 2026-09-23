@@ -90,7 +90,7 @@ from instruments.mercury_itc import (
     shutdown_temperature_controller,
 )
 
-from dc.dc_sweep_utils import linear_sweep
+from dc.dc_sweep_utils import linear_sweep, safe_shutdown
 
 # Data lives outside "bridge" (a sibling of it) so measurement output never
 # ends up inside the git-tracked source tree.
@@ -387,11 +387,11 @@ def main() -> None:
                               temp_ctrl=temp_ctrl, temp_cfg=temp_cfg)
         print("\n", df.to_string(index=False))
     finally:
-        shutdown_source(source)
-        shutdown_gate(gate)
-        shutdown_magnet(magnet, magnet_cfg)
-        shutdown_gaussmeter(gaussmeter)
-        shutdown_temperature_controller(temp_ctrl)
+        safe_shutdown("6221", lambda: shutdown_source(source))
+        safe_shutdown("gate (2400)", lambda: shutdown_gate(gate))
+        safe_shutdown("magnet", lambda: shutdown_magnet(magnet, magnet_cfg))
+        safe_shutdown("gaussmeter", lambda: shutdown_gaussmeter(gaussmeter))
+        safe_shutdown("MercuryiTC", lambda: shutdown_temperature_controller(temp_ctrl))
 
 
 if __name__ == "__main__":

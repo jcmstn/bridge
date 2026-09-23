@@ -89,7 +89,7 @@ from mfli.mfli_dual_harmonic import (
     shutdown_temperature_controller,
     sync_follower_oscillator,
 )
-from dc.dc_sweep_utils import build_segmented_sweep
+from dc.dc_sweep_utils import build_segmented_sweep, safe_shutdown
 from instruments.mfli_daq import acquire_s
 from instruments.run_time import GPIB_TXN_S, PHASE_NULL_ITER_TYP
 
@@ -786,10 +786,10 @@ def main() -> None:
         )
         print_report(report)
     finally:
-        shutdown_output(daq, out_cfg)
-        shutdown_magnet(magnet, magnet_cfg)
-        shutdown_gaussmeter(gaussmeter)
-        shutdown_temperature_controller(temp_ctrl)
+        safe_shutdown("MFLI output", lambda: shutdown_output(daq, out_cfg))
+        safe_shutdown("magnet", lambda: shutdown_magnet(magnet, magnet_cfg))
+        safe_shutdown("gaussmeter", lambda: shutdown_gaussmeter(gaussmeter))
+        safe_shutdown("MercuryiTC", lambda: shutdown_temperature_controller(temp_ctrl))
 
 
 if __name__ == "__main__":
