@@ -133,6 +133,22 @@ SOT_PULSED_6221_DESCRIPTION = (
     "scan the assist condition — each gets its own file."
 )
 
+# Wiring schematic — shown on this program's card in bridge_tui.py.
+SOT_PULSED_6221_SCHEMATIC = """\
+  KEITHLEY 6221  (the ONLY source — no 4200A, no 2182)   HI ──▶ I+ pad ,  LO ──▶ I- pad
+    WAVE square, ONE cycle = the write pulse (hardware-timed, per amplitude)
+    then WAVE sine + phase marker = the read; wave OFF between the two.
+    Trigger Link phase marker (pin 1) ──▶ ZURICH MFLI  AUX IN 1
+  ZURICH MFLI    Signal Input (differential) ──▶ the transverse (Hall) arms
+                 ExtRef-locked to the marker; one harmonic (2f default, 1f = AHE/PHE)
+
+  KEPCO BOP-GL      ──GPIB──▶ electromagnet   (ONE static tilted field)
+  LAKE SHORE 475    ──GPIB──▶ Gaussmeter probe at the sample
+
+  Software-timed at the µs–ms scale: Joule heating is I²R·t, far above the
+  4200A's ns pulses — start well below the switching current.
+"""
+
 DEFAULTS: dict = {
     # write pulse (6221 DC) — the switching axis is now current, not voltage
     "pulse_current_start_A": "1e-3",

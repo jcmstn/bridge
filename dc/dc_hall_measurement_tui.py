@@ -118,6 +118,19 @@ DC_HALL_DESCRIPTION = (
     "Lake Shore 475 Gaussmeter at every point."
 )
 
+# Wiring schematic — shown on this program's card in bridge_tui.py.
+DC_HALL_SCHEMATIC = """\
+  KEITHLEY 6221  (DC current source)
+    Output ──▶ sample ── common ground
+
+  KEITHLEY 2182  (nanovoltmeter)
+    Channel 1 (differential) ──▶ transverse (Hall) voltage leads
+
+  Magnet field sweep  (optional, "Sweep magnetic field" switch)
+    Kepco BOP-GL      ──GPIB──▶ electromagnet coil
+    Lake Shore 475    ──GPIB──▶ Gaussmeter probe at the sample
+"""
+
 log = logging.getLogger("dc_hall_measurement_tui")
 
 # Data/settings live outside "bridge" (a sibling of it), same convention as

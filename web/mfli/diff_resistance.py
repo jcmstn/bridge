@@ -32,6 +32,7 @@ from mfli.mfli_diff_resistance_vs_bias import (
     shutdown_temperature_controller, sync_follower_oscillator,
 )
 from mfli.mfli_diff_resistance_tui import (
+    MFLI_DIFF_RESISTANCE_DESCRIPTION,
     DEFAULTS, NUMERIC_FIELDS, TEXT_FIELDS,
     MEASUREMENT_TYPE, MeasurementPlan, build_header_fields, build_summary,
     compute_filename_preview, format_si, parse_sensor_uids, run_costs,
@@ -56,15 +57,6 @@ _SETTINGS_PATH = _DATA_DIR / "web_settings" / "mfli_diff_resistance_web_settings
 
 PAGE_TITLE = "MFLI Differential Resistance vs. Bias"
 SUITE = "MFLI"
-
-MFLI_DIFF_RESISTANCE_DESCRIPTION = (
-    "Superimposes a small AC excitation on top of a DC bias applied to the DUT, "
-    "sweeps that DC bias, and records the complex ratio dV/dI at each point — an "
-    "'I-V-curve-equivalent' characterization far more informative than a "
-    "single-point resistance for anything nonlinear (contacts, tunnel junctions, "
-    "diodes, gated 2D systems). No magnet is involved; the bias sweep is the "
-    "whole measurement."
-)
 
 
 def _load_settings() -> dict:

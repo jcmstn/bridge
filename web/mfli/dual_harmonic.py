@@ -38,6 +38,7 @@ from mfli.mfli_dual_harmonic import (
     sync_follower_oscillator,
 )
 from mfli.mfli_dual_harmonic_tui import (
+    MFLI_DUAL_HARMONIC_DESCRIPTION,
     DEFAULTS, NUMERIC_FIELDS, TEXT_FIELDS, OPTIONAL_NUMERIC_FIELDS,
     MEASUREMENT_TYPE, MeasurementPlan, build_header_fields, build_summary,
     compute_filename_preview, format_si, parse_sensor_uids, run_costs,
@@ -66,14 +67,6 @@ _SETTINGS_PATH = _DATA_DIR / "web_settings" / "mfli_dual_harmonic_web_settings.j
 
 PAGE_TITLE = "MFLI Dual-Harmonic Measurement"
 SUITE = "MFLI"
-
-MFLI_DUAL_HARMONIC_DESCRIPTION = (
-    "Drives an AC current through the sample and reads the 1st-harmonic response "
-    "on the leader while the follower reads the 2nd-harmonic response — the "
-    "standard setup for e.g. a nonlinear/planar Hall measurement. Optionally "
-    "sweeps a Kepco electromagnet's field (bidirectionally, for hysteresis) with "
-    "the field measured live via a Lake Shore 475 Gaussmeter at every point."
-)
 
 
 def _load_settings() -> dict:

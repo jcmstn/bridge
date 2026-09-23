@@ -45,7 +45,7 @@ Adding a NEW instrument
 Drop `instruments/my_instr.py` with a `MyInstrConfig` dataclass +
 `connect_my_instr()` / `shutdown_my_instr()` (+ optional `set_*` / `read_*`
 / `acquire_*`), mirroring any existing instruments/*.py. Nothing else needs
-to know it exists — no TUI, no web, no suite-picker registration. Import it
+to know it exists — no TUI, no web, no menu registration. Import it
 here directly. Full function contract + skeleton + the load-bearing vs
 nice-to-have failure policy: docs/architecture.md §4 "Adding an instrument".
 """

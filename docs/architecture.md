@@ -22,9 +22,7 @@ reference. This file is the map, not a second copy of them.
 
 | Command | Opens |
 |---------|-------|
-| `uv run python dc/dc_tui.py`   | DC suite picker (Hall, I–V, gate sweep, spin-valve) — Textual |
-| `uv run python mfli/mfli_tui.py` | MFLI suite picker (dual-harmonic, dual-harmonic w/ 6221 AC source, diff-resistance, phase calibration) — Textual |
-| `uv run python sot/sot_tui.py` | SOT suite picker (the three pulsed-switching programs + nonlocal switching, each with a wiring schematic) — Textual |
+| `uv run python bridge_tui.py` | The TUI menu — every DC / MFLI / SOT program as a card (description, collapsible wiring schematic, Launch) in three suite columns, plus the shared "Recent runs" table; mirrors the web landing page. Quitting a program returns to the menu — Textual |
 | `uv run python sot/sot_pulsed_switching_tui.py` | SOT pulsed switching (4200A PMU pulse + delayed 6221/2182 R_xy) — Textual |
 | `uv run python sot/sot_pulsed_switching_2h_tui.py` | SOT pulsed switching, 2nd-harmonic read (4200A PMU pulse + delayed 6221 AC / MFLI 1f+2f) — Textual |
 | `uv run python sot/sot_pulsed_switching_6221_tui.py` | SOT pulsed switching, 6221-only — no 4200A (software-timed 6221 DC pulse + delayed 6221 AC / MFLI harmonic, harmonic is a parameter) — Textual |
@@ -74,7 +72,8 @@ verbatim by the matching `web/{suite}/{name}.py`:
 | `build_header_fields(plan, ctx, …) -> dict` | the `# key: value` CSV header for this run |
 | `compute_filename_preview(state) -> str` | placeholder filename for the live preview (calls `preview_raw_filename`, never `allocate_run`) |
 | `parse_sensor_uids(text)` | MercuryiTC sensor-UID parsing, shared |
-| `{NAME}_DESCRIPTION` | one-paragraph blurb, shown in both the suite picker and the sidebar |
+| `{NAME}_DESCRIPTION` | one-paragraph blurb, shown on the program's `bridge_tui.py` card, its web page and (DC/SOT) its sidebar |
+| `{NAME}_SCHEMATIC` | the wiring schematic shown on the program's `bridge_tui.py` card |
 
 If you add a form field, it goes in `DEFAULTS` + the right `*_FIELDS`
 group + `MeasurementPlan` **once**, in the TUI module, and both front ends
@@ -157,7 +156,7 @@ raw driver classes.
 
 A new instrument is one new file, `instruments/{name}.py`, imported directly
 by whatever measurement/script needs it. **Nothing else registers it** — no
-TUI, no web, no suite picker. The module exposes plain module-level
+TUI, no web, no menu. The module exposes plain module-level
 functions (not a class API — the class, if any, stays private):
 
 1. **`{Name}Config`** — a `@dataclass`. First field `visa_resource: str`,
@@ -361,9 +360,10 @@ units sub-header row as data. Use `read_raw()`.
    secondary axis). Nowhere else needs to know the code.
 4. **`{suite}/{name}_tui.py`** — `DEFAULTS`, the `*_FIELDS` groups,
    `MeasurementPlan`, `build_summary`, `build_header_fields`,
-   `compute_filename_preview`, `{NAME}_DESCRIPTION`, and the Textual `App`.
-5. **`{suite}/{suite}_tui.py`** — register the new `App` + its schematic in
-   the suite picker.
+   `compute_filename_preview`, `{NAME}_DESCRIPTION`, `{NAME}_SCHEMATIC`,
+   and the Textual `App`.
+5. **`bridge_tui.py`** — add a `Program(...)` (key, title, description,
+   schematic, App) to its suite in `PROGRAMS`.
 6. **`web/{suite}/{name}.py`** — name it so its basename matches NO module in the
    top-level `{suite}/` package: `python web/app.py` puts `web/` first on
    `sys.path`, so `web/sot/foo.py` shadows `sot/foo.py` (circular import). The
@@ -395,7 +395,7 @@ units sub-header row as data. Use `read_raw()`.
 | TUI live-plot window (spawned matplotlib process fed over a Queue) | plot body: the TUI's `_live_plot_worker`; process launch: `instruments/live_plot.py` `start_live_plot` — always launch through it, Textual's `sys.stderr.fileno() == -1` breaks a bare `mp.Queue()` |
 | Web page layout skeleton (top band + params/output columns, square plot) | `web/run_controller.py` `measurement_layout()` — every page fills `regions.identity` / `.params` / `.summary` / `.output`; the app-wide colour theme is `web/app.py` (`app.colors()` + shared head CSS) |
 | The identity bar / data-root picker | `web/identity_bar.py` + `web/directory_picker.py`; TUI side `instruments/data_dir.py` |
-| Suite picker text or schematic | `{suite}/{suite}_tui.py` and the `{NAME}_DESCRIPTION` in the TUI module |
+| Menu card text or schematic | `{NAME}_DESCRIPTION` / `{NAME}_SCHEMATIC` in the TUI module; card title in `bridge_tui.py` `PROGRAMS` |
 
 
 ## 9. Tests

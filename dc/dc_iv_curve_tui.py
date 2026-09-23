@@ -130,6 +130,20 @@ DC_IV_DESCRIPTION = (
     "together in different colors."
 )
 
+# Wiring schematic — shown on this program's card in bridge_tui.py.
+DC_IV_SCHEMATIC = """\
+  KEITHLEY 6221  (DC current source)
+    Output ──▶ DUT ── common ground
+
+  KEITHLEY 2182  (nanovoltmeter)
+    Channel 1 (differential) ──▶ across the DUT itself (2-terminal), or
+                                   across the inner voltage-sense leads
+                                   (4-terminal / Kelvin)
+
+  Gate voltage  (optional, "Enable gate" switch)
+    KEITHLEY 2400 (gate source) ──▶ gate electrode
+"""
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Field definitions & defaults  ── mirrors dc_iv_curve.main()'s example

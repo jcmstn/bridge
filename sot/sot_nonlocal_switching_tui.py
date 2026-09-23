@@ -123,6 +123,22 @@ NLSW_DESCRIPTION = (
     "detector, 2182A ch1 → detector magnet / reference electrode past it."
 )
 
+# Wiring schematic — shown on this program's card in bridge_tui.py.
+NLSW_SCHEMATIC = """\
+  KEITHLEY 6221  (the ONLY source — no 4200A, no MFLI)
+    HI ──▶ injector electrode
+    LO ──▶ return electrode, a bit further from the injector, on the side away
+           from the detector (the current returns through it). Triax OUTPUT LOW
+           FLOATING — the program sets it.
+    WAVE square, ONE cycle: 0 → ±I → 0 (one lobe, never a ± pair) = the write pulse,
+    then plain DC I_sense (±I current reversal by default, switchable) = the read.
+  KEITHLEY 2182A  ch1 ──▶ detector magnet electrode / reference electrode past the
+                          magnet (V_NL). ch2 unused (its LO is bonded to ch1 LO).
+
+  KEPCO BOP-GL + LAKE SHORE 475  (optional) — external-field initialization of the
+    magnet state before the sweep; one run per init current (e.g. +B and -B).
+"""
+
 DEFAULTS: dict = {
     # write pulse (6221 WAVE, one lobe 0 → ±I → 0)
     "pulse_current_start_A": "1e-3",

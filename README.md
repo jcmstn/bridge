@@ -22,16 +22,20 @@ or from where.
 
 ## Running it
 
-Each measurement program is directly runnable, standalone or from a suite
-picker:
+One menu opens every measurement program, and each program is also directly
+runnable on its own:
 
 ```
-uv run python dc/dc_tui.py             # DC suite TUI (Hall, I-V, gate sweep, spin-valve)
-uv run python mfli/mfli_tui.py         # MFLI suite TUI (dual-harmonic, dual-harmonic w/ 6221 AC source, diff resistance, phase calibration)
-uv run python sot/sot_tui.py           # SOT suite TUI (three pulsed-switching variants + nonlocal spin-current switching)
-uv run python sot/sot_pulsed_switching_tui.py   # SOT pulsed switching TUI — 4200A PMU pulse + delayed 6221/2182 R_xy
+uv run python bridge_tui.py            # TUI menu: DC / MFLI / SOT programs + recent-runs history
+uv run python sot/sot_pulsed_switching_tui.py   # any single program's TUI, standalone
 uv run python web/app.py               # Browser front end, DC + MFLI suites + SOT nonlocal switching, http://localhost:8080
 ```
+
+The TUI menu mirrors the web landing page: one column per suite, each
+program a card with its description, a collapsible wiring schematic and a
+Launch button; quitting a program returns to the menu. Runs from both front
+ends are listed in the same "Recent runs" table (`runs.db` next to the data
+folder).
 
 The three SOT pulsed-switching programs are TUI-only (no web page); the two
 4200A ones need a KULT user module compiled on the 4200A — see
@@ -49,10 +53,12 @@ BRIDGE_WEB_PORT=8090 uv run python web/app.py
 ## Layout
 
 ```
+bridge_tui.py  The TUI menu (every program, one entry point)
 dc/            Keithley 6221/2182/2400 DC measurement programs + TUIs
 mfli/          Zurich Instruments MFLI lock-in measurement programs + TUIs
-instruments/   Shared instrument drivers and connect/shutdown helpers
-web/           NiceGUI browser front end for the dc/ and mfli/ programs
+sot/           Spin-orbit-torque / nonlocal pulsed-switching programs + TUIs
+instruments/   Shared instrument drivers, data convention, run history, TUI helpers
+web/           NiceGUI browser front end for the dc/, mfli/ and sot/ programs
 docs/          Physics/theory background for specific measurements
 ```
 

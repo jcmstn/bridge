@@ -135,6 +135,34 @@ SETTINGS_PATH = _DEFAULT_DATA_DIR / "mfli_phase_calibration_tui_settings.json"
 # never deviates.
 MEASUREMENT_TYPE = "PHCAL"
 
+# One-paragraph blurb + wiring schematic — shown on this program's card in
+# bridge_tui.py, and the description also on its web page.
+MFLI_PHASE_CALIBRATION_DESCRIPTION = (
+    "Calibrates the leader's 1f reference phase against the sample's own resistive "
+    "Hall response (rather than a separate standard resistor), then verifies the "
+    "result before you trust it: checks the null holds across a full field sweep, "
+    "and empirically identifies which of X2f/Y2f carries the real signal. Optional "
+    "current-amplitude and frequency scaling checks help separate a genuine "
+    "resistive/SOT signal from Joule-heating/anomalous-Nernst contamination. Run "
+    "this before Dual-Harmonic Measurement, using the same wiring."
+)
+
+MFLI_PHASE_CALIBRATION_SCHEMATIC = """\
+  Same wiring as the Dual-Harmonic Measurement —
+  this program calibrates that setup, it doesn't add new wiring.
+
+  LEADER MFLI  (current source, 1f)
+    Signal Output 1 ──[ R_series ]──▶ sample/DUT ── common ground
+    Signal Input 1  (differential)  ──▶ demod 1f   (V_Rseries → I)
+
+  FOLLOWER MFLI  (2f)
+    Signal Input 1  (differential)  ──▶ demod 2f   (across the sample)
+
+  Magnet + Gaussmeter  (both required — the procedure needs a field sweep)
+    Kepco BOP-GL      ──GPIB──▶ electromagnet coil
+    Lake Shore 475    ──GPIB──▶ Gaussmeter probe at the sample
+"""
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Field definitions & defaults

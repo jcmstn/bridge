@@ -119,6 +119,36 @@ SETTINGS_PATH = _DEFAULT_DATA_DIR / "mfli_diff_resistance_tui_settings.json"
 # never deviates.
 MEASUREMENT_TYPE = "DIFFR"
 
+# One-paragraph blurb + wiring schematic — shown on this program's card in
+# bridge_tui.py, and the description also on its web page.
+MFLI_DIFF_RESISTANCE_DESCRIPTION = (
+    "Superimposes a small AC excitation on top of a DC bias applied to the DUT, "
+    "sweeps that DC bias, and records the complex ratio dV/dI at each point — an "
+    "'I-V-curve-equivalent' characterization far more informative than a "
+    "single-point resistance for anything nonlinear (contacts, tunnel junctions, "
+    "diodes, gated 2D systems). No magnet is involved; the bias sweep is the "
+    "whole measurement."
+)
+
+MFLI_DIFF_RESISTANCE_SCHEMATIC = """\
+  LEADER MFLI  (AC excitation + DC bias, I-sense)
+    Signal Output 1 ──[ R_series ]── DUT ── Current Input 1
+    (transimpedance amp reads I directly, in amps — R_series is just a
+    current-limiting/protection resistor, not used in the I calculation)
+    (DC bias is summed onto this SAME output — no separate bias wire)
+
+  FOLLOWER MFLI  (V-sense)
+    Signal Input 1 (differential) ──── across the DUT itself
+                                        (2-terminal), or across the inner
+                                        voltage-sense leads (4-terminal /
+                                        Kelvin)
+
+  MDS cabling  (both units)
+    Leader Ref Out      ───BNC───▶ Follower Ref In
+    Leader Trigger Out 1 ──▶ fanned out to Trigger In 1 on BOTH units
+    (equal cable lengths on the fan-out)
+"""
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Field definitions & defaults  ── mirrors mfli_diff_resistance_vs_bias.main()

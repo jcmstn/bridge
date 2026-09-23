@@ -125,6 +125,28 @@ SOT_PULSED_DESCRIPTION = (
     "sweep (same current) for switching-probability statistics."
 )
 
+# Wiring schematic — shown on this program's card in bridge_tui.py.
+SOT_PULSED_SCHEMATIC = """\
+  KEITHLEY 4200A-SCS  (KXCI — GPIB 17)   — pulse only, FORCE triax, 2-wire local sense
+    PMU1-1 ──▶ RPM1 ──▶ I+ pad of the Hall-cross main channel
+                        centre = force, guard = floating, outer = circuit COMMON.
+                        The KULT module bridge_sot_pulse.c routes RPM1 to the
+                        pulse pathway for the burst and back on exit.
+
+  COMMON BUS ──▶ I- pad   (PMU FORCE outer shell + 6221 output LO land here)
+
+  KEITHLEY 6221  HI ──▶ I+ pad ,  LO ──▶ common bus   (delayed R_xy read)
+                 In parallel with the PMU — OFF while pulsing.
+  KEITHLEY 2182  ──▶ transverse (Hall) arms           (V_xy, floating diff)
+
+  KEPCO BOP-GL      ──GPIB──▶ electromagnet   (ONE static tilted field)
+  LAKE SHORE 475    ──GPIB──▶ Gaussmeter probe at the sample
+
+  Cycle: 6221 OFF → PMU write pulse → wait → 6221 ON, reversal-averaged
+  R_xy (6221 forces ±I, 2182 reads V_xy) → 6221 OFF. The 2182 is only the
+  reader; re-run the whole sweep for statistics.
+"""
+
 # Current MEASURE ceiling with a 4225-RPM on the PMU 10 V range. Above this the
 # pulse current reads back overflowed rather than erroring (the KULT module sets
 # KI_LIM_MODE=KI_VALUE), so build_summary() warns rather than blocks.

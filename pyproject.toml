@@ -33,3 +33,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["dc*", "mfli*", "sot*", "instruments*", "web*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]   # the repo-root bridge_tui.py isn't in an installed package

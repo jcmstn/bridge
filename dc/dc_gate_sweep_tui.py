@@ -136,6 +136,22 @@ DC_GATE_SWEEP_DESCRIPTION = (
     "different colors."
 )
 
+# Wiring schematic — shown on this program's card in bridge_tui.py.
+DC_GATE_SWEEP_SCHEMATIC = """\
+  KEITHLEY 6221  (fixed DC sense current)
+    Output ──▶ DUT ── common ground
+
+  KEITHLEY 2182  (nanovoltmeter)
+    Channel 1 (differential) ──▶ across the DUT
+
+  KEITHLEY 2400  (gate source — the swept axis)
+    Output ──▶ gate electrode
+
+  Field  (optional, single value or list — parked, not swept)
+    Kepco BOP-GL      ──GPIB──▶ electromagnet coil
+    Lake Shore 475    ──GPIB──▶ Gaussmeter probe at the sample
+"""
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Field definitions & defaults  ── mirrors dc_gate_sweep.main()'s example

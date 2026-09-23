@@ -5,9 +5,9 @@ bridge/web — NiceGUI entrypoint
 Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
 Created: 2026-08-07
 
-Alternative front end to the Textual TUI (dc/dc_tui.py, mfli/mfli_tui.py,
-sot/sot_tui.py), covering the same measurements (the SOT suite: the nonlocal
-switching program so far) plus one new capability the TUI doesn't
+Alternative front end to the Textual TUI (bridge_tui.py), covering the
+same measurements (the SOT suite: the nonlocal switching program so far)
+plus one new capability the TUI doesn't
 have: freely choosing the save directory for a run, anywhere on disk (see
 directory_picker.py), rather than only a sub-folder name under a hardcoded
 data/ root. Runs alongside the TUI, not instead of it.
@@ -179,7 +179,7 @@ def landing() -> None:
     ui.label(APP_TITLE).classes("text-3xl font-bold")
     ui.label(
         "Web front end for the DC, MFLI and SOT measurement programs — runs alongside "
-        "the Textual TUI (dc_tui.py / mfli_tui.py / sot_tui.py), not instead of it."
+        "the Textual TUI (bridge_tui.py), not instead of it."
     ).classes("text-grey-7 mb-4")
 
     with ui.row().classes("w-full gap-4 items-start"):

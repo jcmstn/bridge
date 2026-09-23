@@ -141,6 +141,25 @@ DC_SPIN_VALVE_DESCRIPTION = (
     "its own file and plotted together in different colors."
 )
 
+# Wiring schematic — shown on this program's card in bridge_tui.py.
+DC_SPIN_VALVE_SCHEMATIC = """\
+  KEITHLEY 6221  (DC current source)
+    Output ──▶ sample ── common ground
+    Current reversal (+I/-I) is a toggle — some devices are
+    bias-direction dependent and reversal destroys the signal
+
+  KEITHLEY 2182  (nanovoltmeter)
+    Channel 1 (differential) ──▶ longitudinal voltage leads
+
+  KEITHLEY 2400  (gate source, optional — "Enable gate" switch)
+    Output ──▶ gate electrode
+    Fixed per sweep, single value or list
+
+  Magnet field sweep  (the swept axis)
+    Kepco BOP-GL      ──GPIB──▶ electromagnet coil
+    Lake Shore 475    ──GPIB──▶ Gaussmeter probe at the sample
+"""
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Field definitions & defaults  ── mirrors dc_spin_valve.main()'s example

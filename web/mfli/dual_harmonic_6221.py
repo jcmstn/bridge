@@ -38,6 +38,7 @@ from mfli.mfli_dual_harmonic_6221 import (
     wait_for_reference_lock, _check_ac_safety,
 )
 from mfli.mfli_dual_harmonic_6221_tui import (
+    MFLI_DUAL_HARMONIC_6221_DESCRIPTION,
     DEFAULTS, NUMERIC_FIELDS, TEXT_FIELDS, OPTIONAL_NUMERIC_FIELDS,
     MEASUREMENT_TYPE, MeasurementPlan, build_header_fields, build_summary,
     compute_filename_preview, format_si, parse_sensor_uids, follower_naming, run_costs,
@@ -65,14 +66,6 @@ _SETTINGS_PATH = _DATA_DIR / "web_settings" / "mfli_dual_harmonic_6221_web_setti
 PAGE_TITLE = "MFLI Dual-Harmonic Measurement (6221 AC source)"
 SUITE = "MFLI"
 
-MFLI_DUAL_HARMONIC_6221_DESCRIPTION = (
-    "Same 1f/2f dual-harmonic measurement as the pure-MFLI version, but the AC "
-    "excitation current is sourced by a Keithley 6221 (an ideal current source) "
-    "instead of an MFLI Signal Output — its Trigger Link phase marker drives "
-    "BOTH MFLIs' Aux In 1, and each locks its own oscillator to it (ExtRef). "
-    "Filters, magnet field sweep, temperature logging, phase calibration and "
-    "sample geometry all match the pure-MFLI version."
-)
 
 # extrefs/N/automode options — see ExtRefConfig.automode's docstring in
 # mfli_dual_harmonic_6221.py for the full rationale.

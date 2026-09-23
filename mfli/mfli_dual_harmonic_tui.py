@@ -135,6 +135,34 @@ SETTINGS_PATH = _DEFAULT_DATA_DIR / "mfli_dual_harmonic_tui_settings.json"
 # never deviates.
 MEASUREMENT_TYPE = "HARM"
 
+# One-paragraph blurb + wiring schematic — shown on this program's card in
+# bridge_tui.py, and the description also on its web page.
+MFLI_DUAL_HARMONIC_DESCRIPTION = (
+    "Drives an AC current through the sample and reads the 1st-harmonic response "
+    "on the leader while the follower reads the 2nd-harmonic response — the "
+    "standard setup for e.g. a nonlinear/planar Hall measurement. Optionally "
+    "sweeps a Kepco electromagnet's field (bidirectionally, for hysteresis) with "
+    "the field measured live via a Lake Shore 475 Gaussmeter at every point."
+)
+
+MFLI_DUAL_HARMONIC_SCHEMATIC = """\
+  LEADER MFLI  (current source, 1f)
+    Signal Output 1 ──[ R_series ]──▶ sample/DUT ── common ground
+    Signal Input 1  (differential)  ──▶ demod 1f   (V_Rseries → I)
+
+  FOLLOWER MFLI  (2f)
+    Signal Input 1  (differential)  ──▶ demod 2f   (across the sample)
+
+  MDS cabling  (both units)
+    Leader Ref Out      ───BNC───▶ Follower Ref In
+    Leader Trigger Out 1 ──▶ fanned out to Trigger In 1 on BOTH units
+    (equal cable lengths on the fan-out)
+
+  Magnet field sweep  (optional, "Sweep magnetic field" switch)
+    Kepco BOP-GL      ──GPIB──▶ electromagnet coil
+    Lake Shore 475    ──GPIB──▶ Gaussmeter probe at the sample
+"""
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Field definitions & defaults  ── mirrors mfli_dual_harmonic.main()'s example

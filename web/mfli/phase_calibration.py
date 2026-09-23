@@ -39,6 +39,7 @@ from mfli.mfli_phase_calibration import (
     format_report, run_phase_calibration,
 )
 from mfli.mfli_phase_calibration_tui import (
+    MFLI_PHASE_CALIBRATION_DESCRIPTION,
     DEFAULTS, NUMERIC_FIELDS, TEXT_FIELDS, LIST_FIELDS,
     MEASUREMENT_TYPE, CalibrationPlan, build_header_fields, build_summary, parse_sensor_uids,
     compute_filename_preview, format_si, run_costs,
@@ -63,16 +64,6 @@ _SETTINGS_PATH = _DATA_DIR / "web_settings" / "mfli_phase_calibration_web_settin
 
 PAGE_TITLE = "MFLI Phase Calibration"
 SUITE = "MFLI"
-
-MFLI_PHASE_CALIBRATION_DESCRIPTION = (
-    "Calibrates the leader's 1f reference phase against the sample's own resistive "
-    "Hall response (rather than a separate standard resistor), then verifies the "
-    "result before you trust it: checks the null holds across a full field sweep, "
-    "and empirically identifies which of X2f/Y2f carries the real signal. Optional "
-    "current-amplitude and frequency scaling checks help separate a genuine "
-    "resistive/SOT signal from Joule-heating/anomalous-Nernst contamination. Run "
-    "this before Dual-Harmonic Measurement, using the same wiring."
-)
 
 
 def _load_settings() -> dict:

@@ -133,6 +133,19 @@ SOT_PULSED_2H_DESCRIPTION = (
     "(same current) for switching-probability statistics."
 )
 
+# Wiring schematic — shown on this program's card in bridge_tui.py.
+SOT_PULSED_2H_SCHEMATIC = """\
+  4200A PMU / RPM1 / I+ pad / common bus, 6221 HI→I+ , LO→common, and the Kepco +
+  Lake Shore 475 static field: wired EXACTLY as SOT pulsed switching (4200A PMU + 6221/2182). New:
+
+  KEITHLEY 6221  WAVE sine + phase marker (read phase only, OFF while pulsing)
+    Trigger Link phase marker (pin 1) ──▶ ZURICH MFLI  AUX IN 1
+  ZURICH MFLI    Signal Input (differential) ──▶ the transverse (Hall) arms
+                 ExtRef-locked to the marker; reads 1f (resistive) and 2f of V_xy
+
+  The 2182 is not used.
+"""
+
 # Current MEASURE ceiling with a 4225-RPM on the PMU 10 V range. Above this the
 # pulse current reads back overflowed rather than erroring (the KULT module sets
 # KI_LIM_MODE=KI_VALUE), so build_summary() warns rather than blocks.

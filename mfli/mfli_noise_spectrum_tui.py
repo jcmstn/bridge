@@ -92,6 +92,29 @@ SETTINGS_PATH = _DEFAULT_DATA_DIR / "mfli_noise_spectrum_tui_settings.json"
 
 MEASUREMENT_TYPE = "NOISE"
 
+# One-paragraph blurb + wiring schematic — shown on this program's card in
+# bridge_tui.py.
+MFLI_NOISE_SPECTRUM_DESCRIPTION = (
+    "A quick nV/√Hz noise-floor estimate for the 6221-sourced dual-harmonic "
+    "program — plug the sample in exactly as for a real measurement, run "
+    "this, and read the white-noise floor off the plot to size a lock-in "
+    "filter's time constant/order. Records an Excitation-ON pass (the real "
+    "operating-point floor) and, optionally, an Excitation-OFF baseline — "
+    "no manual rewiring. Not a full noise-metrology characterization."
+)
+
+MFLI_NOISE_SPECTRUM_SCHEMATIC = """\
+  Same wiring as Dual-Harmonic (6221 AC source) — nothing
+  separate to cable for this tool.
+
+  Keithley 6221  (WAVE, sine — the excitation to toggle ON/OFF)
+    HI/LO ──▶ sample/DUT ── common ground
+    Trigger Link phase marker ──▶ Aux In 1 on BOTH the leader AND follower
+
+  LEADER MFLI  (ExtRef-locked, noise-survey demod on 1f)
+  FOLLOWER MFLI  (ExtRef-locked, noise-survey demod on 2f)
+"""
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Field definitions & defaults

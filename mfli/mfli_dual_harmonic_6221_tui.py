@@ -133,6 +133,40 @@ SETTINGS_PATH = _DEFAULT_DATA_DIR / "mfli_dual_harmonic_6221_tui_settings.json"
 # never deviates.
 MEASUREMENT_TYPE = "HARM6"
 
+# One-paragraph blurb + wiring schematic — shown on this program's card in
+# bridge_tui.py, and the description also on its web page.
+MFLI_DUAL_HARMONIC_6221_DESCRIPTION = (
+    "Same 1f/2f dual-harmonic measurement as the pure-MFLI version, but the AC "
+    "excitation current is sourced by a Keithley 6221 (an ideal current source) "
+    "instead of an MFLI Signal Output — its Trigger Link phase marker drives "
+    "BOTH MFLIs' Aux In 1, and each locks its own oscillator to it (ExtRef). "
+    "Filters, magnet field sweep, temperature logging, phase calibration and "
+    "sample geometry all match the pure-MFLI version."
+)
+
+MFLI_DUAL_HARMONIC_6221_SCHEMATIC = """\
+  Keithley 6221  (WAVE, sine, continuous — the current source)
+    HI/LO ──▶ sample/DUT ── common ground
+    Trigger Link phase marker ──▶ split (BNC T, equal lengths) to
+      Aux In 1 on BOTH the leader AND the follower — REQUIRED on both,
+      not leader-only (see module docstring: a follower synced only via
+      MDS silently loses 2f signal as the two clocks drift apart).
+
+  LEADER MFLI  (ExtRef-locked, 1f)
+    Signal Input 1  (differential)  ──▶ demod 1f
+
+  FOLLOWER MFLI  (ExtRef-locked, 2f)
+    Signal Input 1  (differential)  ──▶ demod 2f
+
+  MDS cabling  (both units — common sample clock, not oscillator frequency)
+    Leader Ref Out      ───BNC───▶ Follower Ref In
+    Leader Trigger Out 1 ──▶ fanned out to Trigger In 1 on BOTH units
+
+  Magnet field sweep  (optional, "Sweep magnetic field" switch)
+    Kepco BOP-GL      ──GPIB──▶ electromagnet coil
+    Lake Shore 475    ──GPIB──▶ Gaussmeter probe at the sample
+"""
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Field definitions & defaults  ── mirrors mfli_dual_harmonic_6221.main()'s example
