@@ -1117,6 +1117,11 @@ class SOTPulsedSwitchingApp(MeasurementApp):
                         select_field("pulse_source", "Write pulse", PULSE_SOURCES, DEFAULTS["pulse_source"]),
                         select_field("read_mode", "Read", READ_MODES, DEFAULTS["read_mode"],
                                      hint="4200A+DC → SOTPS · 4200A+lock-in → SOT2H · 6221+lock-in → SOT1I"),
+                        # ONE switch for both pulse sources — a twin per pulse card
+                        # shared the id, and the hidden one won in parse_state()
+                        switch_field("amplitude_bidirectional",
+                                     "Sweep up then back down (hysteresis loop)",
+                                     DEFAULTS["amplitude_bidirectional"]),
                     )
                     yield card(
                         "Write pulse (4200A PMU)",
@@ -1128,9 +1133,6 @@ class SOTPulsedSwitchingApp(MeasurementApp):
                               DEFAULTS["amplitude_step_V"],
                               validators=[Number(minimum=1e-12, failure_description="must be > 0")],
                               hint="One pulse per step."),
-                        switch_field("amplitude_bidirectional",
-                                     "Sweep up then back down (hysteresis loop)",
-                                     DEFAULTS["amplitude_bidirectional"]),
                         field("pulse_width_s", "Pulse width (s)", DEFAULTS["pulse_width_s"]),
                         field("pulse_rise_s", "Rise time (s)", DEFAULTS["pulse_rise_s"]),
                         field("pulse_fall_s", "Fall time (s)", DEFAULTS["pulse_fall_s"]),
@@ -1148,9 +1150,6 @@ class SOTPulsedSwitchingApp(MeasurementApp):
                               DEFAULTS["pulse_current_step_A"],
                               validators=[Number(minimum=1e-12, failure_description="must be > 0")],
                               hint="One pulse per step."),
-                        switch_field("amplitude_bidirectional",
-                                     "Sweep up then back down (hysteresis loop)",
-                                     DEFAULTS["amplitude_bidirectional"]),
                         field("wave_pulse_width_s", "Requested pulse width (s)",
                               DEFAULTS["wave_pulse_width_s"],
                               hint="No rise/fall control; actual width is measured and logged "

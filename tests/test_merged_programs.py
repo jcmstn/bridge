@@ -123,3 +123,26 @@ def test_web_form_keeps_a_numeric_looking_mode_choice_a_string(tmp_path):
                                selects={"ac_source": w("6221"), **int_selects})
     assert not errors and state["ac_source"] == "6221" and state["order_1f"] == int(harm.DEFAULTS["order_1f"])
     assert harm.engine(harm.build_plan(state, tmp_path)) is six
+
+
+def test_sot_form_has_one_widget_per_field_id(tmp_path, monkeypatch):
+    """Every form id appears once — a hidden twin sharing an id (the old
+    per-pulse-card "sweep back down" switch) silently overrode the visible one."""
+    monkeypatch.setattr(sot, "SETTINGS_PATH", tmp_path / "ps.json")
+    monkeypatch.setattr(sot, "_DEFAULT_DATA_DIR", tmp_path)
+    monkeypatch.setattr(sot.SOTPulsedSwitchingApp, "data_root", tmp_path)
+    from collections import Counter
+    from textual.widgets import Switch
+
+    async def go():
+        app = sot.SOTPulsedSwitchingApp()
+        async with app.run_test(size=(220, 70)) as pilot:
+            await pilot.pause()
+            ids = Counter(w.id for w in app.query("*") if w.id in sot.DEFAULTS)
+            app.query_one("#amplitude_bidirectional", Switch).value = False
+            await pilot.pause()
+            return ids, app.parse_state()[0]["amplitude_bidirectional"]
+
+    ids, bidirectional = asyncio.run(go())
+    assert [i for i, n in ids.items() if n > 1] == []
+    assert bidirectional is False
