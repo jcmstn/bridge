@@ -913,11 +913,11 @@ def page() -> None:
                 if source is not None:
                     safe_shutdown("6221 AC source", lambda: shutdown_ac_source(source))
                 if magnet is not None:
-                    shutdown_magnet(magnet, plan.magnet_cfg)
+                    safe_shutdown("magnet", lambda: shutdown_magnet(magnet, plan.magnet_cfg))
                 if gaussmeter is not None:
-                    shutdown_gaussmeter(gaussmeter)
+                    safe_shutdown("gaussmeter", lambda: shutdown_gaussmeter(gaussmeter))
                 if temp_ctrl is not None:
-                    shutdown_temperature_controller(temp_ctrl)
+                    safe_shutdown("MercuryiTC", lambda: shutdown_temperature_controller(temp_ctrl))
         return run_fn
 
     def on_start() -> None:

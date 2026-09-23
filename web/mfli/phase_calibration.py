@@ -47,6 +47,7 @@ from instruments.data_naming import (
     TEST_SAMPLE, allocate_run, finalize_index_row, make_incremental_writer,
     preview_raw_filename, proc_path, write_record,
 )
+from dc.dc_sweep_utils import safe_shutdown
 from web.run_controller import (
     RunController, RunCallbacks, FinalStatus, num_field, text_field, textarea_field, bool_switch,
     render_summary, busy_banner, is_busy,
@@ -623,13 +624,13 @@ def page() -> None:
                 # the DUT), so the magnet can start its ramp-down right
                 # away rather than waiting behind it.
                 if daq is not None:
-                    shutdown_output(daq, plan.out_cfg)
+                    safe_shutdown("MFLI output", lambda: shutdown_output(daq, plan.out_cfg))
                 if magnet is not None:
-                    shutdown_magnet(magnet, plan.magnet_cfg)
+                    safe_shutdown("magnet", lambda: shutdown_magnet(magnet, plan.magnet_cfg))
                 if gaussmeter is not None:
-                    shutdown_gaussmeter(gaussmeter)
+                    safe_shutdown("gaussmeter", lambda: shutdown_gaussmeter(gaussmeter))
                 if temp_ctrl is not None:
-                    shutdown_temperature_controller(temp_ctrl)
+                    safe_shutdown("MercuryiTC", lambda: shutdown_temperature_controller(temp_ctrl))
         return run_fn
 
     def on_start() -> None:
