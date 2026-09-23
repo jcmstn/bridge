@@ -449,7 +449,6 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     warnings: list[str] = []
     errors: list[str] = []
 
-    # ── Sample / run identity ───────────────────────────────────────────────
     dir_warn, dir_err = validate_directory(state.get("data_dir", ""))
     if dir_err:
         errors.append(f"Data root: {dir_err}")
@@ -463,7 +462,6 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     if state["leader_device"] == state["follower_device"]:
         errors.append("Leader and follower device IDs must be different.")
 
-    # ── R_xx toggle ──────────────────────────────────────────────────────
     follower_prefix, follower_display = follower_naming(state["measure_rxx"])
     if state["measure_rxx"]:
         info.append(
@@ -473,7 +471,6 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
             "physical MFLIs); use this program with R_xx off for 1f/2f."
         )
 
-    # ── Excitation (6221) ───────────────────────────────────────────────────
     if state.get("amplitude_parse_error"):
         errors.append(f"Excitation current list: {state['amplitude_parse_error']}")
     else:
@@ -517,7 +514,6 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         "docstring."
     )
 
-    # ── PLL phase-detector demod ────────────────────────────────────────────
     # The real 1f/2f signal demod is fixed at index 0 (see _build_plan below)
     # — the PLL detector must be a different demod (extrefs/N/adcselect is
     # read-only on real firmware; see ExtRefConfig's docstring).
@@ -528,7 +524,6 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         errors.append(f"Follower PLL phase-detector demod index must differ from 0 "
                        f"(demod 0 reads the real {follower_display} signal).")
 
-    # ── Filter / timing (leader and follower each get their own filter) ────
     acq_window_s = {"leader": 0.0, "follower": 0.0}
     for key, label, tc_key, order_key in (
         ("leader", "1f", "time_constant_1f_s", "order_1f"),
@@ -571,7 +566,6 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         else:
             errors.append(f"{label} time constant must be > 0 s.")
 
-    # ── Sweep ────────────────────────────────────────────────────────────────
     total_points = 0
     resolved = None
     if state["enable_sweep"]:
@@ -610,7 +604,6 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         info.append("Single point — no field sweep, magnet untouched.")
         info.extend(run_costs(state).lines("Estimated run time"))
 
-    # ── Temperature (MercuryiTC, optional) ──────────────────────────────────
     if state["enable_temperature"]:
         uids = parse_sensor_uids(state["temperature_sensor_uids"])
         if not uids:
@@ -622,7 +615,6 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     else:
         info.append("Temperature logging off.")
 
-    # ── Phase calibration ───────────────────────────────────────────────────
     if state["enable_phase_cal"]:
         if state["measure_rxx"]:
             warnings.append(
@@ -659,7 +651,6 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         else:
             info.append("Phase cal: null 1f Y at the present field (no magnet ramp).")
 
-    # ── Sample geometry (optional — needed for quantitative analysis) ──────────
     geom_fields = {
         "Hall bar length": state["hall_bar_length_um"],
         "Hall bar width": state["hall_bar_width_um"],
@@ -886,8 +877,6 @@ class RunScreen(MeasurementRunScreen):
     def build_header(self, ctx: RunContext, records: list[dict], *, status: str, comment: str,
                      extra: Optional[dict]) -> dict:
         return build_header_fields(self.plan, ctx, records, status=status, comment=comment, extra=extra)
-
-
 
     @work(thread=True, exclusive=True)
     def do_run(self) -> None:
@@ -1432,12 +1421,6 @@ class MFLIDualHarmonic6221App(MeasurementApp):
         with Horizontal(id="actionbar"):
             yield Button("▶  Start measurement  (F5)", id="start", variant="success")
         yield Footer()
-
-    # ── Lifecycle ────────────────────────────────────────────────────────────
-
-
-    # ── Sample picker ────────────────────────────────────────────────────────
-
 
     # ── Form state I/O ───────────────────────────────────────────────────────
 

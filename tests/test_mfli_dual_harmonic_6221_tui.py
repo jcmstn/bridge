@@ -9,7 +9,6 @@ so we exercise it directly against a tmp_path data root.
 
 from __future__ import annotations
 
-from pathlib import Path
 
 import mfli.mfli_dual_harmonic_6221_tui as tui
 from instruments.data_naming import ensure_sample
@@ -183,7 +182,6 @@ def test_save_measurement_png_single_run_looks_like_a_manual_run(tmp_path) -> No
 def test_each_run_of_a_multi_current_series_gets_its_own_plot_png(tmp_path, monkeypatch) -> None:
     # Several excitation currents behave like several manual runs: one
     # <sample>_<run>_<device>_<type>_plot.png per run, never a combined one.
-    from types import SimpleNamespace
 
     from instruments.data_naming import allocate_run
 

@@ -289,7 +289,6 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     warnings: list[str] = []
     errors: list[str] = []
 
-    # ── Sample / run identity ───────────────────────────────────────────────
     dir_warn, dir_err = validate_directory(state.get("data_dir", ""))
     if dir_err:
         errors.append(f"Data root: {dir_err}")
@@ -329,7 +328,6 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
                  else f"{state['current_min_A']:g} A → {state['current_max_A']:g} A")
     info.append(f"Sweep: {direction}, step={state['step_A']:g} A, {n_sweep_points} points")
 
-    # ── Gate (optional) ─────────────────────────────────────────────────────
     if state["enable_gate"]:
         if state["gate_visa_resource"] in (state["source_visa_resource"], state["voltmeter_visa_resource"]):
             errors.append("Gate (2400) VISA resource must differ from the source/voltmeter resources.")
@@ -355,7 +353,6 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     else:
         info.extend(run_costs(n_sweep_points, state).lines("Estimated total run time"))
 
-    # ── Temperature (MercuryiTC, optional) ──────────────────────────────────
     if state["enable_temperature"]:
         uids = parse_sensor_uids(state["temperature_sensor_uids"])
         if not uids:
@@ -531,8 +528,6 @@ class RunScreen(MeasurementRunScreen):
     def build_header(self, ctx: RunContext, records: list[dict], *, status: str, comment: str,
                      extra: Optional[dict]) -> dict:
         return build_header_fields(self.plan, ctx, records, status=status, comment=comment, extra=extra)
-
-
 
     @work(thread=True, exclusive=True)
     def do_run(self) -> None:
@@ -788,12 +783,6 @@ class DCIVCurveApp(MeasurementApp):
         with Horizontal(id="actionbar"):
             yield Button("▶  Start measurement  (F5)", id="start", variant="success")
         yield Footer()
-
-    # ── Lifecycle ────────────────────────────────────────────────────────────
-
-
-    # ── Sample picker ────────────────────────────────────────────────────────
-
 
     # ── Form state I/O ───────────────────────────────────────────────────────
 

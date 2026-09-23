@@ -300,7 +300,6 @@ def run_costs(state: dict) -> RunCost:
                                  read_delay_s=state["gaussmeter_read_delay_s"])
     has_temp = state.get("enable_temperature") and bool(parse_sensor_uids(state["temperature_sensor_uids"]))
 
-    # ── before the sweep (point 0): connects + MDS, ramp to calibration point, nulls
     rc.at("per-run", PER_RUN_S + MDS_SYNC_S, 0)
     typ, worst = magnet_move_s(state["calibration_current_A"], magnet_cfg)
     rc.at("magnet", typ, 0, worst_extra=worst - typ)
@@ -309,7 +308,6 @@ def run_costs(state: dict) -> RunCost:
     n2, w2 = null_follower_s(tc, rate, state["null_n_averages"], state["null_max_iterations"])
     rc.at("phase nulls", n1 + n2, 0, worst_extra=(w1 + w2) - (n1 + n2))
 
-    # ── the sweep: hop (first one from the calibration point), settle, two SEQUENTIAL acquisitions
     prev = state["calibration_current_A"]
     for i, current in enumerate(currents):
         typ, worst = magnet_move_s(current - prev, magnet_cfg)
@@ -320,7 +318,6 @@ def run_costs(state: dict) -> RunCost:
     rc.each("gaussmeter", read_field_s(gauss_cfg))
     rc.each("overhead", POINT_OVERHEAD_S + (TEMP_READ_S if has_temp else 0.0))
 
-    # ── after the sweep: optional checks (run_amplitude_check / run_frequency_check)
     reconfig = CONFIGURE_OUTPUT_TXNS * GPIB_TXN_S
     if state["enable_amplitude_check"]:
         n_amp = len(state["amplitudes_V"])
@@ -330,7 +327,6 @@ def run_costs(state: dict) -> RunCost:
         null_typ, _ = null_phase_s(tc, rate, state["freq_n_averages"], state["freq_max_iterations"])
         per_freq = reconfig + 2 * GPIB_TXN_S + settle + null_typ      # configure_output + follower osc sync
         rc.tail("checks", (len(state["frequencies_Hz"]) + 1) * per_freq)   # + restore f and re-null
-    # ── shutdown: output off, magnet ramped from the last sweep point to 0, PNG + index row
     last = float(currents[-1]) if len(currents) else 0.0
     rc.tail("ramps", 2 * GPIB_TXN_S + magnet_move_s(last, magnet_cfg, with_field=False)[0])
     rc.tail("per-file", PER_FILE_S)
@@ -381,7 +377,6 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     warnings: list[str] = []
     errors: list[str] = []
 
-    # ── Sample / run identity ───────────────────────────────────────────────
     dir_warn, dir_err = validate_directory(state.get("data_dir", ""))
     if dir_err:
         errors.append(f"Data root: {dir_err}")
@@ -395,7 +390,6 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     if state["leader_device"] == state["follower_device"]:
         errors.append("Leader and follower device IDs must be different.")
 
-    # ── Excitation ──────────────────────────────────────────────────────────
     if state["series_R_ohm"] > 0:
         I = state["amplitude_V"] / state["series_R_ohm"]
         info.append(f"Excitation current I ≈ {format_si(I, 'A')}")
@@ -411,7 +405,6 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
                 "— mains pickup risk."
             )
 
-    # ── Filter / timing ─────────────────────────────────────────────────────
     tc = state["time_constant_s"]
     if tc > 0:
         recommended_settle = 5 * tc
@@ -425,7 +418,6 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     else:
         errors.append("Time constant must be > 0 s.")
 
-    # ── Field sweep & calibration point ─────────────────────────────────────
     total_points = 0
     if state.get("sweep_rows_parse_error"):
         errors.append(f"Sweep rows: {state['sweep_rows_parse_error']}")
@@ -463,7 +455,6 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
                      f"({state['gaussmeter_visa_resource']})")
         info.extend(run_costs(state).lines("Estimated run time"))
 
-    # ── Optional checks ─────────────────────────────────────────────────────
     if state["enable_amplitude_check"]:
         if len(state["amplitudes_V"]) < 2:
             errors.append("Amplitude check needs at least 2 amplitudes (comma-separated).")
@@ -476,7 +467,6 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         else:
             info.append(f"Frequency check: {len(state['frequencies_Hz'])} frequencies")
 
-    # ── Temperature (MercuryiTC, optional) ──────────────────────────────────
     if state["enable_temperature"]:
         uids = parse_sensor_uids(state["temperature_sensor_uids"])
         if not uids:
@@ -652,8 +642,6 @@ class RunScreen(MeasurementRunScreen):
     def build_header(self, ctx: RunContext, records: list[dict], *, status: str, comment: str,
                      extra: Optional[dict]) -> dict:
         return build_header_fields(self.plan, records, status=status, comment=comment)
-
-
 
     @work(thread=True, exclusive=True)
     def do_run(self) -> None:
@@ -995,12 +983,6 @@ class MFLIPhaseCalibrationApp(MeasurementApp):
         with Horizontal(id="actionbar"):
             yield Button("▶  Start calibration  (F5)", id="start", variant="success")
         yield Footer()
-
-    # ── Lifecycle ────────────────────────────────────────────────────────────
-
-
-    # ── Sample picker ────────────────────────────────────────────────────────
-
 
     # ── Form state I/O ───────────────────────────────────────────────────────
 

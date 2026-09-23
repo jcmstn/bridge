@@ -18,27 +18,20 @@ Run:  python sot_pulsed_switching_2h_tui.py
 from __future__ import annotations
 
 import itertools
-import json
 import logging
 import multiprocessing as mp
 import textwrap
-import threading
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
-from rich.text import Text
 
 from textual import work
-from textual.app import App, ComposeResult
-from textual.binding import Binding
+from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.screen import Screen
 from textual.validation import Number
 from textual.widgets import (
-    Button, Collapsible, DataTable, Footer, Header, Input, Label,
-    ProgressBar, RichLog, Select, Static, Switch,
+    Button, Collapsible, Footer, Header, Input, Select, Static, Switch,
 )
 
 from sot.sot_pulsed_switching_2h import (
@@ -78,34 +71,39 @@ from sot.sot_pulsed_switching_2h import (
 )
 from sot.sot_pulsed_switching_2h import _six221_ac_output_off
 from dc.dc_sweep_utils import linear_sweep, parse_value_list, safe_shutdown
-from instruments.data_dir import DataDirPickerScreen, validate_directory
+from instruments.data_dir import validate_directory
 from instruments.field_geometry import field_direction_summary_line, render_ascii_field_diagram
 from instruments.data_naming import (
-    TEST_SAMPLE,
     RunContext,
     allocate_run,
-    ensure_sample,
     finalize_index_row,
     make_incremental_writer,
     preview_raw_filename,
-    proc_path,
     write_record,
 )
 from instruments.keithley4200a import pulse_once_s
 from instruments.keithley6221 import ac_source_restart_s
 from instruments.kepco_magnet import magnet_move_s
 from instruments.lakeshore475 import read_field_s
-from instruments.live_plot import start_live_plot
 from instruments.mfli_daq import acquire_s
 from instruments.run_time import (
     ARM_S, GPIB_TXN_S, LOCK_TYP_S, PER_FILE_S, PER_RUN_S, POINT_OVERHEAD_S, TEMP_READ_S,
-    RunCost, progress_step, progress_total,
+    RunCost,
+)
+from instruments.tui_common import (
+    MeasurementApp,
+    MeasurementRunScreen,
+    card,
+    field,
+    format_si,
+    identity_bar,
+    parse_sensor_uids,
+    run_screen_bindings,
+    select_field,
+    switch_field,
 )
 from instruments.tui_sample_picker import (
     NEW_SAMPLE_SENTINEL,
-    NewSampleScreen,
-    StatusCommentScreen,
-    sample_options,
 )
 
 log = logging.getLogger("sot_pulsed_switching_2h_tui")
@@ -300,11 +298,6 @@ SWITCH_FIELD_IDS = ("differential", "ac_coupling", "filter_sinc",
                     "enable_temperature", "amplitude_bidirectional")
 
 
-def parse_sensor_uids(raw: str) -> tuple:
-    uids = [u.strip() for u in raw.split(",") if u.strip()]
-    return tuple(uids[:2])
-
-
 def parse_return_names(raw: str) -> tuple:
     return tuple(n.strip() for n in raw.split(",") if n.strip())
 
@@ -345,15 +338,6 @@ def _resolve_sense_currents(state: dict) -> tuple[list[float], Optional[str]]:
 
 
 # ── formatting helpers (per-TUI copies) ─────────────────────────────────────
-
-def format_si(value: float, unit: str) -> str:
-    av = abs(value)
-    if av == 0:
-        return f"0 {unit}"
-    for scale, prefix in ((1e-12, "p"), (1e-9, "n"), (1e-6, "µ"), (1e-3, "m"), (1.0, "")):
-        if av < scale * 1000:
-            return f"{value / scale:.3f} {prefix}{unit}"
-    return f"{value:.3e} {unit}"
 
 
 def run_costs(state: dict) -> RunCost:
@@ -467,42 +451,6 @@ def build_header_fields(plan: "MeasurementPlan", ctx: RunContext, records: list[
 
 
 # ── widget helpers (per-TUI copies) ────────────────────────────────────────
-
-def field(field_id: str, label_text: str, default: str, *, kind: str = "number",
-          hint: str = "", validators=None, valid_empty: bool = False) -> list:
-    label = Label(label_text, classes="field-label")
-    inp = Input(value=default, id=field_id, type=kind, validators=validators, valid_empty=valid_empty)
-    widgets = [label, inp]
-    if hint:
-        widgets.append(Label(hint, classes="hint"))
-    widgets[-1].styles.margin = (0, 0, 1, 0)
-    return widgets
-
-
-def switch_field(field_id: str, label_text: str, default: bool) -> Horizontal:
-    row = Horizontal(Switch(value=default, id=field_id), Label(label_text, classes="switch-label"),
-                     classes="switch-row")
-    row.styles.margin = (0, 0, 1, 0)
-    return row
-
-
-def select_field(field_id: str, label_text: str, options: list[tuple[str, int]] | list[int],
-                  default: int, *, hint: str = "") -> list:
-    label = Label(label_text, classes="field-label")
-    opts = [(str(o), o) for o in options] if options and not isinstance(options[0], tuple) else options
-    sel = Select(opts, id=field_id, value=default, allow_blank=False)
-    widgets = [label, sel]
-    if hint:
-        widgets.append(Label(hint, classes="hint"))
-    widgets[-1].styles.margin = (0, 0, 1, 0)
-    return widgets
-
-
-def card(title: str, *groups, muted: bool = False) -> Vertical:
-    children: list = [Static(title, classes="card-title")]
-    for group in groups:
-        children.extend(group) if isinstance(group, list) else children.append(group)
-    return Vertical(*children, classes="stable-card" if muted else "param-card")
 
 
 # ── summary ────────────────────────────────────────────────────────────────
@@ -827,116 +775,27 @@ def _save_measurement_png(records: list[dict], png_path: Path,
     log.info("Saved plot to '%s'", png_path)
 
 
-class _LogRelay(logging.Handler):
-    def __init__(self, screen: "RunScreen") -> None:
-        super().__init__()
-        self.screen = screen
-        self.setFormatter(logging.Formatter("%(asctime)s  %(levelname)-8s  %(message)s",
-                                            datefmt="%H:%M:%S"))
-
-    def emit(self, record: logging.LogRecord) -> None:
-        msg = self.format(record)
-        style = "bold red" if record.levelno >= logging.ERROR \
-            else "bold yellow" if record.levelno >= logging.WARNING else ""
-        try:
-            self.screen.app.call_from_thread(self.screen.write_log, msg, style)
-        except Exception:
-            pass
-
-
 # ── run screen ─────────────────────────────────────────────────────────────
 
-class RunScreen(Screen):
-    CSS = """
-    #status_line { height: 1; padding: 0 1; text-style: bold; }
-    #progress_row { height: auto; margin: 1 2; align: left middle; }
-    #run_label { width: auto; padding: 0 2 0 0; text-style: bold; }
-    #progress { margin: 0; }
-    #results_table { height: 12; margin: 0 2 1 2; }
-    #log { height: 1fr; margin: 0 2 1 2; border: solid $primary; }
-    #runactionbar { height: 3; align: center middle; }
-    """
-    BINDINGS = [
-        Binding("a", "abort", "Abort (safe shutdown)", show=True),
-        Binding("q", "back_or_abort", "Abort / Back", show=True),
-    ]
+class RunScreen(MeasurementRunScreen):
+    ABORT_LABEL = "Abort (safe shutdown)"
+    BINDINGS = run_screen_bindings(ABORT_LABEL)
+    ABORT_STATUS = "Abort requested — finishing this amplitude, then shutting the 6221 + magnet down …"
+    POINT_STATUS = "Point {n} / {total}."
+    TABLE_COLUMNS = ("amp #", "I_mag (A)", "V_pulse (V)", "I_pulse (A)", "V_1f (V)", "V_2f (V)", "locked", "T1 (K)")
+    MEASUREMENT_TYPE = MEASUREMENT_TYPE
+    PNG_SUFFIX = "V2f_vs_amp"
 
-    def __init__(self, plan: MeasurementPlan) -> None:
-        super().__init__()
-        self.plan = plan
-        self._stop_event = threading.Event()
-        self._measurement_running = True
-        self._log_handler: Optional[_LogRelay] = None
-        self._records: list[dict] = []
-        self._plot_queue: Optional["mp.Queue"] = None
-        self._plot_process: Optional[mp.Process] = None
-        self._run_contexts: list[RunContext] = []
-        # The LAST run's PNG, stashed by _save_run_png so _on_status_comment
-        # can re-save it in place once the operator's comment is known.
-        self._png_path: Optional[Path] = None
+    def save_png(self, records: list[dict], png_path: Path, comment: str = "") -> None:
+        _save_measurement_png(records, png_path, plan=self.plan, comment=comment)
 
-    def compose(self) -> ComposeResult:
-        yield Header(show_clock=True)
-        yield Static("Starting …", id="status_line")
-        with Horizontal(id="progress_row"):
-            yield Static("", id="run_label")
-            yield ProgressBar(id="progress", total=progress_total(self.plan.run_cost, self.plan.total_points),
-                              show_eta=True)
-        yield DataTable(id="results_table", zebra_stripes=True, cursor_type="row")
-        yield RichLog(id="log", max_lines=5000, markup=False, wrap=True)
-        with Horizontal(id="runactionbar"):
-            yield Button("Abort (safe shutdown)", id="abort_btn", variant="error")
-            yield Button("Back", id="back_btn", disabled=True)
-        yield Footer()
+    def live_plot_args(self):
+        return (_live_plot_worker,)
 
-    def on_mount(self) -> None:
-        self.query_one("#results_table", DataTable).add_columns(
-            "amp #", "I_mag (A)", "V_pulse (V)", "I_pulse (A)", "V_1f (V)", "V_2f (V)",
-            "locked", "T1 (K)")
-        self._log_handler = _LogRelay(self)
-        logging.getLogger().addHandler(self._log_handler)
-        self._start_live_plot()
-        self.do_run()
-
-    def on_unmount(self) -> None:
-        if self._log_handler is not None:
-            logging.getLogger().removeHandler(self._log_handler)
-        if self._plot_process is not None and self._plot_process.is_alive():
-            self._plot_process.terminate()
-
-    def _start_live_plot(self) -> None:
-        try:
-            self._plot_queue, self._plot_process = start_live_plot(_live_plot_worker)
-        except Exception:
-            log.exception("Could not start live plot window")
-            self._plot_queue = self._plot_process = None
-
-    def write_log(self, msg: str, style: str) -> None:
-        self.query_one("#log", RichLog).write(Text(msg, style=style))
-
-    def _set_status(self, text: str) -> None:
-        self.query_one("#status_line", Static).update(text)
-
-    def _set_status_threadsafe(self, text: str) -> None:
-        self.app.call_from_thread(self._set_status, text)
-
-    def _set_run_label(self, text: str) -> None:
-        self.query_one("#run_label", Static).update(text)
-
-    def _set_run_label_threadsafe(self, text: str) -> None:
-        self.app.call_from_thread(self._set_run_label, text)
-
-    def _on_point(self, record: dict) -> None:
-        self._records.append(record)
-        if self._plot_queue is not None:
-            try:
-                self._plot_queue.put_nowait(record)
-            except Exception:
-                pass
-        table = self.query_one("#results_table", DataTable)
+    def table_row(self, record: dict) -> tuple:
         i_pulse = record.get("pulse_current_measured_A")
         t1 = record.get("temperature_1_K")
-        table.add_row(
+        return (
             str(record["amplitude_index"] + 1),
             f"{record['magnet_current_A']:g}" if record.get("magnet_current_A") is not None else "—",
             f"{record['pulse_amplitude_V']:.4g}",
@@ -946,83 +805,10 @@ class RunScreen(Screen):
             "yes" if record.get("reference_locked") else "no",
             f"{t1:.3f}" if t1 is not None else "—",
         )
-        table.move_cursor(row=table.row_count - 1, scroll=True)
-        self.query_one("#progress", ProgressBar).advance(
-            progress_step(self.plan.run_cost, len(self._records) - 1))
-        self._set_status(f"Point {len(self._records)} / {self.plan.total_points}.")
 
-    def _make_on_point(self, series_index: int, series_label: Optional[str]):
-        def _cb(record: dict) -> None:
-            record["series_index"] = series_index
-            record["series_label"] = series_label
-            self.app.call_from_thread(self._on_point, record)
-        return _cb
-
-    def _save_run_png(self, ctx: RunContext, iter_records: list[dict]) -> None:
-        """One PNG per run (own run number), as if each current had been
-        started by hand -- no combined overlay."""
-        try:
-            png_path = proc_path(self.plan.data_root, ctx.sample, ctx.run_str, ctx.device,
-                                 MEASUREMENT_TYPE, "V2f_vs_amp")
-            self._png_path = png_path
-            _save_measurement_png(iter_records, png_path, plan=self.plan)
-        except Exception:
-            log.exception("Could not save plot PNG")
-
-    def _on_finished(self, final_status: str) -> None:
-        self._measurement_running = False
-        self._set_status(final_status)
-        self.query_one("#back_btn", Button).disabled = False
-        self.query_one("#abort_btn", Button).disabled = True
-        self.app.push_screen(StatusCommentScreen(), self._on_status_comment)
-
-    def _on_status_comment(self, result: Optional[tuple[str, str]]) -> None:
-        # With several currents the runs before the last were implicitly
-        # "skipped" -- left at the outcome status do_run() wrote right after
-        # each one, with no comment. Only the last run, the one the operator
-        # is looking at, gets the status/comment they entered.
-        if result is None or not self._run_contexts:
-            return
-        status, comment = result
-        series_idx = len(self._run_contexts) - 1
-        ctx = self._run_contexts[series_idx]
-        iter_records = [r for r in self._records if r.get("series_index", 0) == series_idx]
-        extra = None
-        if iter_records:
-            extra = {"magnet_current_A": iter_records[0].get("magnet_current_A"),
-                      "sense_current_A": iter_records[0].get("excitation_current_A_peak")}
-        header_fields = build_header_fields(
-            self.plan, ctx, iter_records, status=status, comment=comment, extra=extra)
-        try:
-            if iter_records or not ctx.raw_path.exists():
-                write_record(ctx.raw_path, iter_records, header_fields)
-            finalize_index_row(self.plan.data_root, ctx.sample, ctx.run_number, header_fields)
-        except Exception:
-            log.exception("Could not save final status/comment for run %d", ctx.run_number)
-
-        if comment and self._png_path is not None:
-            try:
-                _save_measurement_png(iter_records, self._png_path, plan=self.plan, comment=comment)
-            except Exception:
-                log.exception("Could not re-save measurement plot PNG with comment")
-
-    def action_abort(self) -> None:
-        if self._measurement_running and not self._stop_event.is_set():
-            self._stop_event.set()
-            self._set_status("Abort requested — finishing this amplitude, then shutting the "
-                             "6221 + magnet down …")
-
-    def action_back_or_abort(self) -> None:
-        if self._measurement_running:
-            self.action_abort()
-        else:
-            self.app.pop_screen()
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "abort_btn":
-            self.action_abort()
-        elif event.button.id == "back_btn":
-            self.app.pop_screen()
+    def build_header(self, ctx: RunContext, records: list[dict], *, status: str, comment: str,
+                     extra: Optional[dict]) -> dict:
+        return build_header_fields(self.plan, ctx, records, status=status, comment=comment, extra=extra)
 
     @work(thread=True, exclusive=True)
     def do_run(self) -> None:
@@ -1099,6 +885,7 @@ class RunScreen(Screen):
                                    temperature_setpoint_K=plan.temperature_setpoint_K,
                                    key_axis=("current_A", I_mag), series=plan.series)
                 self._run_contexts.append(ctx)
+                self._run_extras.append({"magnet_current_A": I_mag, "sense_current_A": I_sense})
                 self._set_run_label_threadsafe(f"Run #{ctx.run_str}")
                 write_csv = make_incremental_writer(
                     ctx.raw_path,
@@ -1163,7 +950,7 @@ class RunScreen(Screen):
 
 # ── app / form ─────────────────────────────────────────────────────────────
 
-class SOTPulsedSwitching2HApp(App):
+class SOTPulsedSwitching2HApp(MeasurementApp):
     TITLE = "SOT pulsed switching (2nd-harmonic read)"
     SUB_TITLE = "4200A PMU pulse · delayed 6221 AC / MFLI 1f+2f · static tilted field"
 
@@ -1203,36 +990,13 @@ class SOTPulsedSwitching2HApp(App):
     #actionbar { height: 3; align: center middle; }
     """
 
-    BINDINGS = [
-        Binding("f5", "start", "Start measurement", show=True),
-        Binding("q", "quit", "Quit", show=True),
-    ]
-
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
         with Horizontal(id="body"):
             with VerticalScroll(id="form"):
-                with Vertical(id="identity_bar"):
-                    yield Static("", id="filename_preview")
-                    with Horizontal(id="data_dir_row"):
-                        yield Input(value=str(_DEFAULT_DATA_DIR), id="data_dir",
-                                    placeholder="Absolute path to the data root")
-                        yield Button("Browse…", id="browse_data_dir")
-                    with Vertical(id="identity_fields"):
-                        yield Vertical(
-                            Label("Sample", classes="field-label"),
-                            Select(sample_options(self.data_root), id="sample_select",
-                                   allow_blank=False, value=TEST_SAMPLE),
-                            classes="field",
-                        )
-                        yield Vertical(*field("device", "Device (e.g. HB3)",
-                                              DEFAULTS["device"], kind="text"), classes="field")
-                        yield Vertical(*field("cooldown", "Cooldown (optional)",
-                                              DEFAULTS["cooldown"], kind="text"), classes="field")
-                        yield Vertical(*field("temperature_setpoint_K", "Temp. setpoint (K, optional)",
-                                              DEFAULTS["temperature_setpoint_K"], kind="number",
-                                              valid_empty=True, hint="Filename T###K token only."),
-                                       classes="field")
+                yield identity_bar(DEFAULTS, _DEFAULT_DATA_DIR, self.data_root,
+                                   device_label="Device (e.g. HB3)",
+                                   temperature_hint="Filename T###K token only.")
 
                 with Vertical(classes="param-grid"):
                     yield card(
@@ -1460,95 +1224,7 @@ class SOTPulsedSwitching2HApp(App):
             yield Button("▶  Start measurement  (F5)", id="start", variant="success")
         yield Footer()
 
-    def on_mount(self) -> None:
-        logging.getLogger().handlers.clear()
-        self._load_settings()
-        self._set_temperature_fields_enabled(self.query_one("#enable_temperature", Switch).value)
-        self.refresh_summary()
-
-    # sample picker
-    def _refresh_sample_options(self, *, select_value: Optional[str] = None) -> None:
-        select = self.query_one("#sample_select", Select)
-        select.set_options(sample_options(self.data_root))
-        if select_value is not None:
-            select.value = select_value
-
-    def _sync_data_root(self) -> None:
-        path = Path(self.query_one("#data_dir", Input).value.strip()).expanduser()
-        if not path.is_dir():
-            return
-        self.data_root = path.resolve()
-        opts = [v for _, v in sample_options(self.data_root)]
-        cur = self.query_one("#sample_select", Select).value
-        self._refresh_sample_options(select_value=cur if cur in opts else TEST_SAMPLE)
-
-    def _browse_data_dir(self) -> None:
-        start = self.query_one("#data_dir", Input).value.strip() or str(_DEFAULT_DATA_DIR)
-        self.push_screen(DataDirPickerScreen(start), self._on_data_dir_picked)
-
-    def _on_data_dir_picked(self, picked: Optional[str]) -> None:
-        if not picked:
-            return
-        self.query_one("#data_dir", Input).value = picked
-        self._sync_data_root()
-        self.refresh_summary()
-
-    def on_select_changed(self, event: Select.Changed) -> None:
-        if event.select.id != "sample_select":
-            return
-        if event.value == NEW_SAMPLE_SENTINEL:
-            self.push_screen(NewSampleScreen(self.data_root), self._on_new_sample_created)
-            return
-        self.refresh_summary()
-
-    def _on_new_sample_created(self, result: Optional[str]) -> None:
-        self._refresh_sample_options(select_value=result if result else TEST_SAMPLE)
-        self.refresh_summary()
-
     # form I/O
-    def _all_field_ids(self) -> list[str]:
-        return list(NUMERIC_FIELDS) + TEXT_FIELDS + OPTIONAL_NUMERIC_FIELDS
-
-    def collect_raw(self) -> dict:
-        raw: dict = {fid: self.query_one(f"#{fid}", Input).value for fid in self._all_field_ids()}
-        for sid in SWITCH_FIELD_IDS:
-            raw[sid] = self.query_one(f"#{sid}", Switch).value
-        raw["automode"] = self.query_one("#automode", Select).value
-        sample_value = self.query_one("#sample_select", Select).value
-        if sample_value not in (None, Select.BLANK, NEW_SAMPLE_SENTINEL):
-            raw["sample"] = sample_value
-        return raw
-
-    def _load_settings(self) -> None:
-        try:
-            saved = json.loads(SETTINGS_PATH.read_text())
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            return
-        for fid in self._all_field_ids():
-            if fid in saved:
-                try:
-                    self.query_one(f"#{fid}", Input).value = str(saved[fid])
-                except Exception:
-                    pass
-        for sid in SWITCH_FIELD_IDS:
-            if sid in saved:
-                self.query_one(f"#{sid}", Switch).value = bool(saved[sid])
-        if "automode" in saved:
-            try:
-                self.query_one("#automode", Select).value = int(saved["automode"])
-            except Exception:
-                pass
-        self._sync_data_root()
-        saved_sample = saved.get("sample")
-        if saved_sample and saved_sample in [v for _, v in sample_options(self.data_root)]:
-            self.query_one("#sample_select", Select).value = saved_sample
-
-    def _save_settings(self, raw: dict) -> None:
-        try:
-            SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
-            SETTINGS_PATH.write_text(json.dumps(raw, indent=2))
-        except OSError:
-            pass
 
     def parse_state(self) -> tuple[dict, list[str]]:
         errors: list[str] = []
@@ -1585,20 +1261,6 @@ class SOTPulsedSwitching2HApp(App):
             _resolve_sense_currents(state)
         return state, errors
 
-    def on_input_changed(self, event: Input.Changed) -> None:
-        if event.input.id == "data_dir":
-            self._sync_data_root()
-        self.refresh_summary()
-
-    def on_switch_changed(self, event: Switch.Changed) -> None:
-        if event.switch.id == "enable_temperature":
-            self._set_temperature_fields_enabled(event.value)
-        self.refresh_summary()
-
-    def _set_temperature_fields_enabled(self, enabled: bool) -> None:
-        for fid in TEMPERATURE_FIELD_IDS:
-            self.query_one(f"#{fid}", Input).disabled = not enabled
-
     def refresh_summary(self) -> None:
         state, parse_errors = self.parse_state()
         if parse_errors:
@@ -1626,35 +1288,6 @@ class SOTPulsedSwitching2HApp(App):
         theta = None if parse_errors else state.get("field_theta_deg")
         phi = None if parse_errors else state.get("field_phi_deg")
         self.query_one("#field_diagram", Static).update(render_ascii_field_diagram(theta, phi))
-
-    def action_start(self) -> None:
-        state, parse_errors = self.parse_state()
-        if parse_errors:
-            self.bell()
-            return
-        _, _, errors = build_summary(state)
-        if errors:
-            self.bell()
-            return
-        self.data_root = Path(state["data_dir"]).expanduser()
-        ensure_sample(self.data_root, state["sample"], create=True)
-        self._save_settings(self.collect_raw())
-        self.push_screen(RunScreen(self._build_plan(state)))
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "start":
-            self.action_start()
-        elif event.button.id == "browse_data_dir":
-            self._browse_data_dir()
-        elif event.button.id == "plane_xy":
-            self.query_one("#field_theta_deg", Input).value = "90"
-            self.refresh_summary()
-        elif event.button.id == "plane_zx":
-            self.query_one("#field_phi_deg", Input).value = "0"
-            self.refresh_summary()
-        elif event.button.id == "plane_zy":
-            self.query_one("#field_phi_deg", Input).value = "90"
-            self.refresh_summary()
 
     def _build_plan(self, state: dict) -> MeasurementPlan:
         k4200_cfg = Keithley4200AConfig(visa_resource=state["k4200_visa_resource"])

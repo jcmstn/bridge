@@ -353,7 +353,6 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     warnings: list[str] = []
     errors: list[str] = []
 
-    # ── Sample / run identity ───────────────────────────────────────────────
     dir_warn, dir_err = validate_directory(state.get("data_dir", ""))
     if dir_err:
         errors.append(f"Data root: {dir_err}")
@@ -402,7 +401,6 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     read_s = read_time_s(state["nplc"])
     info.append(f"Estimated 2182 reading time ≈ {read_s * 1000:.0f} ms (NPLC={state['nplc']:g})")
 
-    # ── Gate (optional) ─────────────────────────────────────────────────────
     n_gate_series = 1
     if state["enable_gate"]:
         if state["gate_voltage_limit_V"] <= 0:
@@ -427,7 +425,6 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     else:
         info.append("Gate off — Keithley 2400 not used, single field sweep run.")
 
-    # ── Field sweep ──────────────────────────────────────────────────────────
     n_sweep_points = 0
     resolved: list = []
     if state.get("sweep_rows_parse_error"):
@@ -463,7 +460,6 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
 
     info.extend(run_costs(resolved, state).lines("Estimated total run time"))
 
-    # ── Temperature (MercuryiTC, optional) ──────────────────────────────────
     if state["enable_temperature"]:
         uids = parse_sensor_uids(state["temperature_sensor_uids"])
         if not uids:
@@ -646,8 +642,6 @@ class RunScreen(MeasurementRunScreen):
     def build_header(self, ctx: RunContext, records: list[dict], *, status: str, comment: str,
                      extra: Optional[dict]) -> dict:
         return build_header_fields(self.plan, ctx, records, status=status, comment=comment, extra=extra)
-
-
 
     @work(thread=True, exclusive=True)
     def do_run(self) -> None:
@@ -991,12 +985,6 @@ class DCSpinValveApp(MeasurementApp):
         with Horizontal(id="actionbar"):
             yield Button("▶  Start measurement  (F5)", id="start", variant="success")
         yield Footer()
-
-    # ── Lifecycle ────────────────────────────────────────────────────────────
-
-
-    # ── Sample picker ────────────────────────────────────────────────────────
-
 
     # ── Form state I/O ───────────────────────────────────────────────────────
 

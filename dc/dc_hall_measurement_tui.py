@@ -356,7 +356,6 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     warnings: list[str] = []
     errors: list[str] = []
 
-    # ── Sample / run identity ───────────────────────────────────────────────
     dir_warn, dir_err = validate_directory(state.get("data_dir", ""))
     if dir_err:
         errors.append(f"Data root: {dir_err}")
@@ -370,7 +369,6 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     if state["source_visa_resource"] == state["voltmeter_visa_resource"]:
         errors.append("Source (6221) and voltmeter (2182) VISA resources must be different.")
 
-    # ── Channel toggle (R_xy / R_xx) ────────────────────────────────────────
     channel_map = resolve_channel_map(state["measure_rxx"], state["measure_rxy"])
     if not channel_map:
         errors.append("Enable at least one of R_xy or R_xx.")
@@ -392,7 +390,6 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         info.append(f"{label.upper()} only, on channel 1 (identical wiring/timing "
                      "to a single-channel run).")
 
-    # ── Source ───────────────────────────────────────────────────────────────
     if state.get("sense_current_parse_error"):
         errors.append(f"Sense current list: {state['sense_current_parse_error']}")
         current_list: list[float] = []
@@ -411,11 +408,9 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     if state["compliance_V"] <= 0:
         errors.append("Compliance voltage must be > 0 V.")
 
-    # ── Voltmeter timing ─────────────────────────────────────────────────────
     read_s = read_time_s(state["nplc"])
     info.append(f"Estimated 2182 reading time ≈ {read_s * 1000:.0f} ms (NPLC={state['nplc']:g})")
 
-    # ── Sweep ────────────────────────────────────────────────────────────────
     total_points = 0
     resolved = None
     if state["enable_sweep"]:
@@ -455,7 +450,6 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         info.append("Single point — no field sweep, magnet untouched.")
         info.extend(run_costs(None, state).lines("Estimated total run time"))
 
-    # ── Temperature (MercuryiTC, optional) ──────────────────────────────────
     if state["enable_temperature"]:
         uids = parse_sensor_uids(state["temperature_sensor_uids"])
         if not uids:
@@ -467,7 +461,6 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     else:
         info.append("Temperature logging off.")
 
-    # ── Field direction (optional) ─────────────────────────────────────────
     info.append(field_direction_summary_line(
         state.get("field_theta_deg"), state.get("field_phi_deg")))
 
@@ -674,8 +667,6 @@ class RunScreen(MeasurementRunScreen):
     def build_header(self, ctx: RunContext, records: list[dict], *, status: str, comment: str,
                      extra: Optional[dict]) -> dict:
         return build_header_fields(self.plan, ctx, records, status=status, comment=comment, extra=extra)
-
-
 
     @work(thread=True, exclusive=True)
     def do_run(self) -> None:
@@ -1009,12 +1000,6 @@ class DCHallMeasurementApp(MeasurementApp):
         with Horizontal(id="actionbar"):
             yield Button("▶  Start measurement  (F5)", id="start", variant="success")
         yield Footer()
-
-    # ── Lifecycle ────────────────────────────────────────────────────────────
-
-
-    # ── Sample picker ────────────────────────────────────────────────────────
-
 
     # ── Form state I/O ───────────────────────────────────────────────────────
 

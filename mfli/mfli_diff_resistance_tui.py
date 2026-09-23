@@ -298,7 +298,6 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     warnings: list[str] = []
     errors: list[str] = []
 
-    # ── Sample / run identity ───────────────────────────────────────────────
     dir_warn, dir_err = validate_directory(state.get("data_dir", ""))
     if dir_err:
         errors.append(f"Data root: {dir_err}")
@@ -312,7 +311,6 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     if state["leader_device"] == state["follower_device"]:
         errors.append("Leader and follower device IDs must be different.")
 
-    # ── Excitation & bias ────────────────────────────────────────────────────
     if state["series_R_ohm"] > 0:
         I = state["ac_amplitude_V"] / state["series_R_ohm"]
         info.append(
@@ -339,7 +337,6 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     if state["bias_min_V"] == state["bias_max_V"]:
         warnings.append("bias_min equals bias_max — sweep will repeat a single point.")
 
-    # ── Filter / timing ─────────────────────────────────────────────────────
     tc = state["time_constant_s"]
     if tc > 0:
         recommended_settle = 5 * tc
@@ -362,7 +359,6 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     else:
         errors.append("Time constant must be > 0 s.")
 
-    # ── Bias sweep ───────────────────────────────────────────────────────────
     if state["n_points"] < 2:
         errors.append("Points per sweep direction must be ≥ 2.")
     total_points = max(0, 2 * state["n_points"] - 1)
@@ -372,7 +368,6 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     )
     info.extend(run_costs(total_points, state).lines("Estimated total run time"))
 
-    # ── Temperature (MercuryiTC, optional) ──────────────────────────────────
     if state["enable_temperature"]:
         uids = parse_sensor_uids(state["temperature_sensor_uids"])
         if not uids:
@@ -559,8 +554,6 @@ class RunScreen(MeasurementRunScreen):
     def build_header(self, ctx: RunContext, records: list[dict], *, status: str, comment: str,
                      extra: Optional[dict]) -> dict:
         return build_header_fields(self.plan, records, status=status, comment=comment)
-
-
 
     @work(thread=True, exclusive=True)
     def do_run(self) -> None:
@@ -786,12 +779,6 @@ class MFLIDiffResistanceApp(MeasurementApp):
         with Horizontal(id="actionbar"):
             yield Button("▶  Start measurement  (F5)", id="start", variant="success")
         yield Footer()
-
-    # ── Lifecycle ────────────────────────────────────────────────────────────
-
-
-    # ── Sample picker ────────────────────────────────────────────────────────
-
 
     # ── Form state I/O ───────────────────────────────────────────────────────
 

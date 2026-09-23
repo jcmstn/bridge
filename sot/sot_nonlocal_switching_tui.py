@@ -851,8 +851,6 @@ class RunScreen(MeasurementRunScreen):
     MEASUREMENT_TYPE = MEASUREMENT_TYPE
     PNG_SUFFIX = "NL_vs_pulse"
 
-
-
     def live_plot_args(self):
         return (_live_plot_worker, self.plan.read_cfg.reversal_enabled)
 
@@ -1070,10 +1068,6 @@ class NonlocalSwitchingApp(MeasurementApp):
         with Horizontal(id="actionbar"):
             yield Button("▶  Start measurement  (F5)", id="start", variant="success")
         yield Footer()
-
-
-    # sample picker
-
 
     # form I/O
 

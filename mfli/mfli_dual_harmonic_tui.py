@@ -381,7 +381,6 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     warnings: list[str] = []
     errors: list[str] = []
 
-    # ── Sample / run identity ───────────────────────────────────────────────
     dir_warn, dir_err = validate_directory(state.get("data_dir", ""))
     if dir_err:
         errors.append(f"Data root: {dir_err}")
@@ -395,7 +394,6 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     if state["leader_device"] == state["follower_device"]:
         errors.append("Leader and follower device IDs must be different.")
 
-    # ── Excitation ──────────────────────────────────────────────────────────
     if state["series_R_ohm"] > 0:
         I = state["amplitude_V"] / state["series_R_ohm"]
         info.append(f"Excitation current I ≈ {format_si(I, 'A')}")
@@ -412,7 +410,6 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
                     f"harmonic ({nearest} Hz) — mains pickup risk."
                 )
 
-    # ── Filter / timing (1f and 2f each get their own filter) ──────────────
     acq_window_s = {"1f": 0.0, "2f": 0.0}
     for label, tc_key, order_key in (("1f", "time_constant_1f_s", "order_1f"),
                                       ("2f", "time_constant_2f_s", "order_2f")):
@@ -460,7 +457,6 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         else:
             errors.append(f"{label} time constant must be > 0 s.")
 
-    # ── Sweep ────────────────────────────────────────────────────────────────
     total_points = 0
     resolved = None
     if state["enable_sweep"]:
@@ -499,7 +495,6 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         info.append("Single point — no field sweep, magnet untouched.")
         info.extend(run_costs(state).lines("Estimated run time"))
 
-    # ── Temperature (MercuryiTC, optional) ──────────────────────────────────
     if state["enable_temperature"]:
         uids = parse_sensor_uids(state["temperature_sensor_uids"])
         if not uids:
@@ -511,7 +506,6 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     else:
         info.append("Temperature logging off.")
 
-    # ── Phase calibration ───────────────────────────────────────────────────
     if state["enable_phase_cal"]:
         if state["phase_cal_current_A"] is not None:
             if not state["enable_sweep"]:
@@ -540,7 +534,6 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         else:
             info.append("Phase cal: null 1f Y at the present field (no magnet ramp).")
 
-    # ── Sample geometry (optional — needed for quantitative analysis) ──────────
     geom_fields = {
         "Hall bar length": state["hall_bar_length_um"],
         "Hall bar width": state["hall_bar_width_um"],
@@ -736,8 +729,6 @@ class RunScreen(MeasurementRunScreen):
     def build_header(self, ctx: RunContext, records: list[dict], *, status: str, comment: str,
                      extra: Optional[dict]) -> dict:
         return build_header_fields(self.plan, records, status=status, comment=comment)
-
-
 
     @work(thread=True, exclusive=True)
     def do_run(self) -> None:
@@ -1147,12 +1138,6 @@ class MFLIDualHarmonicApp(MeasurementApp):
         with Horizontal(id="actionbar"):
             yield Button("▶  Start measurement  (F5)", id="start", variant="success")
         yield Footer()
-
-    # ── Lifecycle ────────────────────────────────────────────────────────────
-
-
-    # ── Sample picker ────────────────────────────────────────────────────────
-
 
     # ── Form state I/O ───────────────────────────────────────────────────────
 

@@ -260,7 +260,6 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     if state["leader_device"] == state["follower_device"]:
         errors.append("Leader and follower device IDs must be different.")
 
-    # ── Excitation (6221) ───────────────────────────────────────────────────
     if state.get("amplitude_parse_error"):
         errors.append(f"Excitation current list: {state['amplitude_parse_error']}")
     else:
@@ -300,7 +299,6 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         errors.append("Follower PLL phase-detector demod index must differ from 0 "
                        "(demod 0 is the noise-survey signal demod).")
 
-    # ── Reference / duration ─────────────────────────────────────────────────
     if state["thermal_R_ohm"] is not None:
         thermal = thermal_noise_asd(state["thermal_R_ohm"], state["thermal_T_K"])
         info.append(f"Johnson-noise reference @ {state['thermal_R_ohm']:g} Ω, "
@@ -685,12 +683,6 @@ class MFLINoiseSpectrumApp(MeasurementApp):
         with Horizontal(id="actionbar"):
             yield Button("▶  Start estimate  (F5)", id="start", variant="success")
         yield Footer()
-
-    # ── Lifecycle ────────────────────────────────────────────────────────────
-
-
-    # ── Sample picker ────────────────────────────────────────────────────────
-
 
     # ── Form state I/O ───────────────────────────────────────────────────────
 
