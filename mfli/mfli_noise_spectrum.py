@@ -229,10 +229,13 @@ def acquire_time_series(daq: zi.ziDAQServer, cfg: NoiseDemodConfig,
             this_chunk = min(chunk_s, duration_s - collected_s)
             timeout_ms = int(this_chunk * 1000) + 3000
             data = daq.poll(this_chunk, timeout_ms, flat=True)
-            if path in data and len(data[path]):
-                for s in data[path]:
-                    x_parts.append(np.atleast_1d(s["x"]))
-                    y_parts.append(np.atleast_1d(s["y"]))
+            # flat=True: data[path] is ONE dict of field -> array (every
+            # sample in this chunk), not a list of per-sample dicts — same
+            # shape instruments/mfli_daq.py's _poll_demod_paths() reads.
+            chunk = data.get(path)
+            if chunk is not None and len(chunk.get("x", ())):
+                x_parts.append(np.atleast_1d(chunk["x"]))
+                y_parts.append(np.atleast_1d(chunk["y"]))
             collected_s += this_chunk
             pct = 100.0 * collected_s / duration_s
             log.info("   %-32s %5.1f%%   (%.1f / %.1f s)",

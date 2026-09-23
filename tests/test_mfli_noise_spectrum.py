@@ -99,3 +99,33 @@ def test_summarize_asd_reproduces_known_white_noise_floor() -> None:
     stats = noise.summarize_asd(freq, asd)
 
     assert stats["white_floor_V_rthz"] == pytest.approx(sigma_v, rel=0.1)
+
+
+class _FakeStreamDAQ:
+    """poll(flat=True) the way zhinst returns it: {path: {field: array}}."""
+
+    def __init__(self, samples_per_chunk: int = 4):
+        self.n = samples_per_chunk
+        self.calls = 0
+
+    def getDouble(self, path): return 100.0
+    def getInt(self, path): return 0
+    def subscribe(self, path): self.path = path
+    def unsubscribe(self, path): pass
+    def sync(self): pass
+
+    def poll(self, duration_s, timeout_ms, flat=True):
+        self.calls += 1
+        base = float(self.calls)
+        return {self.path: {"timestamp": np.arange(self.n),
+                            "x": np.full(self.n, base), "y": np.full(self.n, -base)}}
+
+
+def test_acquire_time_series_concatenates_every_chunk() -> None:
+    cfg = noise.NoiseDemodConfig(device="dev1234", demod_index=0, label="leader")
+    daq = _FakeStreamDAQ(samples_per_chunk=4)
+    out = noise.acquire_time_series(daq, cfg, duration_s=3.0, chunk_s=1.0)
+    assert daq.calls == 3
+    assert out["x"].tolist() == [1.0] * 4 + [2.0] * 4 + [3.0] * 4
+    assert out["y"].tolist() == [-1.0] * 4 + [-2.0] * 4 + [-3.0] * 4
+    assert out["fs"] == 100.0 and out["overload_detected"] is False
