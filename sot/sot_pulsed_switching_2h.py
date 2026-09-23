@@ -598,7 +598,7 @@ def main() -> None:
         # 6221 down first (shares the channel pin), then the 4200A, then the
         # magnet — never ramp an inductive field while the DUT carries current.
         safe_shutdown("6221", lambda: shutdown_ac_source(source))
-        safe_shutdown("4200A", lambda: shutdown_4200a(k4200, channels=()))
+        safe_shutdown("4200A", lambda: shutdown_4200a(k4200))
         safe_shutdown("magnet", lambda: shutdown_magnet(magnet, magnet_cfg))
         safe_shutdown("gaussmeter", lambda: shutdown_gaussmeter(gaussmeter))
         safe_shutdown("temperature controller", lambda: shutdown_temperature_controller(temp_ctrl))
