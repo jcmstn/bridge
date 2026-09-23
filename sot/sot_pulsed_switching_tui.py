@@ -20,12 +20,12 @@ import itertools
 import logging
 import multiprocessing as mp
 import textwrap
+import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 
-from textual import work
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.validation import Number
@@ -70,10 +70,8 @@ from instruments.field_geometry import field_direction_summary_line, render_asci
 from instruments.data_naming import (
     RunContext,
     allocate_run,
-    finalize_index_row,
-    make_incremental_writer,
+    record_run,
     preview_raw_filename,
-    write_record,
 )
 from instruments.keithley2182 import read_time_s
 from instruments.keithley4200a import pulse_once_s
@@ -705,6 +703,214 @@ def _save_measurement_png(records: list[dict], png_path: Path,
     log.info("Saved plot to '%s'", png_path)
 
 
+# ── plan + run (pure, shared by the TUI RunScreen and (no web page yet)) ──────────────
+
+def build_plan(state: dict, data_root: Path) -> MeasurementPlan:
+    """One parsed, validated run request from a state dict. Pure — shared by
+    the TUI and the web page."""
+    k4200_cfg = Keithley4200AConfig(visa_resource=state["k4200_visa_resource"])
+    pmu_cfg = PMUPulseConfig(
+        library=state["pmu_library"] or "bridge_sot",
+        module=state["pmu_module"],
+        pmu_channel=state["pmu_channel"], pmu_id=state["pmu_id"] or "PMU1",
+        width_s=state["pulse_width_s"], rise_s=state["pulse_rise_s"],
+        fall_s=state["pulse_fall_s"], period_s=state["pulse_period_s"],
+        delay_s=state["pulse_delay_s"], n_pulses=state["n_pulses"],
+        sample_rate=state["pmu_sample_rate"],
+        meas_start_perc=state["pmu_meas_start_perc"],
+        meas_stop_perc=state["pmu_meas_stop_perc"],
+        dut_res_ohm=state["pmu_dut_res_ohm"],
+        v_range_V=state["pmu_v_range_V"],
+        i_range_A=state["pmu_i_range_A"], v_limit_V=state["pmu_v_limit_V"],
+        return_names=parse_return_names(state["pmu_return_names"]),
+    )
+    read_cfg = ReadConfig(
+        sense_current_A=state["sense_currents_A"][0], compliance_V=state["compliance_V"],
+        source_delay_s=state["source_delay_s"], nplc=state["nplc"],
+        auto_range=state["auto_range"], n_reversals=state["n_reversals"],
+        settle_after_enable_s=state["settle_after_enable_s"],
+        delay_after_pulse_s=state["delay_after_pulse_s"],
+    )
+    src_cfg = SourceConfig(
+        visa_resource=state["source_visa_resource"], sense_current_A=state["sense_currents_A"][0],
+        compliance_V=state["compliance_V"], source_delay_s=state["source_delay_s"],
+    )
+    volt_cfg = VoltmeterConfig(
+        visa_resource=state["voltmeter_visa_resource"], nplc=state["nplc"],
+        auto_range=state["auto_range"],
+    )
+    magnet_cfg = MagnetConfig(
+        visa_resource=state["magnet_visa_resource"], current_limit_A=state["current_limit_A"],
+        voltage_compliance_V=state["magnet_voltage_compliance_V"],
+        ramp_step_A=state["ramp_step_A"], ramp_delay_s=state["ramp_delay_s"],
+    )
+    gauss_cfg = GaussmeterConfig(
+        visa_resource=state["gaussmeter_visa_resource"], unit="T",
+        n_averages=state["gaussmeter_n_averages"], read_delay_s=state["gaussmeter_read_delay_s"],
+    )
+
+    temp_cfg = None
+    if state["enable_temperature"]:
+        uids = parse_sensor_uids(state["temperature_sensor_uids"])
+        if uids:
+            temp_cfg = TemperatureControllerConfig(
+                visa_resource=state["temperature_visa_resource"], sensor_uids=uids)
+
+    # pmu_dut_res_ohm is a real pulse parameter (PMU load-line correction),
+    # so it is recorded; the sidebar's per-amplitude current estimate is
+    # derived from it rather than from a separate display-only field.
+    header_extra = {
+        "pmu_library": pmu_cfg.library,
+        "pmu_module": pmu_cfg.module,
+        "pulse_width_s": state["pulse_width_s"],
+        "pulse_period_s": state["pulse_period_s"],
+        "pmu_v_range_V": state["pmu_v_range_V"],
+        "pmu_i_range_A": state["pmu_i_range_A"],
+        "pmu_dut_res_ohm": state["pmu_dut_res_ohm"],
+        "n_pulses": state["n_pulses"],
+        "delay_after_pulse_s": state["delay_after_pulse_s"],
+        "sense_current_A": state["sense_currents_A"][0],
+        "n_reversals": state["n_reversals"],
+        "field_theta_deg": state["field_theta_deg"],
+        "field_phi_deg": state["field_phi_deg"],
+        "amplitude_start_V": state["amplitude_start_V"],
+        "amplitude_stop_V": state["amplitude_stop_V"],
+        "amplitude_step_V": state["amplitude_step_V"],
+        "amplitude_bidirectional": state["amplitude_bidirectional"],
+        "amplitudes_V": state["amplitude_list"],
+    }
+    return MeasurementPlan(
+        k4200_cfg=k4200_cfg, pmu_cfg=pmu_cfg, src_cfg=src_cfg, volt_cfg=volt_cfg,
+        read_cfg=read_cfg, magnet_cfg=magnet_cfg, gauss_cfg=gauss_cfg,
+        amplitudes_V=state["amplitude_list"], magnet_currents_A=state["magnet_currents_A"],
+        sense_currents_A=state["sense_currents_A"],
+        field_theta_deg=state["field_theta_deg"], field_phi_deg=state["field_phi_deg"],
+        field_settle_tolerance_mT=state["field_settle_tolerance_mT"],
+        data_root=data_root,
+        sample=state["sample"], device=state["device"],
+        temperature_setpoint_K=state["temperature_setpoint_K"],
+        cooldown=state["cooldown"], header_extra=header_extra, series="",
+        temp_cfg=temp_cfg, run_cost=run_costs(state),
+    )
+
+def _ignore(*_args) -> None:
+    pass
+
+
+def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
+             on_status: Callable[[str], None] = _ignore,
+             on_run_label: Callable[[str], None] = _ignore,
+             on_point: Callable[[dict], None] = _ignore,
+             on_run_finished: Optional[Callable[[RunContext, list], None]] = None,
+             run_contexts: Optional[list] = None,
+             run_extras: Optional[list] = None) -> None:
+    """Connect the 4200A PMU, 6221 + 2182, magnet and gaussmeter, then one
+    amplitude sweep (own run number, own file) per (assist-field current, read
+    current) pair, each recorded + finalized by record_run() before the next;
+    always shut everything down (6221 first — it shares the channel pin).
+    Pure — the TUI's RunScreen runs it with its own callbacks."""
+    run_contexts = [] if run_contexts is None else run_contexts
+    run_extras = [] if run_extras is None else run_extras
+    k4200 = source = voltmeter = magnet = gaussmeter = temp_ctrl = None
+    try:
+        on_status("Connecting to Keithley 4200A (KXCI) …")
+        k4200 = connect_4200a(plan.k4200_cfg)
+        try:
+            log.info("Installed user libraries (UL):\n%s", list_user_libraries(k4200))
+        except Exception:
+            log.warning("Could not read `UL` — set the PMU module name from the 4200A manually.")
+        configure_pmu_pulse(k4200, plan.pmu_cfg)
+
+        # connect_source() returns with the 6221 already sourcing — re-check
+        # the read limits here too, not only in build_summary.
+        _check_read_safety(plan.read_cfg)
+        on_status("Connecting to Keithley 6221 + 2182 …")
+        source = connect_source(plan.src_cfg)
+        _six221_output_off(source)          # channel quiet before any pulse
+        voltmeter = connect_voltmeter(plan.volt_cfg)
+
+        on_status("Connecting to Kepco magnet + Lake Shore 475 …")
+        magnet = connect_magnet(plan.magnet_cfg)
+        gaussmeter = connect_gaussmeter(plan.gauss_cfg)
+
+        if plan.temp_cfg is not None:
+            on_status("Connecting to MercuryiTC …")
+            temp_ctrl = connect_temperature_controller(plan.temp_cfg)
+
+        points = [AmplitudePoint(amplitude_V=float(v)) for v in plan.amplitudes_V]
+
+        _unset = object()
+        parked_magnet = _unset
+        for series_idx, (I_mag, I_sense) in enumerate(plan.series_values):
+            if stop_event.is_set():
+                break
+            plan.src_cfg.sense_current_A = I_sense
+            plan.read_cfg.sense_current_A = I_sense
+
+            label_parts = []
+            if len(plan.magnet_currents_A) > 1:
+                label_parts.append(f"I_mag={I_mag:g}A")
+            if len(plan.sense_currents_A) > 1:
+                label_parts.append(f"I_sense={I_sense:g}A")
+            label = ", ".join(label_parts) or None
+
+            if I_mag != parked_magnet:
+                on_status(f"Ramping magnet to {I_mag:g} A …")
+                set_magnet_current(magnet, plan.magnet_cfg, I_mag,
+                                   gaussmeter, plan.gauss_cfg, plan.field_settle_tolerance_mT,
+                                   stop_event)
+                parked_magnet = I_mag
+
+            # A fresh RunContext (own run number, own file) EVERY iteration.
+            ctx = allocate_run(plan.data_root, plan.sample, plan.device, MEASUREMENT_TYPE,
+                               temperature_setpoint_K=plan.temperature_setpoint_K,
+                               key_axis=("current_A", I_mag), series=plan.series)
+            extra = {"magnet_current_A": I_mag, "sense_current_A": I_sense}
+            run_contexts.append(ctx)
+            run_extras.append(extra)
+            on_run_label(f"Run #{ctx.run_str}")
+
+            on_status("Running the switching sweep …" if not label_parts
+                      else f"Running the switching sweep ({', '.join(label_parts)}) …")
+            record_run(
+                plan.data_root, ctx,
+                lambda records, status, _ctx=ctx, _x=extra: build_header_fields(
+                    plan, _ctx, records, status=status, comment="", extra=_x),
+                lambda point_cb, write_csv, _ctx=ctx, _I=I_mag: run_measurement(
+                    k4200, plan.pmu_cfg, source, voltmeter, plan.read_cfg, points,
+                    stop_event=stop_event, on_point=point_cb,
+                    gaussmeter=gaussmeter, gauss_cfg=plan.gauss_cfg,
+                    temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg, magnet_current_A=_I,
+                    field_theta_deg=plan.field_theta_deg, field_phi_deg=plan.field_phi_deg,
+                    write_csv=write_csv, output_file=str(_ctx.raw_path)),
+                stop_event, on_point=on_point,
+                tags={"series_index": series_idx, "series_label": label},
+                on_finished=on_run_finished)
+    finally:
+        # 6221 down first (it shares the channel pin), then the 4200A, then the
+        # magnet — never ramp an inductive field while the DUT still carries current.
+        if source is not None:
+            safe_shutdown("6221 (ramp)", lambda: ramp_current_to_zero(source))
+            safe_shutdown("6221", lambda: shutdown_source(source))
+        if k4200 is not None:
+            # channels=() — this program never forces the 4200A SMUs.
+            safe_shutdown("4200A", lambda: shutdown_4200a(k4200, channels=()))
+        if magnet is not None:
+            safe_shutdown("magnet", lambda: shutdown_magnet(magnet, plan.magnet_cfg))
+        if gaussmeter is not None:
+            safe_shutdown("gaussmeter", lambda: shutdown_gaussmeter(gaussmeter))
+        if temp_ctrl is not None:
+            safe_shutdown("MercuryiTC", lambda: shutdown_temperature_controller(temp_ctrl))
+
+
+PNG_SUFFIX = "Rxy_vs_amp"
+
+
+def save_run_png(plan: MeasurementPlan, records: list[dict], png_path: Path, comment: str = "") -> None:
+    """One run's PNG (the RunScreen calls this)."""
+    _save_measurement_png(records, png_path, plan=plan, comment=comment)
+
+
 # ── run screen ─────────────────────────────────────────────────────────────
 
 class RunScreen(MeasurementRunScreen):
@@ -712,10 +918,7 @@ class RunScreen(MeasurementRunScreen):
     POINT_STATUS = "Point {n} / {total}."
     TABLE_COLUMNS = ("amp #", "I_mag (A)", "V_pulse (V)", "I_pulse (A)", "V_xy (V)", "R_xy (Ω)", "T1 (K)")
     MEASUREMENT_TYPE = MEASUREMENT_TYPE
-    PNG_SUFFIX = "Rxy_vs_amp"
-
-    def save_png(self, records: list[dict], png_path: Path, comment: str = "") -> None:
-        _save_measurement_png(records, png_path, plan=self.plan, comment=comment)
+    PNG_SUFFIX = PNG_SUFFIX
 
     def live_plot_args(self):
         return (_live_plot_worker,)
@@ -732,133 +935,6 @@ class RunScreen(MeasurementRunScreen):
             f"{record['hall_resistance_ohm']:.5g}",
             f"{t1:.3f}" if t1 is not None else "—",
         )
-
-    def build_header(self, ctx: RunContext, records: list[dict], *, status: str, comment: str,
-                     extra: Optional[dict]) -> dict:
-        return build_header_fields(self.plan, ctx, records, status=status, comment=comment, extra=extra)
-
-    @work(thread=True, exclusive=True)
-    def do_run(self) -> None:
-        plan = self.plan
-        k4200 = source = voltmeter = magnet = gaussmeter = temp_ctrl = None
-        try:
-            self._set_status_threadsafe("Connecting to Keithley 4200A (KXCI) …")
-            k4200 = connect_4200a(plan.k4200_cfg)
-            try:
-                log.info("Installed user libraries (UL):\n%s", list_user_libraries(k4200))
-            except Exception:
-                log.warning("Could not read `UL` — set the PMU module name from the 4200A manually.")
-            configure_pmu_pulse(k4200, plan.pmu_cfg)
-
-            # connect_source() returns with the 6221 already sourcing — re-check
-            # the read limits here too, not only in build_summary.
-            _check_read_safety(plan.read_cfg)
-            self._set_status_threadsafe("Connecting to Keithley 6221 + 2182 …")
-            source = connect_source(plan.src_cfg)
-            _six221_output_off(source)          # channel quiet before any pulse
-            voltmeter = connect_voltmeter(plan.volt_cfg)
-
-            self._set_status_threadsafe("Connecting to Kepco magnet + Lake Shore 475 …")
-            magnet = connect_magnet(plan.magnet_cfg)
-            gaussmeter = connect_gaussmeter(plan.gauss_cfg)
-
-            if plan.temp_cfg is not None:
-                self._set_status_threadsafe("Connecting to MercuryiTC …")
-                temp_ctrl = connect_temperature_controller(plan.temp_cfg)
-
-            points = [AmplitudePoint(amplitude_V=float(v)) for v in plan.amplitudes_V]
-
-            _unset = object()
-            _parked_magnet = _unset
-            for series_idx, (I_mag, I_sense) in enumerate(plan.series_values):
-                if self._stop_event.is_set():
-                    break
-
-                plan.src_cfg.sense_current_A = I_sense
-                plan.read_cfg.sense_current_A = I_sense
-
-                label_parts = []
-                if len(plan.magnet_currents_A) > 1:
-                    label_parts.append(f"I_mag={I_mag:g}A")
-                if len(plan.sense_currents_A) > 1:
-                    label_parts.append(f"I_sense={I_sense:g}A")
-                label = ", ".join(label_parts) or None
-
-                if I_mag != _parked_magnet:
-                    self._set_status_threadsafe(f"Ramping magnet to {I_mag:g} A …")
-                    set_magnet_current(magnet, plan.magnet_cfg, I_mag,
-                                       gaussmeter, plan.gauss_cfg, plan.field_settle_tolerance_mT,
-                                       self._stop_event)
-                    _parked_magnet = I_mag
-
-                # A fresh RunContext (own run number, own file) EVERY
-                # iteration -- never reuse one across the series, or every
-                # file silently inherits the first iteration's run number.
-                ctx = allocate_run(plan.data_root, plan.sample, plan.device, MEASUREMENT_TYPE,
-                                   temperature_setpoint_K=plan.temperature_setpoint_K,
-                                   key_axis=("current_A", I_mag), series=plan.series)
-                self._run_contexts.append(ctx)
-                self._run_extras.append({"magnet_current_A": I_mag, "sense_current_A": I_sense})
-                self._set_run_label_threadsafe(f"Run #{ctx.run_str}")
-                write_csv = make_incremental_writer(
-                    ctx.raw_path,
-                    lambda records, _ctx=ctx, _I=I_mag, _s=I_sense: build_header_fields(
-                        plan, _ctx, records, status="in_progress", comment="",
-                        extra={"magnet_current_A": _I, "sense_current_A": _s}))
-
-                status = "Running the switching sweep …" if not label_parts \
-                    else f"Running the switching sweep ({', '.join(label_parts)}) …"
-                self._set_status_threadsafe(status)
-                iter_error: Optional[BaseException] = None
-                try:
-                    run_measurement(
-                        k4200, plan.pmu_cfg, source, voltmeter, plan.read_cfg, points,
-                        stop_event=self._stop_event, on_point=self._make_on_point(series_idx, label),
-                        gaussmeter=gaussmeter, gauss_cfg=plan.gauss_cfg,
-                        temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg,
-                        magnet_current_A=I_mag,
-                        field_theta_deg=plan.field_theta_deg, field_phi_deg=plan.field_phi_deg,
-                        write_csv=write_csv, output_file=str(ctx.raw_path))
-                except Exception as exc:
-                    iter_error = exc
-
-                # Finalize THIS iteration's header/index row UNCONDITIONALLY,
-                # right now -- never gated on the end-of-session status/
-                # comment prompt, so an aborted/crashed session never leaves
-                # a file stuck at "in_progress".
-                iter_status = "error" if iter_error is not None \
-                    else ("aborted" if self._stop_event.is_set() else "completed")
-                iter_records = [r for r in self._records if r.get("series_index", 0) == series_idx]
-                header_fields = build_header_fields(
-                    plan, ctx, iter_records, status=iter_status, comment="",
-                    extra={"magnet_current_A": I_mag, "sense_current_A": I_sense})
-                write_record(ctx.raw_path, iter_records, header_fields)
-                finalize_index_row(plan.data_root, ctx.sample, ctx.run_number, header_fields)
-                self._save_run_png(ctx, iter_records)
-                if iter_error is not None:
-                    raise iter_error
-
-            final = "Measurement aborted." if self._stop_event.is_set() else "Measurement complete."
-        except Exception as exc:
-            log.exception("Measurement failed")
-            final = f"ERROR: {exc}"
-        finally:
-            # 6221 down first (it shares the channel pin), then the 4200A, then
-            # the magnet — never ramp an inductive field while the DUT still
-            # carries current.
-            if source is not None:
-                safe_shutdown("6221 (ramp)", lambda: ramp_current_to_zero(source))
-                safe_shutdown("6221", lambda: shutdown_source(source))
-            if k4200 is not None:
-                # channels=() — this program never forces the 4200A SMUs.
-                safe_shutdown("4200A", lambda: shutdown_4200a(k4200, channels=()))
-            if magnet is not None:
-                safe_shutdown("magnet", lambda: shutdown_magnet(magnet, plan.magnet_cfg))
-            if gaussmeter is not None:
-                safe_shutdown("gaussmeter", lambda: shutdown_gaussmeter(gaussmeter))
-            if temp_ctrl is not None:
-                safe_shutdown("MercuryiTC", lambda: shutdown_temperature_controller(temp_ctrl))
-            self.app.call_from_thread(self._on_finished, final)
 
 
 # ── app / form ─────────────────────────────────────────────────────────────
@@ -1114,90 +1190,7 @@ class SOTPulsedSwitchingApp(MeasurementApp):
         self.query_one("#field_diagram", Static).update(render_ascii_field_diagram(theta, phi))
 
     def _build_plan(self, state: dict) -> MeasurementPlan:
-        k4200_cfg = Keithley4200AConfig(visa_resource=state["k4200_visa_resource"])
-        pmu_cfg = PMUPulseConfig(
-            library=state["pmu_library"] or "bridge_sot",
-            module=state["pmu_module"],
-            pmu_channel=state["pmu_channel"], pmu_id=state["pmu_id"] or "PMU1",
-            width_s=state["pulse_width_s"], rise_s=state["pulse_rise_s"],
-            fall_s=state["pulse_fall_s"], period_s=state["pulse_period_s"],
-            delay_s=state["pulse_delay_s"], n_pulses=state["n_pulses"],
-            sample_rate=state["pmu_sample_rate"],
-            meas_start_perc=state["pmu_meas_start_perc"],
-            meas_stop_perc=state["pmu_meas_stop_perc"],
-            dut_res_ohm=state["pmu_dut_res_ohm"],
-            v_range_V=state["pmu_v_range_V"],
-            i_range_A=state["pmu_i_range_A"], v_limit_V=state["pmu_v_limit_V"],
-            return_names=parse_return_names(state["pmu_return_names"]),
-        )
-        read_cfg = ReadConfig(
-            sense_current_A=state["sense_currents_A"][0], compliance_V=state["compliance_V"],
-            source_delay_s=state["source_delay_s"], nplc=state["nplc"],
-            auto_range=state["auto_range"], n_reversals=state["n_reversals"],
-            settle_after_enable_s=state["settle_after_enable_s"],
-            delay_after_pulse_s=state["delay_after_pulse_s"],
-        )
-        src_cfg = SourceConfig(
-            visa_resource=state["source_visa_resource"], sense_current_A=state["sense_currents_A"][0],
-            compliance_V=state["compliance_V"], source_delay_s=state["source_delay_s"],
-        )
-        volt_cfg = VoltmeterConfig(
-            visa_resource=state["voltmeter_visa_resource"], nplc=state["nplc"],
-            auto_range=state["auto_range"],
-        )
-        magnet_cfg = MagnetConfig(
-            visa_resource=state["magnet_visa_resource"], current_limit_A=state["current_limit_A"],
-            voltage_compliance_V=state["magnet_voltage_compliance_V"],
-            ramp_step_A=state["ramp_step_A"], ramp_delay_s=state["ramp_delay_s"],
-        )
-        gauss_cfg = GaussmeterConfig(
-            visa_resource=state["gaussmeter_visa_resource"], unit="T",
-            n_averages=state["gaussmeter_n_averages"], read_delay_s=state["gaussmeter_read_delay_s"],
-        )
-
-        temp_cfg = None
-        if state["enable_temperature"]:
-            uids = parse_sensor_uids(state["temperature_sensor_uids"])
-            if uids:
-                temp_cfg = TemperatureControllerConfig(
-                    visa_resource=state["temperature_visa_resource"], sensor_uids=uids)
-
-        # pmu_dut_res_ohm is a real pulse parameter (PMU load-line correction),
-        # so it is recorded; the sidebar's per-amplitude current estimate is
-        # derived from it rather than from a separate display-only field.
-        header_extra = {
-            "pmu_library": pmu_cfg.library,
-            "pmu_module": pmu_cfg.module,
-            "pulse_width_s": state["pulse_width_s"],
-            "pulse_period_s": state["pulse_period_s"],
-            "pmu_v_range_V": state["pmu_v_range_V"],
-            "pmu_i_range_A": state["pmu_i_range_A"],
-            "pmu_dut_res_ohm": state["pmu_dut_res_ohm"],
-            "n_pulses": state["n_pulses"],
-            "delay_after_pulse_s": state["delay_after_pulse_s"],
-            "sense_current_A": state["sense_currents_A"][0],
-            "n_reversals": state["n_reversals"],
-            "field_theta_deg": state["field_theta_deg"],
-            "field_phi_deg": state["field_phi_deg"],
-            "amplitude_start_V": state["amplitude_start_V"],
-            "amplitude_stop_V": state["amplitude_stop_V"],
-            "amplitude_step_V": state["amplitude_step_V"],
-            "amplitude_bidirectional": state["amplitude_bidirectional"],
-            "amplitudes_V": state["amplitude_list"],
-        }
-        return MeasurementPlan(
-            k4200_cfg=k4200_cfg, pmu_cfg=pmu_cfg, src_cfg=src_cfg, volt_cfg=volt_cfg,
-            read_cfg=read_cfg, magnet_cfg=magnet_cfg, gauss_cfg=gauss_cfg,
-            amplitudes_V=state["amplitude_list"], magnet_currents_A=state["magnet_currents_A"],
-            sense_currents_A=state["sense_currents_A"],
-            field_theta_deg=state["field_theta_deg"], field_phi_deg=state["field_phi_deg"],
-            field_settle_tolerance_mT=state["field_settle_tolerance_mT"],
-            data_root=self.data_root,
-            sample=state["sample"], device=state["device"],
-            temperature_setpoint_K=state["temperature_setpoint_K"],
-            cooldown=state["cooldown"], header_extra=header_extra, series="",
-            temp_cfg=temp_cfg, run_cost=run_costs(state),
-        )
+        return build_plan(state, self.data_root)
 
 
 def main() -> None:

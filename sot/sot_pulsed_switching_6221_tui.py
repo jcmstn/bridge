@@ -24,12 +24,12 @@ import itertools
 import logging
 import multiprocessing as mp
 import textwrap
+import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 
-from textual import work
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.validation import Number
@@ -77,10 +77,8 @@ from instruments.field_geometry import field_direction_summary_line, render_asci
 from instruments.data_naming import (
     RunContext,
     allocate_run,
-    finalize_index_row,
-    make_incremental_writer,
+    record_run,
     preview_raw_filename,
-    write_record,
 )
 from instruments.keithley6221 import ac_source_restart_s, wave_pulse_s
 from instruments.kepco_magnet import magnet_move_s
@@ -689,6 +687,205 @@ def _save_measurement_png(records: list[dict], png_path: Path, harmonic: int,
     log.info("Saved plot to '%s'", png_path)
 
 
+# ── plan + run (pure, shared by the TUI RunScreen and (no web page yet)) ──────────────
+
+def build_plan(state: dict, data_root: Path) -> MeasurementPlan:
+    """One parsed, validated run request from a state dict. Pure — shared by
+    the TUI and the web page."""
+    pulse_cfg = WritePulseConfig(
+        width_s=state["pulse_width_s"], compliance_V=state["pulse_compliance_V"],
+    )
+    read_cfg = ReadConfig(
+        sense_current_A=state["sense_currents_A"][0], compliance_V=state["compliance_V"],
+        frequency_Hz=state["frequency_Hz"], phasemarker_line=state["phasemarker_line"],
+        harmonic=state["harmonic"], n_averages=state["n_averages"],
+        settle_after_enable_s=state["settle_after_enable_s"],
+        lock_timeout_s=state["lock_timeout_s"],
+        delay_after_pulse_s=state["delay_after_pulse_s"],
+    )
+    ac_cfg = ACSourceConfig(
+        visa_resource=state["source_visa_resource"], amplitude_A=state["sense_currents_A"][0],
+        frequency_Hz=state["frequency_Hz"], compliance_V=state["compliance_V"],
+        phasemarker_line=state["phasemarker_line"],
+    )
+    extref_cfg = ExtRefConfig(
+        device=state["mfli_device"], extref_index=state["extref_index"],
+        aux_input_ch=state["aux_input_ch"], osc_index=state["osc_index"],
+        pll_demod_index=state["pll_demod_index"], automode=state["automode"],
+    )
+    shared_filter = FilterConfig(
+        time_constant_s=state["filter_time_constant_s"], order=state["filter_order"],
+        sinc_filter=state["filter_sinc"],
+    )
+    demod_cfg = DemodConfig(
+        device=state["mfli_device"], demod_index=state["demod_index"],
+        harmonic=state["harmonic"], osc_index=state["osc_index"],
+        input_ch=state["input_ch"], differential=state["differential"],
+        ac_coupling=state["ac_coupling"], input_range_V=state["input_range_V"],
+        sample_rate_Hz=state["sample_rate_Hz"], filter=shared_filter,
+    )
+    magnet_cfg = MagnetConfig(
+        visa_resource=state["magnet_visa_resource"], current_limit_A=state["current_limit_A"],
+        voltage_compliance_V=state["magnet_voltage_compliance_V"],
+        ramp_step_A=state["ramp_step_A"], ramp_delay_s=state["ramp_delay_s"],
+    )
+    gauss_cfg = GaussmeterConfig(
+        visa_resource=state["gaussmeter_visa_resource"], unit="T",
+        n_averages=state["gaussmeter_n_averages"], read_delay_s=state["gaussmeter_read_delay_s"],
+    )
+
+    temp_cfg = None
+    if state["enable_temperature"]:
+        uids = parse_sensor_uids(state["temperature_sensor_uids"])
+        if uids:
+            temp_cfg = TemperatureControllerConfig(
+                visa_resource=state["temperature_visa_resource"], sensor_uids=uids)
+
+    header_extra = {
+        "pulse_width_s": state["pulse_width_s"],
+        "pulse_compliance_V": state["pulse_compliance_V"],
+        "delay_after_pulse_s": state["delay_after_pulse_s"],
+        "sense_current_A": state["sense_currents_A"][0],
+        "frequency_Hz": state["frequency_Hz"],
+        "phasemarker_line": state["phasemarker_line"],
+        "harmonic": state["harmonic"],
+        "field_theta_deg": state["field_theta_deg"],
+        "field_phi_deg": state["field_phi_deg"],
+        "pulse_current_start_A": state["pulse_current_start_A"],
+        "pulse_current_stop_A": state["pulse_current_stop_A"],
+        "pulse_current_step_A": state["pulse_current_step_A"],
+        "amplitude_bidirectional": state["amplitude_bidirectional"],
+        "pulse_currents_A": state["pulse_current_list"],
+    }
+    return MeasurementPlan(
+        ac_cfg=ac_cfg, pulse_cfg=pulse_cfg, extref_cfg=extref_cfg, demod_cfg=demod_cfg,
+        mfli_host=state["mfli_host"], mfli_port=state["mfli_port"],
+        read_cfg=read_cfg, magnet_cfg=magnet_cfg, gauss_cfg=gauss_cfg,
+        pulse_currents_A=state["pulse_current_list"], magnet_currents_A=state["magnet_currents_A"],
+        sense_currents_A=state["sense_currents_A"],
+        field_theta_deg=state["field_theta_deg"], field_phi_deg=state["field_phi_deg"],
+        field_settle_tolerance_mT=state["field_settle_tolerance_mT"],
+        data_root=data_root,
+        sample=state["sample"], device=state["device"],
+        temperature_setpoint_K=state["temperature_setpoint_K"],
+        cooldown=state["cooldown"], header_extra=header_extra, series="",
+        temp_cfg=temp_cfg, run_cost=run_costs(state),
+    )
+
+def _ignore(*_args) -> None:
+    pass
+
+
+def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
+             on_status: Callable[[str], None] = _ignore,
+             on_run_label: Callable[[str], None] = _ignore,
+             on_point: Callable[[dict], None] = _ignore,
+             on_run_finished: Optional[Callable[[RunContext, list], None]] = None,
+             run_contexts: Optional[list] = None,
+             run_extras: Optional[list] = None) -> None:
+    """Check the pulse/read limits, connect the MFLI (ExtRef-locked to the 6221
+    marker), magnet and gaussmeter, then per (read current, assist-field current)
+    pair: re-arm the 6221, park the field, and record one pulse-current sweep
+    (own run number, own file) through record_run(); always shut everything
+    down. Pure — the TUI's RunScreen runs it with its own callbacks."""
+    run_contexts = [] if run_contexts is None else run_contexts
+    run_extras = [] if run_extras is None else run_extras
+    source = daq = magnet = gaussmeter = temp_ctrl = None
+    try:
+        points = [PulsePoint(pulse_current_A=float(v)) for v in plan.pulse_currents_A]
+        _check_write_safety(plan.pulse_cfg)
+        _check_pulse_currents(points)
+        _check_extref_demod_conflict(plan.demod_cfg, plan.extref_cfg)
+
+        on_status("Connecting to MFLI …")
+        daq = connect(plan.mfli_host, plan.mfli_port)
+        connect_device(daq, plan.extref_cfg.device, interface="1GbE")
+        configure_external_reference(daq, plan.extref_cfg, plan.ac_cfg.frequency_Hz)
+        configure_demodulator(daq, plan.demod_cfg)
+
+        on_status("Connecting to Kepco magnet + Lake Shore 475 …")
+        magnet = connect_magnet(plan.magnet_cfg)
+        gaussmeter = connect_gaussmeter(plan.gauss_cfg)
+
+        if plan.temp_cfg is not None:
+            on_status("Connecting to MercuryiTC …")
+            temp_ctrl = connect_temperature_controller(plan.temp_cfg)
+
+        multi_sense = len(plan.sense_currents_A) > 1
+        for series_idx, (I_sense, I_mag) in enumerate(plan.series_values):
+            if stop_event.is_set():
+                break
+            plan.ac_cfg.amplitude_A = I_sense
+            plan.read_cfg.sense_current_A = I_sense
+
+            label_parts = []
+            if multi_sense:
+                label_parts.append(f"I_sense={I_sense:g}A")
+            if len(plan.magnet_currents_A) > 1:
+                label_parts.append(f"I_mag={I_mag:g}A")
+            label = ", ".join(label_parts) or None
+
+            # Checked here too, not just by build_summary(): connect_ac_source()
+            # immediately arms and starts the 6221 at plan.ac_cfg.amplitude_A —
+            # catch a mistyped exponent before that, not after. Amplitude needs a
+            # full re-arm -- tear down the previous amplitude's source first.
+            _check_read_safety(plan.read_cfg)
+            if source is not None:
+                safe_shutdown("6221 AC source", lambda _s=source: shutdown_ac_source(_s))
+                source = None
+            on_status(f"Starting 6221 AC current source{f' ({I_sense:g} A)' if multi_sense else ''} …")
+            source = connect_ac_source(plan.ac_cfg)
+            _six221_ac_output_off(source)          # channel quiet before any pulse
+
+            on_status(f"Ramping magnet to {I_mag:g} A …")
+            set_magnet_current(magnet, plan.magnet_cfg, I_mag,
+                               gaussmeter, plan.gauss_cfg, plan.field_settle_tolerance_mT,
+                               stop_event)
+
+            ctx = allocate_run(plan.data_root, plan.sample, plan.device, MEASUREMENT_TYPE,
+                               temperature_setpoint_K=plan.temperature_setpoint_K,
+                               key_axis=("current_A", I_mag), series=plan.series)
+            extra = {"magnet_current_A": I_mag, "sense_current_A": I_sense}
+            run_contexts.append(ctx)
+            run_extras.append(extra)
+            on_run_label(f"Run #{ctx.run_str}")
+
+            on_status("Running the switching sweep …" if not label_parts
+                      else f"Running the switching sweep ({', '.join(label_parts)}) …")
+            record_run(
+                plan.data_root, ctx,
+                lambda records, status, _ctx=ctx, _x=extra: build_header_fields(
+                    plan, _ctx, records, status=status, comment="", extra=_x),
+                lambda point_cb, write_csv, _ctx=ctx, _I=I_mag, _src=source: run_measurement(
+                    _src, daq, plan.demod_cfg, plan.extref_cfg, plan.pulse_cfg,
+                    plan.read_cfg, points,
+                    stop_event=stop_event, on_point=point_cb,
+                    gaussmeter=gaussmeter, gauss_cfg=plan.gauss_cfg,
+                    temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg, magnet_current_A=_I,
+                    field_theta_deg=plan.field_theta_deg, field_phi_deg=plan.field_phi_deg,
+                    write_csv=write_csv, output_file=str(_ctx.raw_path)),
+                stop_event, on_point=on_point,
+                tags={"series_index": series_idx, "series_label": label},
+                on_finished=on_run_finished)
+    finally:
+        if source is not None:
+            safe_shutdown("6221", lambda: shutdown_ac_source(source))
+        if magnet is not None:
+            safe_shutdown("magnet", lambda: shutdown_magnet(magnet, plan.magnet_cfg))
+        if gaussmeter is not None:
+            safe_shutdown("gaussmeter", lambda: shutdown_gaussmeter(gaussmeter))
+        if temp_ctrl is not None:
+            safe_shutdown("MercuryiTC", lambda: shutdown_temperature_controller(temp_ctrl))
+
+
+PNG_SUFFIX = "Vnf_vs_pulse"
+
+
+def save_run_png(plan: MeasurementPlan, records: list[dict], png_path: Path, comment: str = "") -> None:
+    """One run's PNG (the RunScreen calls this)."""
+    _save_measurement_png(records, png_path, plan.read_cfg.harmonic, plan=plan, comment=comment)
+
+
 # ── run screen ─────────────────────────────────────────────────────────────
 
 class RunScreen(MeasurementRunScreen):
@@ -697,14 +894,11 @@ class RunScreen(MeasurementRunScreen):
     ABORT_STATUS = "Abort requested — finishing this amplitude, then shutting the 6221 + magnet down …"
     POINT_STATUS = "Point {n} / {total}."
     MEASUREMENT_TYPE = MEASUREMENT_TYPE
-    PNG_SUFFIX = "Vnf_vs_pulse"
+    PNG_SUFFIX = PNG_SUFFIX
 
     def table_columns(self) -> tuple:
         h = self.plan.read_cfg.harmonic
         return ("amp #", "I_mag (A)", "I_pulse (A)", "width meas (s)", f"V_{h}f (V)", "locked", "T1 (K)")
-
-    def save_png(self, records: list[dict], png_path: Path, comment: str = "") -> None:
-        _save_measurement_png(records, png_path, self.plan.read_cfg.harmonic, plan=self.plan, comment=comment)
 
     def live_plot_args(self):
         return (_live_plot_worker, self.plan.read_cfg.harmonic)
@@ -720,125 +914,6 @@ class RunScreen(MeasurementRunScreen):
             "yes" if record.get("reference_locked") else "no",
             f"{t1:.3f}" if t1 is not None else "—",
         )
-
-    def build_header(self, ctx: RunContext, records: list[dict], *, status: str, comment: str,
-                     extra: Optional[dict]) -> dict:
-        return build_header_fields(self.plan, ctx, records, status=status, comment=comment, extra=extra)
-
-    @work(thread=True, exclusive=True)
-    def do_run(self) -> None:
-        plan = self.plan
-        source = daq = magnet = gaussmeter = temp_ctrl = None
-        try:
-            points = [PulsePoint(pulse_current_A=float(v)) for v in plan.pulse_currents_A]
-            _check_write_safety(plan.pulse_cfg)
-            _check_pulse_currents(points)
-            _check_extref_demod_conflict(plan.demod_cfg, plan.extref_cfg)
-
-            self._set_status_threadsafe("Connecting to MFLI …")
-            daq = connect(plan.mfli_host, plan.mfli_port)
-            connect_device(daq, plan.extref_cfg.device, interface="1GbE")
-            configure_external_reference(daq, plan.extref_cfg, plan.ac_cfg.frequency_Hz)
-            configure_demodulator(daq, plan.demod_cfg)
-
-            self._set_status_threadsafe("Connecting to Kepco magnet + Lake Shore 475 …")
-            magnet = connect_magnet(plan.magnet_cfg)
-            gaussmeter = connect_gaussmeter(plan.gauss_cfg)
-
-            if plan.temp_cfg is not None:
-                self._set_status_threadsafe("Connecting to MercuryiTC …")
-                temp_ctrl = connect_temperature_controller(plan.temp_cfg)
-
-            multi_sense = len(plan.sense_currents_A) > 1
-            for series_idx, (I_sense, I_mag) in enumerate(plan.series_values):
-                if self._stop_event.is_set():
-                    break
-
-                plan.ac_cfg.amplitude_A = I_sense
-                plan.read_cfg.sense_current_A = I_sense
-
-                label_parts = []
-                if multi_sense:
-                    label_parts.append(f"I_sense={I_sense:g}A")
-                if len(plan.magnet_currents_A) > 1:
-                    label_parts.append(f"I_mag={I_mag:g}A")
-                label = ", ".join(label_parts) or None
-
-                # Checked here too, not just by build_summary(): connect_ac_source()
-                # immediately arms and starts the 6221 at plan.ac_cfg.amplitude_A —
-                # catch a mistyped exponent before that, not after. Amplitude
-                # requires a full re-arm -- tear down the previous amplitude's
-                # source first.
-                _check_read_safety(plan.read_cfg)
-                if source is not None:
-                    safe_shutdown("6221 AC source", lambda _s=source: shutdown_ac_source(_s))
-                    source = None
-                self._set_status_threadsafe(
-                    f"Starting 6221 AC current source{f' ({I_sense:g} A)' if multi_sense else ''} …"
-                )
-                source = connect_ac_source(plan.ac_cfg)
-                _six221_ac_output_off(source)          # channel quiet before any pulse
-
-                self._set_status_threadsafe(f"Ramping magnet to {I_mag:g} A …")
-                set_magnet_current(magnet, plan.magnet_cfg, I_mag,
-                                   gaussmeter, plan.gauss_cfg, plan.field_settle_tolerance_mT,
-                                   self._stop_event)
-
-                ctx = allocate_run(plan.data_root, plan.sample, plan.device, MEASUREMENT_TYPE,
-                                   temperature_setpoint_K=plan.temperature_setpoint_K,
-                                   key_axis=("current_A", I_mag), series=plan.series)
-                self._run_contexts.append(ctx)
-                self._run_extras.append({"magnet_current_A": I_mag, "sense_current_A": I_sense})
-                self._set_run_label_threadsafe(f"Run #{ctx.run_str}")
-                write_csv = make_incremental_writer(
-                    ctx.raw_path,
-                    lambda records, _ctx=ctx, _I=I_mag, _s=I_sense: build_header_fields(
-                        plan, _ctx, records, status="in_progress", comment="",
-                        extra={"magnet_current_A": _I, "sense_current_A": _s}))
-
-                status = "Running the switching sweep …" if not label_parts \
-                    else f"Running the switching sweep ({', '.join(label_parts)}) …"
-                self._set_status_threadsafe(status)
-                iter_error: Optional[BaseException] = None
-                try:
-                    run_measurement(
-                        source, daq, plan.demod_cfg, plan.extref_cfg, plan.pulse_cfg,
-                        plan.read_cfg, points,
-                        stop_event=self._stop_event, on_point=self._make_on_point(series_idx, label),
-                        gaussmeter=gaussmeter, gauss_cfg=plan.gauss_cfg,
-                        temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg,
-                        magnet_current_A=I_mag,
-                        field_theta_deg=plan.field_theta_deg, field_phi_deg=plan.field_phi_deg,
-                        write_csv=write_csv, output_file=str(ctx.raw_path))
-                except Exception as exc:
-                    iter_error = exc
-
-                iter_status = "error" if iter_error is not None \
-                    else ("aborted" if self._stop_event.is_set() else "completed")
-                iter_records = [r for r in self._records if r.get("series_index", 0) == series_idx]
-                header_fields = build_header_fields(
-                    plan, ctx, iter_records, status=iter_status, comment="",
-                    extra={"magnet_current_A": I_mag, "sense_current_A": I_sense})
-                write_record(ctx.raw_path, iter_records, header_fields)
-                finalize_index_row(plan.data_root, ctx.sample, ctx.run_number, header_fields)
-                self._save_run_png(ctx, iter_records)
-                if iter_error is not None:
-                    raise iter_error
-
-            final = "Measurement aborted." if self._stop_event.is_set() else "Measurement complete."
-        except Exception as exc:
-            log.exception("Measurement failed")
-            final = f"ERROR: {exc}"
-        finally:
-            if source is not None:
-                safe_shutdown("6221", lambda: shutdown_ac_source(source))
-            if magnet is not None:
-                safe_shutdown("magnet", lambda: shutdown_magnet(magnet, plan.magnet_cfg))
-            if gaussmeter is not None:
-                safe_shutdown("gaussmeter", lambda: shutdown_gaussmeter(gaussmeter))
-            if temp_ctrl is not None:
-                safe_shutdown("MercuryiTC", lambda: shutdown_temperature_controller(temp_ctrl))
-            self.app.call_from_thread(self._on_finished, final)
 
 
 # ── app / form ─────────────────────────────────────────────────────────────
@@ -1104,85 +1179,7 @@ class SOTPulsedSwitching6221App(MeasurementApp):
         self.query_one("#field_diagram", Static).update(render_ascii_field_diagram(theta, phi))
 
     def _build_plan(self, state: dict) -> MeasurementPlan:
-        pulse_cfg = WritePulseConfig(
-            width_s=state["pulse_width_s"], compliance_V=state["pulse_compliance_V"],
-        )
-        read_cfg = ReadConfig(
-            sense_current_A=state["sense_currents_A"][0], compliance_V=state["compliance_V"],
-            frequency_Hz=state["frequency_Hz"], phasemarker_line=state["phasemarker_line"],
-            harmonic=state["harmonic"], n_averages=state["n_averages"],
-            settle_after_enable_s=state["settle_after_enable_s"],
-            lock_timeout_s=state["lock_timeout_s"],
-            delay_after_pulse_s=state["delay_after_pulse_s"],
-        )
-        ac_cfg = ACSourceConfig(
-            visa_resource=state["source_visa_resource"], amplitude_A=state["sense_currents_A"][0],
-            frequency_Hz=state["frequency_Hz"], compliance_V=state["compliance_V"],
-            phasemarker_line=state["phasemarker_line"],
-        )
-        extref_cfg = ExtRefConfig(
-            device=state["mfli_device"], extref_index=state["extref_index"],
-            aux_input_ch=state["aux_input_ch"], osc_index=state["osc_index"],
-            pll_demod_index=state["pll_demod_index"], automode=state["automode"],
-        )
-        shared_filter = FilterConfig(
-            time_constant_s=state["filter_time_constant_s"], order=state["filter_order"],
-            sinc_filter=state["filter_sinc"],
-        )
-        demod_cfg = DemodConfig(
-            device=state["mfli_device"], demod_index=state["demod_index"],
-            harmonic=state["harmonic"], osc_index=state["osc_index"],
-            input_ch=state["input_ch"], differential=state["differential"],
-            ac_coupling=state["ac_coupling"], input_range_V=state["input_range_V"],
-            sample_rate_Hz=state["sample_rate_Hz"], filter=shared_filter,
-        )
-        magnet_cfg = MagnetConfig(
-            visa_resource=state["magnet_visa_resource"], current_limit_A=state["current_limit_A"],
-            voltage_compliance_V=state["magnet_voltage_compliance_V"],
-            ramp_step_A=state["ramp_step_A"], ramp_delay_s=state["ramp_delay_s"],
-        )
-        gauss_cfg = GaussmeterConfig(
-            visa_resource=state["gaussmeter_visa_resource"], unit="T",
-            n_averages=state["gaussmeter_n_averages"], read_delay_s=state["gaussmeter_read_delay_s"],
-        )
-
-        temp_cfg = None
-        if state["enable_temperature"]:
-            uids = parse_sensor_uids(state["temperature_sensor_uids"])
-            if uids:
-                temp_cfg = TemperatureControllerConfig(
-                    visa_resource=state["temperature_visa_resource"], sensor_uids=uids)
-
-        header_extra = {
-            "pulse_width_s": state["pulse_width_s"],
-            "pulse_compliance_V": state["pulse_compliance_V"],
-            "delay_after_pulse_s": state["delay_after_pulse_s"],
-            "sense_current_A": state["sense_currents_A"][0],
-            "frequency_Hz": state["frequency_Hz"],
-            "phasemarker_line": state["phasemarker_line"],
-            "harmonic": state["harmonic"],
-            "field_theta_deg": state["field_theta_deg"],
-            "field_phi_deg": state["field_phi_deg"],
-            "pulse_current_start_A": state["pulse_current_start_A"],
-            "pulse_current_stop_A": state["pulse_current_stop_A"],
-            "pulse_current_step_A": state["pulse_current_step_A"],
-            "amplitude_bidirectional": state["amplitude_bidirectional"],
-            "pulse_currents_A": state["pulse_current_list"],
-        }
-        return MeasurementPlan(
-            ac_cfg=ac_cfg, pulse_cfg=pulse_cfg, extref_cfg=extref_cfg, demod_cfg=demod_cfg,
-            mfli_host=state["mfli_host"], mfli_port=state["mfli_port"],
-            read_cfg=read_cfg, magnet_cfg=magnet_cfg, gauss_cfg=gauss_cfg,
-            pulse_currents_A=state["pulse_current_list"], magnet_currents_A=state["magnet_currents_A"],
-            sense_currents_A=state["sense_currents_A"],
-            field_theta_deg=state["field_theta_deg"], field_phi_deg=state["field_phi_deg"],
-            field_settle_tolerance_mT=state["field_settle_tolerance_mT"],
-            data_root=self.data_root,
-            sample=state["sample"], device=state["device"],
-            temperature_setpoint_K=state["temperature_setpoint_K"],
-            cooldown=state["cooldown"], header_extra=header_extra, series="",
-            temp_cfg=temp_cfg, run_cost=run_costs(state),
-        )
+        return build_plan(state, self.data_root)
 
 
 def main() -> None:

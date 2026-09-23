@@ -29,6 +29,9 @@ MULTI_RUN = [
     ("dc.dc_gate_sweep_tui", "DCGateSweepApp", {"sense_current_values": "1e-6, 2e-6"}),
     ("dc.dc_spin_valve_tui", "DCSpinValveApp", {"sense_current_values": "0.001, 0.002"}),
     ("mfli.mfli_dual_harmonic_tui", "MFLIDualHarmonicApp", {"ac_source": "6221", "amplitude_values": "1e-6, 2e-6"}),
+    ("sot.sot_pulsed_switching_tui", "SOTPulsedSwitchingApp", {"sense_current_values": "1e-4, 2e-4"}),
+    ("sot.sot_pulsed_switching_2h_tui", "SOTPulsedSwitching2HApp", {"sense_current_values": "1e-4, 2e-4"}),
+    ("sot.sot_pulsed_switching_6221_tui", "SOTPulsedSwitching6221App", {"sense_current_values": "1e-4, 2e-4"}),
 ]
 # single-run programs: the run is allocated at Start (build_plan) as plan.run_ctx
 SINGLE_RUN = [
