@@ -103,3 +103,23 @@ def test_sot_pulsed_merge_keeps_all_three_forms_settings(tmp_path, monkeypatch):
                    pulse_source="pmu", read_mode="harmonic")
     assert (v["pulse_source"], v["read_mode"]) == ("pmu", "harmonic")
     assert sot.engine(v["_plan"]) is sot.h2
+
+
+def test_web_form_keeps_a_numeric_looking_mode_choice_a_string(tmp_path):
+    """The web form's "6221" AC-source choice must reach the program as the
+    string "6221" — int()-casting it silently ran the MFLI-output mode."""
+    from types import SimpleNamespace as NS
+    from web.run_controller import form_state
+
+    w = lambda v: NS(value=v)
+    ident = NS(device_input=w("HB3"), cooldown_input=w(""), data_dir_input=w(str(tmp_path)),
+               temperature_input=w(None), sample_dropdown=w("_test"))
+    inputs = {k: w(v) for k, v in harm.DEFAULTS.items() if k not in harm.OPTIONAL_NUMERIC_FIELDS}
+    optional = {k: w(None) for k in harm.OPTIONAL_NUMERIC_FIELDS}
+    switches = {k: w(v) for k, v in harm.DEFAULTS.items() if isinstance(v, bool)}
+    int_selects = {k: w(int(harm.DEFAULTS[k]))
+                   for k in ("order_1f", "order_2f", "leader_automode", "follower_automode")}
+    state, errors = form_state(harm, ident, inputs=inputs, switches=switches, optional_inputs=optional,
+                               selects={"ac_source": w("6221"), **int_selects})
+    assert not errors and state["ac_source"] == "6221" and state["order_1f"] == int(harm.DEFAULTS["order_1f"])
+    assert harm.engine(harm.build_plan(state, tmp_path)) is six

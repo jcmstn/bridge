@@ -638,10 +638,9 @@ def form_state(program: ModuleType, identity, *, inputs: dict, switches: dict,
     for fid, switch in switches.items():
         state[fid] = switch.value
     for fid, select in (selects or {}).items():
-        try:
-            state[fid] = int(select.value)        # filter orders, automodes …
-        except (TypeError, ValueError):
-            state[fid] = select.value            # a mode choice, e.g. "mfli" / "6221"
+        # already typed by the select's options: ints for filter orders /
+        # automodes, strings for a mode choice ("mfli" / "6221" — never int())
+        state[fid] = select.value
     sample_value = identity.sample_dropdown.value
     state["sample"] = sample_value if sample_value not in (None, NEW_SAMPLE_SENTINEL) else ""
     if "sweep_rows" in widgets:
