@@ -44,17 +44,6 @@ log = logging.getLogger(__name__)
 # identically today; consolidated here since they're pure and TUI-independent)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def format_si(value: float, unit: str) -> str:
-    """Format a value with an SI prefix, e.g. 1.2e-8 -> '12.000 nA'."""
-    av = abs(value)
-    if av == 0:
-        return f"0 {unit}"
-    for scale, prefix in ((1e-12, "p"), (1e-9, "n"), (1e-6, "µ"), (1e-3, "m"), (1.0, "")):
-        if av < scale * 1000:
-            return f"{value / scale:.3f} {prefix}{unit}"
-    return f"{value:.3e} {unit}"
-
-
 def num_field(label: str, default: float, *, hint: str = "", integer: bool = False) -> ui.number:
     """NiceGUI analog of the TUI's field() helper for a numeric Input."""
     inp = ui.number(label, value=(int(default) if integer else float(default)), step=(1 if integer else None)) \
