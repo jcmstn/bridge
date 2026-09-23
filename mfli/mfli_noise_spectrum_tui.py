@@ -20,7 +20,6 @@ Requirements:
 
 from __future__ import annotations
 
-import json
 import logging
 import math
 from dataclasses import dataclass
@@ -28,13 +27,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
-from rich.text import Text
 
 from textual import work
-from textual.app import App, ComposeResult
+from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.screen import Screen
 from textual.validation import Number
 from textual.widgets import (
     Button,
@@ -52,7 +49,10 @@ from textual.widgets import (
 
 from dc.dc_sweep_utils import parse_value_list
 from mfli.mfli_dual_harmonic_6221 import _AC_CURRENT_CEILING_A, _AC_COMPLIANCE_CEILING_V, extref_lock_s
-from mfli.mfli_dual_harmonic_tui import _LogRelay, card, field, format_si, switch_field
+from instruments.tui_common import (
+    LogRelay, MeasurementApp, MeasurementRunScreen, card, field, format_si, identity_bar,
+    switch_field,
+)
 from mfli.mfli_noise_spectrum import (
     ACSourceConfig,
     AcquisitionConfig,
@@ -71,8 +71,7 @@ from mfli.mfli_noise_spectrum import (
     setup_mds,
     thermal_noise_asd,
 )
-from instruments.data_dir import DataDirPickerScreen, validate_directory
-from instruments.data_naming import TEST_SAMPLE, ensure_sample
+from instruments.data_dir import validate_directory
 from instruments.keithley6221 import ac_source_restart_s
 from instruments.run_time import (
     ACQ_OVERHEAD_S, GPIB_TXN_S, MDS_SYNC_S, PER_FILE_S, PER_RUN_S, POINT_OVERHEAD_S,
@@ -80,9 +79,7 @@ from instruments.run_time import (
 )
 from instruments.tui_sample_picker import (
     NEW_SAMPLE_SENTINEL,
-    NewSampleScreen,
     StatusCommentScreen,
-    sample_options,
 )
 
 log = logging.getLogger("mfli_noise_spectrum_tui")
@@ -348,7 +345,10 @@ def compute_filename_preview(state: dict) -> Optional[str]:
 # Run screen  ── executes the plan in a worker thread, shows live progress
 # ─────────────────────────────────────────────────────────────────────────────
 
-class RunScreen(Screen):
+class RunScreen(MeasurementRunScreen):
+    """A log-only run screen (no per-point table, no abort — a noise record
+    can't stop mid-spectrum): shares the base's log/status plumbing and
+    run-history row, keeps its own layout and per-amplitude saving."""
     CSS = """
     #status_line { height: 1; padding: 0 1; text-style: bold; }
     #progress_row { height: auto; margin: 1 2; align: left middle; }
@@ -359,10 +359,7 @@ class RunScreen(Screen):
     BINDINGS = [Binding("q", "back", "Back", show=True)]
 
     def __init__(self, plan: NoiseFloorPlan) -> None:
-        super().__init__()
-        self.plan = plan
-        self._measurement_running = True
-        self._log_handler: Optional[_LogRelay] = None
+        super().__init__(plan)
         # Accumulated across every amplitude iteration -- ((cond, label), spec)
         # paired with its already-saved RunContext, so the end-of-session
         # status/comment prompt covers every file regardless of how many
@@ -382,19 +379,10 @@ class RunScreen(Screen):
         yield Footer()
 
     def on_mount(self) -> None:
-        self._log_handler = _LogRelay(self)
+        self._log_handler = LogRelay(self)
         logging.getLogger().addHandler(self._log_handler)
+        self._history_start()
         self.do_run()
-
-    def on_unmount(self) -> None:
-        if self._log_handler is not None:
-            logging.getLogger().removeHandler(self._log_handler)
-
-    def write_log(self, msg: str, style: str) -> None:
-        self.query_one("#log", RichLog).write(Text(msg, style=style))
-
-    def _set_status(self, text: str) -> None:
-        self.query_one("#status_line", Static).update(text)
 
     def _on_result(self, cond: str, label: str, spec: dict) -> None:
         self.query_one("#progress", ProgressBar).advance(progress_step(self.plan.run_cost, self._n_done))
@@ -444,6 +432,9 @@ class RunScreen(Screen):
         self._measurement_running = False
         self._set_status(final_status)
         self.query_one("#back_btn", Button).disabled = False
+        self._run_contexts = [ctx for _, ctx in self._context_pairs]
+        self._history_finish("error" if final_status.startswith("ERROR") else "completed",
+                             final_status, point_count=self._n_done)
 
         if not self._context_pairs:
             log.warning("No results collected — nothing to save.")
@@ -467,10 +458,6 @@ class RunScreen(Screen):
 
     def action_back(self) -> None:
         if not self._measurement_running:
-            self.app.pop_screen()
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "back_btn":
             self.app.pop_screen()
 
     @work(thread=True, exclusive=True)
@@ -529,19 +516,21 @@ class RunScreen(Screen):
         finally:
             self.app.call_from_thread(self._on_finished, final)
 
-    def _set_status_threadsafe(self, text: str) -> None:
-        self.app.call_from_thread(self._set_status, text)
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Main app  ── the parameter form
 # ─────────────────────────────────────────────────────────────────────────────
 
-class MFLINoiseSpectrumApp(App):
+class MFLINoiseSpectrumApp(MeasurementApp):
     TITLE = "MFLI Noise Floor Estimate (6221 AC source)"
     SUB_TITLE = "Quick nV/√Hz check for lock-in filter selection"
 
     data_root: Path = _DEFAULT_DATA_DIR
+
+    BINDINGS = [
+        Binding("f5", "start", "Start estimate", show=True),
+        Binding("q", "quit", "Quit", show=True),
+    ]
 
     CSS = """
     #body { height: 1fr; }
@@ -574,31 +563,13 @@ class MFLINoiseSpectrumApp(App):
     .card-title { text-style: bold underline; margin-bottom: 1; }
     """
 
-    BINDINGS = [
-        Binding("f5", "start", "Start estimate", show=True),
-        Binding("q", "quit", "Quit", show=True),
-    ]
-
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
         with Horizontal(id="body"):
             with VerticalScroll(id="form"):
-                with Vertical(id="identity_bar"):
-                    yield Static(id="filename_preview")
-                    with Horizontal(id="data_dir_row"):
-                        yield Input(value=str(_DEFAULT_DATA_DIR), id="data_dir",
-                                    placeholder="Absolute path to the data root")
-                        yield Button("Browse…", id="browse_data_dir")
-                    with Vertical(id="identity_fields"):
-                        yield Vertical(
-                            Label("Sample", classes="field-label"),
-                            Select(sample_options(self.data_root), id="sample_select",
-                                   allow_blank=False, value=TEST_SAMPLE),
-                        )
-                        yield Vertical(*field("device", "Device (e.g. HB3, SV2)",
-                                              DEFAULTS["device"], kind="text"))
-                        yield Vertical(*field("cooldown", "Cooldown (optional)",
-                                              DEFAULTS["cooldown"], kind="text"))
+                yield identity_bar(DEFAULTS, _DEFAULT_DATA_DIR, self.data_root,
+                                   temperature_label=None,
+                                   cell_classes=None)
 
                 with Vertical(classes="param-grid"):
                     yield card(
@@ -717,95 +688,11 @@ class MFLINoiseSpectrumApp(App):
 
     # ── Lifecycle ────────────────────────────────────────────────────────────
 
-    def on_mount(self) -> None:
-        logging.getLogger().handlers.clear()
-        self._load_settings()
-        self.refresh_summary()
 
     # ── Sample picker ────────────────────────────────────────────────────────
 
-    def _refresh_sample_options(self, *, select_value: Optional[str] = None) -> None:
-        select = self.query_one("#sample_select", Select)
-        options = sample_options(self.data_root)
-        select.set_options(options)
-        if select_value is not None:
-            select.value = select_value
-
-    def _sync_data_root(self) -> None:
-        path = Path(self.query_one("#data_dir", Input).value.strip()).expanduser()
-        if not path.is_dir():
-            return
-        self.data_root = path.resolve()
-        opts = [v for _, v in sample_options(self.data_root)]
-        cur = self.query_one("#sample_select", Select).value
-        self._refresh_sample_options(select_value=cur if cur in opts else TEST_SAMPLE)
-
-    def _browse_data_dir(self) -> None:
-        start = self.query_one("#data_dir", Input).value.strip() or str(_DEFAULT_DATA_DIR)
-        self.push_screen(DataDirPickerScreen(start), self._on_data_dir_picked)
-
-    def _on_data_dir_picked(self, picked: Optional[str]) -> None:
-        if not picked:
-            return
-        self.query_one("#data_dir", Input).value = picked
-        self._sync_data_root()
-        self.refresh_summary()
-
-    def on_select_changed(self, event: Select.Changed) -> None:
-        if event.select.id == "sample_select" and event.value == NEW_SAMPLE_SENTINEL:
-            self.push_screen(NewSampleScreen(self.data_root), self._on_new_sample_created)
-            return
-        self.refresh_summary()
-
-    def _on_new_sample_created(self, result: Optional[str]) -> None:
-        self._refresh_sample_options(select_value=result if result else TEST_SAMPLE)
-        self.refresh_summary()
 
     # ── Form state I/O ───────────────────────────────────────────────────────
-
-    def _all_field_ids(self) -> list[str]:
-        return list(NUMERIC_FIELDS) + TEXT_FIELDS + OPTIONAL_NUMERIC_FIELDS
-
-    def collect_raw(self) -> dict:
-        raw: dict = {fid: self.query_one(f"#{fid}", Input).value for fid in self._all_field_ids()}
-        raw["also_measure_off"] = self.query_one("#also_measure_off", Switch).value
-        raw["leader_automode"] = self.query_one("#leader_automode", Select).value
-        raw["follower_automode"] = self.query_one("#follower_automode", Select).value
-        sample_value = self.query_one("#sample_select", Select).value
-        if sample_value not in (None, Select.BLANK, NEW_SAMPLE_SENTINEL):
-            raw["sample"] = sample_value
-        return raw
-
-    def _load_settings(self) -> None:
-        try:
-            saved = json.loads(SETTINGS_PATH.read_text())
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            return
-        for fid in self._all_field_ids():
-            if fid in saved:
-                try:
-                    self.query_one(f"#{fid}", Input).value = str(saved[fid])
-                except Exception:
-                    pass
-        if "also_measure_off" in saved:
-            self.query_one("#also_measure_off", Switch).value = bool(saved["also_measure_off"])
-        for fid in ("leader_automode", "follower_automode"):
-            if fid in saved:
-                try:
-                    self.query_one(f"#{fid}", Select).value = int(saved[fid])
-                except Exception:
-                    pass
-        self._sync_data_root()
-        saved_sample = saved.get("sample")
-        if saved_sample and saved_sample in [v for _, v in sample_options(self.data_root)]:
-            self.query_one("#sample_select", Select).value = saved_sample
-
-    def _save_settings(self, raw: dict) -> None:
-        try:
-            SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
-            SETTINGS_PATH.write_text(json.dumps(raw, indent=2))
-        except OSError:
-            pass
 
     def parse_state(self) -> tuple[dict, list[str]]:
         errors: list[str] = []
@@ -846,11 +733,6 @@ class MFLINoiseSpectrumApp(App):
 
     # ── Reactivity ───────────────────────────────────────────────────────────
 
-    def on_input_changed(self, event: Input.Changed) -> None:
-        if event.input.id == "data_dir":
-            self._sync_data_root()
-        self.refresh_summary()
-
     def on_switch_changed(self, event: Switch.Changed) -> None:
         self.refresh_summary()
 
@@ -881,28 +763,6 @@ class MFLINoiseSpectrumApp(App):
         self.query_one("#start", Button).disabled = bool(errors)
 
     # ── Start ────────────────────────────────────────────────────────────────
-
-    def action_start(self) -> None:
-        state, parse_errors = self.parse_state()
-        if parse_errors:
-            self.bell()
-            return
-        _, _, errors = build_summary(state)
-        if errors:
-            self.bell()
-            return
-
-        self.data_root = Path(state["data_dir"]).expanduser()
-        ensure_sample(self.data_root, state["sample"], create=True)
-        self._save_settings(self.collect_raw())
-        plan = self._build_plan(state)
-        self.push_screen(RunScreen(plan))
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "start":
-            self.action_start()
-        elif event.button.id == "browse_data_dir":
-            self._browse_data_dir()
 
     def _build_plan(self, state: dict) -> NoiseFloorPlan:
         ac_cfg = ACSourceConfig(

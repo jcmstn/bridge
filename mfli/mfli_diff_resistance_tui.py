@@ -24,35 +24,26 @@ Requirements:
 
 from __future__ import annotations
 
-import json
 import logging
 import math
 import multiprocessing as mp
 import textwrap
-import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from rich.text import Text
 
 from textual import work
-from textual.app import App, ComposeResult
-from textual.binding import Binding
+from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.screen import Screen
 from textual.validation import Number
 from textual.widgets import (
     Button,
     Collapsible,
-    DataTable,
     Footer,
     Header,
     Input,
-    Label,
-    ProgressBar,
-    RichLog,
     Select,
     Static,
     Switch,
@@ -63,7 +54,6 @@ from mfli.mfli_diff_resistance_vs_bias import (
     BiasPoint,
     DemodConfig,
     FilterConfig,
-    MercuryITC,
     OutputConfig,
     TemperatureControllerConfig,
     bidirectional_bias_sweep,
@@ -80,29 +70,31 @@ from mfli.mfli_diff_resistance_vs_bias import (
     shutdown_temperature_controller,
     sync_follower_oscillator,
 )
-from instruments.data_dir import DataDirPickerScreen, validate_directory
+from instruments.data_dir import validate_directory
 from instruments.data_naming import (
-    TEST_SAMPLE,
     RunContext,
     allocate_run,
-    ensure_sample,
-    finalize_index_row,
     make_incremental_writer,
     preview_raw_filename,
-    proc_path,
-    write_record,
 )
-from instruments.live_plot import start_live_plot
 from instruments.mfli_daq import acquire_s
 from instruments.run_time import (
     GPIB_TXN_S, MDS_SYNC_S, PER_FILE_S, PER_RUN_S, POINT_OVERHEAD_S, TEMP_READ_S,
-    RunCost, progress_step, progress_total,
+    RunCost,
+)
+from instruments.tui_common import (
+    MeasurementApp,
+    MeasurementRunScreen,
+    card,
+    field,
+    format_si,
+    identity_bar,
+    parse_sensor_uids,
+    select_field,
+    switch_field,
 )
 from instruments.tui_sample_picker import (
     NEW_SAMPLE_SENTINEL,
-    NewSampleScreen,
-    StatusCommentScreen,
-    sample_options,
 )
 
 log = logging.getLogger("mfli_diff_resistance_tui")
@@ -204,25 +196,9 @@ TEXT_FIELDS = ["leader_device", "follower_device", "daq_host", "device", "cooldo
 OPTIONAL_NUMERIC_FIELDS = ["temperature_setpoint_K"]
 
 
-def parse_sensor_uids(raw: str) -> tuple:
-    """Parse a comma-separated "MB1.T1, DB5.T1" field into a 1- or 2-tuple of UIDs."""
-    uids = [u.strip() for u in raw.split(",") if u.strip()]
-    return tuple(uids[:2])
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Formatting helpers
 # ─────────────────────────────────────────────────────────────────────────────
-
-def format_si(value: float, unit: str) -> str:
-    """Format a value with an SI prefix, e.g. 1.2e-8 -> '12.000 nA'."""
-    av = abs(value)
-    if av == 0:
-        return f"0 {unit}"
-    for scale, prefix in ((1e-12, "p"), (1e-9, "n"), (1e-6, "µ"), (1e-3, "m"), (1.0, "")):
-        if av < scale * 1000:
-            return f"{value / scale:.3f} {prefix}{unit}"
-    return f"{value:.3e} {unit}"
 
 
 def run_costs(n_points: int, state: dict) -> RunCost:
@@ -310,51 +286,6 @@ def build_header_fields(plan: "MeasurementPlan", records: list[dict], *,
 # ─────────────────────────────────────────────────────────────────────────────
 # Small widget-building helpers (keep compose() readable)
 # ─────────────────────────────────────────────────────────────────────────────
-
-def field(field_id: str, label_text: str, default: str, *, kind: str = "number",
-          hint: str = "", validators=None, valid_empty: bool = False) -> list:
-    """A field's widgets, flat (not wrapped in a container). Grid cells
-    (see card()) that contain a further nested auto-height Vertical break
-    Textual's grid auto-row sizing -- GridLayout.arrange() computes an
-    'auto' row's height by calling get_content_height() on each cell, and a
-    doubly-nested Vertical makes that blow up to ~100 rows instead of the
-    handful the content needs. One level of Vertical (the card itself) is
-    fine; a Vertical inside that is not -- so fields stay flat and spacing
-    is set directly on the last widget instead of via a wrapping container."""
-    label = Label(label_text, classes="field-label")
-    inp = Input(value=default, id=field_id, type=kind, validators=validators,
-                valid_empty=valid_empty)
-    widgets = [label, inp]
-    if hint:
-        widgets.append(Label(hint, classes="hint"))
-    widgets[-1].styles.margin = (0, 0, 1, 0)
-    return widgets
-
-
-def switch_field(field_id: str, label_text: str, default: bool) -> Horizontal:
-    row = Horizontal(Switch(value=default, id=field_id), Label(label_text, classes="switch-label"),
-                      classes="switch-row")
-    row.styles.margin = (0, 0, 1, 0)
-    return row
-
-
-def select_field(field_id: str, label_text: str, options: list[int], default: int) -> list:
-    label = Label(label_text, classes="field-label")
-    select = Select([(str(o), o) for o in options], id=field_id, value=default, allow_blank=False)
-    select.styles.margin = (0, 0, 1, 0)
-    return [label, select]
-
-
-def card(title: str, *groups, muted: bool = False) -> Vertical:
-    """A bordered grid cell: a title plus its fields (each a flat list from
-    field()/select_field(), or a single widget like switch_field()'s
-    Horizontal -- see field() for why fields must stay flat here). `muted`
-    = stable/rarely-changed configuration, styled to recede rather than
-    compete for attention."""
-    children: list = [Static(title, classes="card-title")]
-    for group in groups:
-        children.extend(group) if isinstance(group, list) else children.append(group)
-    return Vertical(*children, classes="stable-card" if muted else "param-card")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -590,113 +521,26 @@ def _save_measurement_png(records: list[dict], png_path: Path,
 # Logging -> RichLog relay (keeps raw log lines from corrupting the alt screen)
 # ─────────────────────────────────────────────────────────────────────────────
 
-class _LogRelay(logging.Handler):
-    def __init__(self, screen: "RunScreen") -> None:
-        super().__init__()
-        self.screen = screen
-        self.setFormatter(logging.Formatter("%(asctime)s  %(levelname)-8s  %(message)s",
-                                             datefmt="%H:%M:%S"))
-
-    def emit(self, record: logging.LogRecord) -> None:
-        msg = self.format(record)
-        style = "bold red" if record.levelno >= logging.ERROR \
-            else "bold yellow" if record.levelno >= logging.WARNING else ""
-        try:
-            self.screen.app.call_from_thread(self.screen.write_log, msg, style)
-        except Exception:
-            pass
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Run screen  ── executes the plan in a worker thread, shows live progress
 # ─────────────────────────────────────────────────────────────────────────────
 
-class RunScreen(Screen):
-    CSS = """
-    #status_line { height: 1; padding: 0 1; text-style: bold; }
-    #progress_row { height: auto; margin: 1 2; align: left middle; }
-    #run_label { width: auto; padding: 0 2 0 0; text-style: bold; }
-    #progress { margin: 0; }
-    #results_table { height: 12; margin: 0 2 1 2; }
-    #log { height: 1fr; margin: 0 2 1 2; border: solid $primary; }
-    #runactionbar { height: 3; align: center middle; }
-    """
-    BINDINGS = [
-        Binding("a", "abort", "Abort (safe ramp-down)", show=True),
-        Binding("q", "back_or_abort", "Abort / Back", show=True),
-    ]
+class RunScreen(MeasurementRunScreen):
+    ABORT_STATUS = "Abort requested — finishing current point, then ramping bias to zero …"
+    TABLE_COLUMNS = ("#", "V_bias (V)", "I_ac (A)", "V_dut (V)", "R_diff (Ω)", "X_react (Ω)", "|Z| (Ω)", "phase (°)", "T1 (K)", "T2 (K)")
+    MEASUREMENT_TYPE = MEASUREMENT_TYPE
 
-    def __init__(self, plan: MeasurementPlan) -> None:
-        super().__init__()
-        self.plan = plan
-        self._stop_event = threading.Event()
-        # Not named `_running` — that attribute already exists on Textual's
-        # MessagePump base class and shadowing it silently breaks mounting.
-        self._measurement_running = True
-        self._log_handler: Optional[_LogRelay] = None
-        self._records: list[dict] = []
-        self._plot_queue: Optional["mp.Queue"] = None
-        self._plot_process: Optional[mp.Process] = None
-        # Stashed by _on_finished so _on_status_comment can re-save the same
-        # PNG in place once the operator's comment is known.
-        self._png_path: Optional[Path] = None
+    def save_png(self, records: list[dict], png_path: Path, comment: str = "") -> None:
+        _save_measurement_png(records, png_path, plan=self.plan, comment=comment)
 
-    def compose(self) -> ComposeResult:
-        yield Header(show_clock=True)
-        yield Static("Starting …", id="status_line")
-        with Horizontal(id="progress_row"):
-            yield Static(f"Run #{self.plan.run_ctx.run_str}", id="run_label")
-            yield ProgressBar(id="progress", total=progress_total(self.plan.run_cost, self.plan.total_points),
-                              show_eta=True)
-        yield DataTable(id="results_table", zebra_stripes=True, cursor_type="row")
-        yield RichLog(id="log", max_lines=5000, markup=False, wrap=True)
-        with Horizontal(id="runactionbar"):
-            yield Button("Abort (safe ramp-down)", id="abort_btn", variant="error")
-            yield Button("Back", id="back_btn", disabled=True)
-        yield Footer()
+    def live_plot_args(self):
+        return (_live_plot_worker,)
 
-    def on_mount(self) -> None:
-        self.query_one("#results_table", DataTable).add_columns(
-            "#", "V_bias (V)", "I_ac (A)", "V_dut (V)", "R_diff (Ω)", "X_react (Ω)",
-            "|Z| (Ω)", "phase (°)", "T1 (K)", "T2 (K)"
-        )
-        self._log_handler = _LogRelay(self)
-        root = logging.getLogger()
-        root.addHandler(self._log_handler)
-        self._start_live_plot()
-        self.do_run()
-
-    def on_unmount(self) -> None:
-        if self._log_handler is not None:
-            logging.getLogger().removeHandler(self._log_handler)
-        if self._plot_process is not None and self._plot_process.is_alive():
-            self._plot_process.terminate()
-
-    def _start_live_plot(self) -> None:
-        try:
-            self._plot_queue, self._plot_process = start_live_plot(_live_plot_worker)
-        except Exception:
-            log.exception("Could not start live plot window (is matplotlib installed?)")
-            self._plot_queue = None
-            self._plot_process = None
-
-    def write_log(self, msg: str, style: str) -> None:
-        self.query_one("#log", RichLog).write(Text(msg, style=style))
-
-    def _set_status(self, text: str) -> None:
-        self.query_one("#status_line", Static).update(text)
-
-    def _on_point(self, record: dict) -> None:
-        self._records.append(record)
-        if self._plot_queue is not None:
-            try:
-                self._plot_queue.put_nowait(record)
-            except Exception:
-                pass
-        table = self.query_one("#results_table", DataTable)
+    def table_row(self, record: dict) -> tuple:
         T1 = record.get("temperature_1_K")
         T2 = record.get("temperature_2_K")
-        table.add_row(
+        return (
             str(record["point_index"] + 1),
             f"{record['bias_V']:.4f}",
             f"{record['I_ac_A']:.4e}",
@@ -708,77 +552,15 @@ class RunScreen(Screen):
             f"{T1:.3f}" if T1 is not None else "—",
             f"{T2:.3f}" if T2 is not None else "—",
         )
-        table.move_cursor(row=table.row_count - 1, scroll=True)
-        self.query_one("#progress", ProgressBar).advance(
-            progress_step(self.plan.run_cost, record["point_index"]))
-        self._set_status(f"Point {record['point_index'] + 1} / {self.plan.total_points} complete.")
 
-    def _on_finished(self, final_status: str) -> None:
-        self._measurement_running = False
-        self._set_status(final_status)
-        self.query_one("#back_btn", Button).disabled = False
-        self.query_one("#abort_btn", Button).disabled = True
+    def progress_index(self, record: dict) -> int:
+        return record["point_index"]
 
-        # Finalize the header/index row UNCONDITIONALLY, right now — never
-        # gated on the status/comment prompt below being answered, so a
-        # closed session never leaves the record stuck at "in_progress".
-        outcome_status = ("aborted" if self._stop_event.is_set()
-                           else "error" if final_status.startswith("ERROR") else "completed")
-        ctx = self.plan.run_ctx
-        header_fields = build_header_fields(self.plan, self._records, status=outcome_status, comment="")
-        try:
-            write_record(ctx.raw_path, self._records, header_fields)
-            finalize_index_row(self.plan.data_root, ctx.sample, ctx.run_number, header_fields)
-        except Exception:
-            log.exception("Could not finalize run record")
+    def build_header(self, ctx: RunContext, records: list[dict], *, status: str, comment: str,
+                     extra: Optional[dict]) -> dict:
+        return build_header_fields(self.plan, records, status=status, comment=comment)
 
-        try:
-            png_path = proc_path(self.plan.data_root, ctx.sample, ctx.run_str, ctx.device,
-                                  MEASUREMENT_TYPE, "plot")
-            self._png_path = png_path
-            _save_measurement_png(self._records, png_path, plan=self.plan)
-        except Exception:
-            log.exception("Could not save measurement plot PNG")
 
-        self.app.push_screen(StatusCommentScreen(), self._on_status_comment)
-
-    def _on_status_comment(self, result: Optional[tuple[str, str]]) -> None:
-        if result is None:
-            return
-        status, comment = result
-        ctx = self.plan.run_ctx
-        header_fields = build_header_fields(self.plan, self._records, status=status, comment=comment)
-        try:
-            # Never truncate an already-written raw file to an empty stub —
-            # only a run that never wrote a point gets a header-only write.
-            if self._records or not ctx.raw_path.exists():
-                write_record(ctx.raw_path, self._records, header_fields)
-            finalize_index_row(self.plan.data_root, ctx.sample, ctx.run_number, header_fields)
-        except Exception:
-            log.exception("Could not save final status/comment")
-
-        if comment and self._png_path is not None:
-            try:
-                _save_measurement_png(self._records, self._png_path, plan=self.plan, comment=comment)
-            except Exception:
-                log.exception("Could not re-save measurement plot PNG with comment")
-
-    def action_abort(self) -> None:
-        if self._measurement_running and not self._stop_event.is_set():
-            self._stop_event.set()
-            self._set_status("Abort requested — finishing current point, then ramping bias to zero …")
-
-    def action_back_or_abort(self) -> None:
-        if self._measurement_running:
-            self.action_abort()
-        else:
-            self.app.pop_screen()
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "abort_btn":
-            self.action_abort()
-        elif event.button.id == "back_btn":
-            self.app.pop_screen()
 
     @work(thread=True, exclusive=True)
     def do_run(self) -> None:
@@ -841,15 +623,12 @@ class RunScreen(Screen):
                     log.exception("Error while shutting down MercuryiTC")
             self.app.call_from_thread(self._on_finished, final)
 
-    def _set_status_threadsafe(self, text: str) -> None:
-        self.app.call_from_thread(self._set_status, text)
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Main app  ── the parameter form
 # ─────────────────────────────────────────────────────────────────────────────
 
-class MFLIDiffResistanceApp(App):
+class MFLIDiffResistanceApp(MeasurementApp):
     TITLE = "MFLI Differential Resistance vs. Bias"
     SUB_TITLE = "dV/dI · DC bias sweep"
 
@@ -890,36 +669,14 @@ class MFLIDiffResistanceApp(App):
     .card-title { text-style: bold underline; margin-bottom: 1; }
     """
 
-    BINDINGS = [
-        Binding("f5", "start", "Start measurement", show=True),
-        Binding("q", "quit", "Quit", show=True),
-    ]
-
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
         with Horizontal(id="body"):
             with VerticalScroll(id="form"):
-                with Vertical(id="identity_bar"):
-                    yield Static(id="filename_preview")
-                    with Horizontal(id="data_dir_row"):
-                        yield Input(value=str(_DEFAULT_DATA_DIR), id="data_dir",
-                                    placeholder="Absolute path to the data root")
-                        yield Button("Browse…", id="browse_data_dir")
-                    with Vertical(id="identity_fields"):
-                        yield Vertical(
-                            Label("Sample", classes="field-label"),
-                            Select(sample_options(self.data_root), id="sample_select",
-                                   allow_blank=False, value=TEST_SAMPLE),
-                        )
-                        yield Vertical(*field("device", "Device (e.g. HB3, SV2)",
-                                              DEFAULTS["device"], kind="text"))
-                        yield Vertical(*field("cooldown", "Cooldown (optional)",
-                                              DEFAULTS["cooldown"], kind="text"))
-                        yield Vertical(*field(
-                            "temperature_setpoint_K", "Temperature setpoint (K, optional)",
-                            DEFAULTS["temperature_setpoint_K"], kind="number", valid_empty=True,
-                            hint="Drives only the filename's T###K token.",
-                        ))
+                yield identity_bar(DEFAULTS, _DEFAULT_DATA_DIR, self.data_root,
+                                   temperature_label="Temperature setpoint (K, optional)",
+                                   temperature_hint="Drives only the filename's T###K token.",
+                                   cell_classes=None)
 
                 # ── Tier 1: what defines this run — always visible ──────────
                 with Vertical(classes="param-grid"):
@@ -1032,105 +789,11 @@ class MFLIDiffResistanceApp(App):
 
     # ── Lifecycle ────────────────────────────────────────────────────────────
 
-    def on_mount(self) -> None:
-        # basicConfig (in mfli_diff_resistance_vs_bias) put a StreamHandler on
-        # the root logger; writing to stdout while Textual owns the alt-screen
-        # would corrupt the display, so drop it. RunScreen attaches its own
-        # RichLog-backed handler for the duration of a measurement.
-        logging.getLogger().handlers.clear()
-        self._load_settings()
-        self.refresh_summary()
 
     # ── Sample picker ────────────────────────────────────────────────────────
 
-    def _refresh_sample_options(self, *, select_value: Optional[str] = None) -> None:
-        select = self.query_one("#sample_select", Select)
-        options = sample_options(self.data_root)
-        select.set_options(options)
-        if select_value is not None:
-            select.value = select_value
-
-    def _sync_data_root(self) -> None:
-        """Adopt the identity bar's "Data root" field when it names an
-        existing directory, and re-list samples from there. Gated on
-        is_dir() so a half-typed path doesn't scatter _test/ folders
-        across the disk (sample_options() creates them)."""
-        path = Path(self.query_one("#data_dir", Input).value.strip()).expanduser()
-        if not path.is_dir():
-            return
-        self.data_root = path.resolve()
-        opts = [v for _, v in sample_options(self.data_root)]
-        cur = self.query_one("#sample_select", Select).value
-        self._refresh_sample_options(select_value=cur if cur in opts else TEST_SAMPLE)
-
-    def _browse_data_dir(self) -> None:
-        start = self.query_one("#data_dir", Input).value.strip() or str(_DEFAULT_DATA_DIR)
-        self.push_screen(DataDirPickerScreen(start), self._on_data_dir_picked)
-
-    def _on_data_dir_picked(self, picked: Optional[str]) -> None:
-        if not picked:
-            return
-        self.query_one("#data_dir", Input).value = picked
-        self._sync_data_root()
-        self.refresh_summary()
-
-    def on_select_changed(self, event: Select.Changed) -> None:
-        if event.select.id == "sample_select":
-            if event.value == NEW_SAMPLE_SENTINEL:
-                self.push_screen(NewSampleScreen(self.data_root), self._on_new_sample_created)
-                return
-        self.refresh_summary()
-
-    def _on_new_sample_created(self, result: Optional[str]) -> None:
-        self._refresh_sample_options(select_value=result if result else TEST_SAMPLE)
-        self.refresh_summary()
 
     # ── Form state I/O ───────────────────────────────────────────────────────
-
-    def _all_field_ids(self) -> list[str]:
-        return list(NUMERIC_FIELDS) + TEXT_FIELDS + OPTIONAL_NUMERIC_FIELDS
-
-    def collect_raw(self) -> dict:
-        raw: dict = {fid: self.query_one(f"#{fid}", Input).value for fid in self._all_field_ids()}
-        raw["sinc_filter"] = self.query_one("#sinc_filter", Switch).value
-        raw["order"] = self.query_one("#order", Select).value
-        raw["enable_temperature"] = self.query_one("#enable_temperature", Switch).value
-        sample_value = self.query_one("#sample_select", Select).value
-        if sample_value not in (None, Select.BLANK, NEW_SAMPLE_SENTINEL):
-            raw["sample"] = sample_value
-        return raw
-
-    def _load_settings(self) -> None:
-        try:
-            saved = json.loads(SETTINGS_PATH.read_text())
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            return
-        for fid in self._all_field_ids():
-            if fid in saved:
-                try:
-                    self.query_one(f"#{fid}", Input).value = str(saved[fid])
-                except Exception:
-                    pass
-        if "sinc_filter" in saved:
-            self.query_one("#sinc_filter", Switch).value = bool(saved["sinc_filter"])
-        if "order" in saved:
-            try:
-                self.query_one("#order", Select).value = int(saved["order"])
-            except Exception:
-                pass
-        if "enable_temperature" in saved:
-            self.query_one("#enable_temperature", Switch).value = bool(saved["enable_temperature"])
-        self._sync_data_root()
-        saved_sample = saved.get("sample")
-        if saved_sample and saved_sample in [v for _, v in sample_options(self.data_root)]:
-            self.query_one("#sample_select", Select).value = saved_sample
-
-    def _save_settings(self, raw: dict) -> None:
-        try:
-            SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
-            SETTINGS_PATH.write_text(json.dumps(raw, indent=2))
-        except OSError:
-            pass
 
     def parse_state(self) -> tuple[dict, list[str]]:
         errors: list[str] = []
@@ -1163,14 +826,6 @@ class MFLIDiffResistanceApp(App):
 
     # ── Reactivity ───────────────────────────────────────────────────────────
 
-    def on_input_changed(self, event: Input.Changed) -> None:
-        if event.input.id == "data_dir":
-            self._sync_data_root()
-        self.refresh_summary()
-
-    def on_switch_changed(self, event: Switch.Changed) -> None:
-        self.refresh_summary()
-
     def refresh_summary(self) -> None:
         state, parse_errors = self.parse_state()
         if parse_errors:
@@ -1198,30 +853,6 @@ class MFLIDiffResistanceApp(App):
         self.query_one("#start", Button).disabled = bool(errors)
 
     # ── Start ────────────────────────────────────────────────────────────────
-
-    def action_start(self) -> None:
-        state, parse_errors = self.parse_state()
-        if parse_errors:
-            self.bell()
-            return
-        _, _, errors = build_summary(state)
-        if errors:
-            self.bell()
-            return
-
-        self.data_root = Path(state["data_dir"]).expanduser()
-        # Typed a not-yet-existing root? bootstrap it now, so the run has
-        # somewhere to write (allocate_run() itself stays strict).
-        ensure_sample(self.data_root, state["sample"], create=True)
-        self._save_settings(self.collect_raw())
-        plan = self._build_plan(state)
-        self.push_screen(RunScreen(plan))
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "start":
-            self.action_start()
-        elif event.button.id == "browse_data_dir":
-            self._browse_data_dir()
 
     def _build_plan(self, state: dict) -> MeasurementPlan:
         out_cfg = OutputConfig(

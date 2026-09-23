@@ -457,10 +457,12 @@ class MeasurementRunScreen(Screen):
         except Exception:
             log.exception("Could not record the run in the run history")
 
-    def _history_finish(self, outcome: str, final_status: str) -> None:
+    def _history_finish(self, outcome: str, final_status: str,
+                        point_count: Optional[int] = None) -> None:
         try:
             run_index.finish_run(
-                self._history_id, status=outcome, point_count=len(self._records),
+                self._history_id, status=outcome,
+                point_count=len(self._records) if point_count is None else point_count,
                 duration_s=time.monotonic() - self._started,
                 error_message=final_status if outcome == "error" else None,
                 output_paths=[str(c.raw_path) for c in self._run_contexts])
@@ -519,6 +521,10 @@ class MeasurementApp(App):
     # ── lifecycle ─────────────────────────────────────────────────────
 
     def on_mount(self) -> None:
+        # The measurement modules' logging.basicConfig() put a StreamHandler on
+        # the root logger; writing to stdout while Textual owns the alt-screen
+        # would corrupt the display, so drop it. RunScreen attaches its own
+        # RichLog-backed handler for the duration of a measurement.
         logging.getLogger().handlers.clear()
         self._load_settings()
         for switch_id in self.SWITCH_DEPENDENTS:
