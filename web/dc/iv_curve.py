@@ -43,6 +43,7 @@ from web.run_controller import (
     bool_switch, render_summary, busy_banner, is_busy,
     param_card, stable_card, param_grid, stable_grid, advanced_section, measurement_layout,
     program_artifacts, program_run_fn, prompt_last_run,
+    refresh_on_busy_change,
 )
 from web.directory_picker import validate_directory
 from web.identity_bar import identity_bar
@@ -267,7 +268,7 @@ def page() -> None:
     for sw in switches.values():
         sw.on_value_change(refresh_summary.refresh)
     refresh_summary()
-    ui.timer(2.0, refresh_summary.refresh)
+    refresh_on_busy_change(refresh_summary.refresh)
 
     # ── Run wiring ───────────────────────────────────────────────────────
 
@@ -303,7 +304,6 @@ def page() -> None:
             dvdi_i = series_state["traces_dvdi"][idx]
             fig.data[dvdi_i].x = tuple(I_list)
             fig.data[dvdi_i].y = tuple(dvdi)
-        plot.update()
 
         table.rows.append({
             "n": record["point_index"] + 1,
@@ -314,7 +314,6 @@ def page() -> None:
             "T1": f"{record['temperature_1_K']:.3f}" if record.get("temperature_1_K") is not None else "—",
             "T2": f"{record['temperature_2_K']:.3f}" if record.get("temperature_2_K") is not None else "—",
         })
-        table.update()
 
     def on_status(text: str) -> None:
         status_label.set_text(text)
@@ -365,6 +364,7 @@ def page() -> None:
             run_fn=program_run_fn(program, plan, run_contexts, run_extras),
             save_artifacts=lambda records, result, status: program_artifacts(program, plan, run_contexts),
             parameters=state, data_dir=state["data_dir"], planned_output_paths=[],
+            on_tick=lambda: (plot.update(), table.update()),
             on_record=on_record, on_status=on_status, on_run_label=on_run_label, on_log=on_log,
             on_finished=make_on_finished(plan, run_contexts, run_extras),
             sample=plan.sample, device=plan.device, run_cost=plan.run_cost,

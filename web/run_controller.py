@@ -243,6 +243,21 @@ def busy_banner() -> None:
     ui.timer(1.0, _content.refresh)
 
 
+def refresh_on_busy_change(refresh: Callable[[], None]) -> None:
+    """Re-run a page's summary `refresh` when a run starts or ends anywhere in
+    the app (another tab) — that is all a page's periodic refresh was for;
+    polling the cheap busy flag avoids rebuilding the summary (and its 3-D
+    field diagram) every couple of seconds."""
+    last = {"busy": is_busy()}
+
+    def _check() -> None:
+        busy = is_busy()
+        if busy != last["busy"]:
+            last["busy"] = busy
+            refresh()
+    ui.timer(1.0, _check)
+
+
 def is_busy() -> bool:
     return run_manager.snapshot() is not None
 
@@ -292,20 +307,19 @@ class RunController:
     plot/table/report-shaped back to the page, since that differs per
     measurement.
 
-    `run_fn(stop_event, cb) -> Any` must itself bracket the whole
-    connect -> configure -> run_measurement(...) -> finally: shutdown
-    sequence, exactly like every *_tui.py's do_run() already does -- that
-    bracketing is page-specific (which instruments, in which order) and
-    isn't further shared here.
+    `run_fn(stop_event, cb) -> Any` runs the whole connect -> run -> shutdown
+    sequence on the worker thread — program_run_fn() below wraps a program
+    module's pure run_plan(), the same one its TUI runs, which finalizes each
+    run's file + index row and saves its PNG the moment the run ends.
 
     `save_artifacts(records, result, status) -> list[str]` runs on the
-    WORKER thread (no UI access) immediately after run_fn returns/raises --
-    this is where a page saves its final headless-matplotlib PNG (mirroring
-    each *_tui.py's _save_measurement_png/plot_results) and, since the data
-    convention migration, unconditionally writes the raw-file header +
-    index.csv row with the outcome-derived `status`
-    ("completed"/"aborted"/"error" -- not yet a physical good/open/short/
-    noisy judgement, see instruments/data_naming.py).
+    WORKER thread right after run_fn returns/raises and only reports the
+    output paths for the run history (program_artifacts()).
+
+    `on_record` gets every point as it is drained; `on_tick` (optional) runs
+    once per drain tick that brought points — put the expensive widget
+    pushes (plot.update(), table.update()) there, not in on_record, so a
+    fast run re-sends the figure a few times a second instead of per point.
     """
 
     def __init__(self, *, suite: str, measurement: str,
@@ -319,8 +333,10 @@ class RunController:
                  on_finished: Callable[["FinalStatus", Any], None],
                  sample: Optional[str] = None, device: Optional[str] = None,
                  run_number: Optional[int] = None,
-                 run_cost: Optional[RunCost] = None) -> None:
+                 run_cost: Optional[RunCost] = None,
+                 on_tick: Optional[Callable[[], None]] = None) -> None:
         self.run_cost = run_cost
+        self.on_tick = on_tick
         self.suite = suite
         self.measurement = measurement
         self.run_fn = run_fn
@@ -449,6 +465,8 @@ class RunController:
             elif kind == "finished":
                 finished_item = item
 
+        if got_points and self.on_tick is not None:
+            self.on_tick()
         if got_points and finished_item is None and self.handle is not None:
             try:
                 run_index.update_point_count(self.handle.run_id, len(self.handle.records))

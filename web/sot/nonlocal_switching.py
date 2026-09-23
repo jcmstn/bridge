@@ -39,6 +39,7 @@ from web.run_controller import (
     FinalStatus, RunCallbacks, RunController, advanced_section, bool_switch, busy_banner,
     is_busy, measurement_layout, num_field, optional_num_field, param_card, param_grid,
     render_summary, stable_card, stable_grid, text_field,
+    refresh_on_busy_change,
 )
 from web.sample_picker import NEW_SAMPLE_SENTINEL, prepare_data_root, status_comment_dialog
 
@@ -313,7 +314,7 @@ def page() -> None:
     for sw in switches.values():
         sw.on_value_change(refresh_summary.refresh)
     refresh_summary()
-    ui.timer(2.0, refresh_summary.refresh)
+    refresh_on_busy_change(refresh_summary.refresh)
 
     def init_series(labels: list[Optional[str]]) -> None:
         """Two traces per initial state: R_NL on the top panel, V_even below,
@@ -335,7 +336,6 @@ def page() -> None:
         if record.get("voltage_even_V") is not None:        # blank with reversal off
             fig.data[ri + 1].x = fig.data[ri + 1].x + (x,)
             fig.data[ri + 1].y = fig.data[ri + 1].y + (record["voltage_even_V"] * 1e6,)
-        plot.update()
         init = record.get("init_magnet_current_A")
         dr = record.get("delta_R_ohm")
         sw = record.get("switched")
@@ -350,7 +350,6 @@ def page() -> None:
             "Ve": f"{record['voltage_even_V'] * 1e6:.3f}" if record.get("voltage_even_V") is not None else "—",
             "T1": f"{t1:.3f}" if t1 is not None else "—",
         })
-        table.update()
 
     def on_status(text: str) -> None:
         status_label.set_text(text)
@@ -449,6 +448,7 @@ def page() -> None:
             run_fn=make_run_fn(plan, run_contexts, run_extras),
             save_artifacts=lambda records, result, status: _finish_artifacts(run_contexts, data_root),
             parameters=state, data_dir=state["data_dir"], planned_output_paths=[],
+            on_tick=lambda: (plot.update(), table.update()),
             on_record=on_record, on_status=on_status, on_run_label=on_run_label, on_log=on_log,
             on_finished=make_on_finished(plan, run_contexts, run_extras),
             sample=plan.sample, device=plan.device, run_cost=plan.run_cost,

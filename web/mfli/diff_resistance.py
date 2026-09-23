@@ -40,6 +40,7 @@ from web.run_controller import (
     param_card, param_grid, advanced_section, stable_card, stable_grid, measurement_layout,
     render_summary, busy_banner, is_busy,
     program_artifacts, program_run_fn, prompt_last_run,
+    refresh_on_busy_change,
 )
 from web.directory_picker import validate_directory
 from web.identity_bar import identity_bar
@@ -271,14 +272,13 @@ def page() -> None:
         inp.on_value_change(refresh_summary.refresh)
     order_select.on_value_change(refresh_summary.refresh)
     refresh_summary()
-    ui.timer(2.0, refresh_summary.refresh)
+    refresh_on_busy_change(refresh_summary.refresh)
 
     def on_record(record: dict) -> None:
         x = record["bias_V"]
         for i, key in enumerate(("R_diff_ohm", "X_reactive_ohm", "Z_phase_deg")):
             fig.data[i].x = fig.data[i].x + (x,)
             fig.data[i].y = fig.data[i].y + (record[key],)
-        plot.update()
         table.rows.append({
             "n": record["point_index"] + 1,
             "Vb": f"{record['bias_V']:.4f}",
@@ -291,7 +291,6 @@ def page() -> None:
             "T1": f"{record['temperature_1_K']:.3f}" if record.get("temperature_1_K") is not None else "—",
             "T2": f"{record['temperature_2_K']:.3f}" if record.get("temperature_2_K") is not None else "—",
         })
-        table.update()
 
     def on_status(text: str) -> None:
         status_label.set_text(text)
@@ -343,6 +342,7 @@ def page() -> None:
             suite=SUITE, measurement=PAGE_TITLE, run_fn=program_run_fn(program, plan, run_contexts, run_extras),
             save_artifacts=lambda records, result, status: program_artifacts(program, plan, run_contexts),
             parameters=state, data_dir=state["data_dir"], planned_output_paths=[plan.acq_cfg.output_file],
+            on_tick=lambda: (plot.update(), table.update()),
             on_record=on_record, on_status=on_status, on_log=on_log,
             on_finished=make_on_finished(plan, run_contexts, run_extras),
             sample=plan.run_ctx.sample, device=plan.run_ctx.device,

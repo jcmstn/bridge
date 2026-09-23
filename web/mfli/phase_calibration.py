@@ -45,6 +45,7 @@ from web.run_controller import (
     render_summary, busy_banner, is_busy,
     param_card, stable_card, param_grid, stable_grid, advanced_section, measurement_layout,
     program_artifacts, program_run_fn, prompt_last_run,
+    refresh_on_busy_change,
 )
 from web.directory_picker import validate_directory
 from web.identity_bar import identity_bar
@@ -349,7 +350,7 @@ def page() -> None:
         sw.on_value_change(refresh_summary.refresh)
     order_select.on_value_change(refresh_summary.refresh)
     refresh_summary()
-    ui.timer(2.0, refresh_summary.refresh)
+    refresh_on_busy_change(refresh_summary.refresh)
 
     def on_record(record: dict) -> None:
         has_field = record.get("magnet_field_mT") is not None
@@ -360,7 +361,6 @@ def page() -> None:
         fig.data[1].y = fig.data[1].y + (record["2f_X_V"],)
         fig.data[2].x = fig.data[2].x + (x,)
         fig.data[2].y = fig.data[2].y + (record["2f_Y_V"],)
-        plot.update()
         table.rows.append({
             "n": record["point_index"] + 1,
             "I": f"{record['magnet_current_A']:.4f}",
@@ -370,7 +370,6 @@ def page() -> None:
             "T1": f"{record['temperature_1_K']:.3f}" if record.get("temperature_1_K") is not None else "—",
             "T2": f"{record['temperature_2_K']:.3f}" if record.get("temperature_2_K") is not None else "—",
         })
-        table.update()
 
     def on_status(text: str) -> None:
         status_label.set_text(text)
@@ -425,6 +424,7 @@ def page() -> None:
             suite=SUITE, measurement=PAGE_TITLE, run_fn=program_run_fn(program, plan, run_contexts, run_extras),
             save_artifacts=lambda records, result, status: program_artifacts(program, plan, run_contexts),
             parameters=state, data_dir=state["data_dir"], planned_output_paths=[plan.output_csv],
+            on_tick=lambda: (plot.update(), table.update()),
             on_record=on_record, on_status=on_status, on_log=on_log,
             on_finished=make_on_finished(plan, run_contexts, run_extras),
             sample=plan.run_ctx.sample, device=plan.run_ctx.device,
