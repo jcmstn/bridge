@@ -6,7 +6,7 @@ Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
 Created: 2026-08-07
 
 Alternative front end to the Textual TUI (bridge_tui.py), covering the
-same measurements (the SOT suite: the nonlocal switching program so far)
+same measurements (the SOT suite: pulsed switching and nonlocal switching)
 plus one new capability the TUI doesn't
 have: freely choosing the save directory for a run, anywhere on disk (see
 directory_picker.py), rather than only a sub-folder name under a hardcoded
@@ -40,7 +40,7 @@ from nicegui import app, ui
 
 from web.dc import hall, iv_curve, gate_sweep, spin_valve
 from web.mfli import dual_harmonic, diff_resistance, phase_calibration
-from web.sot import nonlocal_switching
+from web.sot import nonlocal_switching, pulsed_switching
 from instruments import run_index
 from web.run_controller import busy_banner
 
@@ -126,6 +126,11 @@ def _mfli_phase_calibration_page() -> None:
     phase_calibration.page()
 
 
+@ui.page("/sot/pulsed-switching")
+def _sot_pulsed_switching_page() -> None:
+    pulsed_switching.page()
+
+
 @ui.page("/sot/nonlocal-switching")
 def _sot_nonlocal_switching_page() -> None:
     nonlocal_switching.page()
@@ -200,6 +205,8 @@ def landing() -> None:
                   phase_calibration.MFLI_PHASE_CALIBRATION_DESCRIPTION, "/mfli/phase-calibration")
         with ui.column().classes("flex-1 gap-3"):
             ui.label("SOT Suite").classes("text-xl font-bold")
+            _card("SOT Pulsed Switching (4200A or 6221 pulse · DC or lock-in read)",
+                  pulsed_switching.SOT_PULSED_DESCRIPTION, "/sot/pulsed-switching")
             _card("Nonlocal Spin-Current Switching",
                   nonlocal_switching.NLSW_DESCRIPTION, "/sot/nonlocal-switching")
 

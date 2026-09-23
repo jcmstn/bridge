@@ -54,6 +54,8 @@ def _stub_hardware(mod, monkeypatch) -> list[str]:
         obj = getattr(mod, name)
         if not callable(obj) or isinstance(obj, type) or not name.startswith(_STUB_PREFIXES):
             continue
+        if name.endswith("_s"):          # run-time model helpers (acquire_s, …), not hardware
+            continue
         if name.startswith("shutdown"):
             monkeypatch.setattr(mod, name, lambda *a, _n=name, **k: shut.append(_n))
         else:

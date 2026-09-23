@@ -35,6 +35,7 @@ def test_page_reuses_the_tui_modules_pure_helpers():
     ("web.mfli.diff_resistance", "mfli.mfli_diff_resistance_tui"),
     ("web.mfli.phase_calibration", "mfli.mfli_phase_calibration_tui"),
     ("web.sot.nonlocal_switching", "sot.sot_nonlocal_switching_tui"),
+    ("web.sot.pulsed_switching", "sot.sot_pulsed_switching_tui"),
 ])
 def test_every_page_runs_its_tui_modules_plan_and_run(page, program):
     """One plan builder + one run loop per program, shared by both front ends."""
@@ -78,6 +79,7 @@ def test_web_build_plan_takes_the_data_root_from_the_page(tmp_path):
     ("mfli.mfli_diff_resistance_tui", "MFLIDiffResistanceApp"),
     ("mfli.mfli_phase_calibration_tui", "MFLIPhaseCalibrationApp"),
     ("sot.sot_nonlocal_switching_tui", "NonlocalSwitchingApp"),
+    ("sot.sot_pulsed_switching_tui", "SOTPulsedSwitchingApp"),
 ])
 def test_web_form_state_matches_the_tui_parse_state(program_name, app_name, tmp_path, monkeypatch):
     """The web page's form_state() and the TUI's parse_state() turn the same

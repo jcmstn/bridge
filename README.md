@@ -28,7 +28,7 @@ runnable on its own:
 ```
 uv run python bridge_tui.py            # TUI menu: DC / MFLI / SOT programs + recent-runs history
 uv run python sot/sot_pulsed_switching_tui.py   # any single program's TUI, standalone
-uv run python web/app.py               # Browser front end, DC + MFLI suites + SOT nonlocal switching, http://localhost:8080
+uv run python web/app.py               # Browser front end, DC + MFLI + SOT suites, http://localhost:8080
 ```
 
 The TUI menu mirrors the web landing page: one column per suite, each
@@ -37,7 +37,7 @@ Launch button; quitting a program returns to the menu. Runs from both front
 ends are listed in the same "Recent runs" table (`runs.db` next to the data
 folder).
 
-SOT pulsed switching is one TUI form (no web page) with two toggles — write
+SOT pulsed switching is one form (TUI and web page) with two toggles — write
 pulse from the 4200A PMU or the 6221, read as DC R_xy or lock-in harmonic —
 covering the former SOTPS / SOT2H / SOT1I programs; the 4200A modes need a
 KULT user module compiled on the 4200A — see

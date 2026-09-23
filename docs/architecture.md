@@ -25,7 +25,7 @@ reference. This file is the map, not a second copy of them.
 | `uv run python bridge_tui.py` | The TUI menu — every DC / MFLI / SOT program as a card (description, collapsible wiring schematic, Launch) in three suite columns, plus the shared "Recent runs" table; mirrors the web landing page. Quitting a program returns to the menu — Textual |
 | `uv run python sot/sot_pulsed_switching_tui.py` | SOT pulsed switching — one form, two toggles: write pulse = 4200A PMU \| 6221 WAVE, read = DC R_xy (6221 ±I + 2182) \| lock-in harmonic (6221 AC + MFLI). The three valid combinations are the former programs `SOTPS` / `SOT2H` / `SOT1I` (see §2 "Merged programs"). `sot_pulsed_switching_2h_tui.py` / `sot_pulsed_switching_6221_tui.py` still run and open this form on their mode — Textual |
 | `uv run python sot/sot_nonlocal_switching_tui.py` | Nonlocal spin-current switching, 6221 + 2182A only (optional Kepco field initialization, then a sweep of single-lobe 0 → ±I → 0 WAVE write pulses + DC nonlocal read, current-reversal averaged unless switched off; type `NLSW`) — Textual, also a web page. `sot/sot_nonlocal_switching.py` also runs standalone (plain CSV) |
-| `uv run python web/app.py`     | Browser front end — the DC and MFLI measurements plus the SOT nonlocal-switching page — NiceGUI, `http://localhost:8080`. The dual-harmonic page carries the MFLI \| 6221 AC-source toggle (`/mfli/dual-harmonic?source=6221`; the old `/mfli/dual-harmonic-6221` URL redirects there) |
+| `uv run python web/app.py`     | Browser front end — every DC and MFLI measurement plus SOT pulsed switching (`/sot/pulsed-switching`, the same Pulse × Read toggles as the TUI) and nonlocal switching — NiceGUI, `http://localhost:8080`. The dual-harmonic page carries the MFLI \| 6221 AC-source toggle (`/mfli/dual-harmonic?source=6221`; the old `/mfli/dual-harmonic-6221` URL redirects there) |
 | `uv run python tools/curate_sample.py <sample>` | Post-hoc curation TUI: mark runs `paper_include` / `figure_ref` |
 
 Each measurement's `*_tui.py` is also runnable on its own
@@ -90,7 +90,7 @@ headers, filenames and PNG names are exactly what each program wrote before:
 | Form (module) | Toggle | Mode → engine module (type code) |
 |---|---|---|
 | `mfli/mfli_dual_harmonic_tui.py` | `ac_source` | `mfli` → itself (`HARM`); `6221` → `mfli_dual_harmonic_6221_tui` (`HARM6`) |
-| `sot/sot_pulsed_switching_tui.py` | `pulse_source` × `read_mode` | `pmu`+`dc` → itself (`SOTPS`); `pmu`+`harmonic` → `sot_pulsed_switching_2h_tui` (`SOT2H`); `6221`+`harmonic` → `sot_pulsed_switching_6221_tui` (`SOT1I`); `6221`+`dc` is blocked by the summary |
+| `sot/sot_pulsed_switching_tui.py` (+ `web/sot/pulsed_switching.py`) | `pulse_source` × `read_mode` | `pmu`+`dc` → itself (`SOTPS`); `pmu`+`harmonic` → `sot_pulsed_switching_2h_tui` (`SOT2H`); `6221`+`harmonic` → `sot_pulsed_switching_6221_tui` (`SOT1I`); `6221`+`dc` is blocked by the summary |
 
 How it fits together:
 - The form's `DEFAULTS` / `*_FIELDS` are the union of the engines'; the
@@ -101,6 +101,10 @@ How it fits together:
   whose `run_plan` / `build_header_fields` / `save_run_png` /
   `MEASUREMENT_TYPE` / `RunScreen` handle that plan (the base
   `MeasurementApp.run_screen()` and `web/run_controller._engine()` use it).
+- Every form id appears once: a field two modes share lives in one card
+  that stays visible (the TUI reads widgets by id, so a hidden twin would
+  override the visible one). On the web, a mode select's value is a string
+  ("6221") and must stay one — `form_state()` takes select values as typed.
 - A key that means different things in two engines gets its own form id,
   renamed back before the engine sees the state (SOT: `wave_pulse_width_s`,
   `lock_settle_s` — `_FORM_IDS`).
@@ -341,7 +345,7 @@ The NiceGUI front end adds infrastructure the standalone scripts don't need:
 
 | Module | Role |
 |--------|------|
-| `web/app.py` | entrypoint; registers every page (DC, MFLI, SOT nonlocal switching); `reload=False` on purpose (a file-watch restart would drop the run lock + live instrument connections mid-measurement) |
+| `web/app.py` | entrypoint; registers every page (DC, MFLI, SOT pulsed + nonlocal switching); `reload=False` on purpose (a file-watch restart would drop the run lock + live instrument connections mid-measurement) |
 | `web/run_manager.py` | **global** run lock (`RunHandle`) — only one measurement app-wide, because the magnet / gaussmeter / iTC are the same physical instruments shared by both suites. Also buffers live records/log so a fresh page load can repaint an in-progress run and abort it. |
 | `instruments/run_index.py` | SQLite run history at a **fixed** path (`<repo>/../data/runs.db`), deliberately independent of any run's chosen data root, so history is always findable. Written by **both** front ends (web `RunController`, TUI `RunScreen`); lives in `instruments/` because it is pure sqlite. Short-lived, always-closed connection per statement; WAL mode. |
 | `web/run_controller.py` | the shared page engine: `RunController` runs the program's `run_plan()` in a background thread and drains live points/log from one `queue.Queue` per `ui.timer` tick (`on_tick` pushes the plot + table once per tick, not per point). Page helpers every page uses: `form_state()` (the web twin of `parse_state()`), `program_run_fn()` / `program_artifacts()` / `run_png_path()`, `prompt_last_run()` (status/comment → `finish_last_run()`), `finished_handler()`, `load_settings()` / `save_settings()`, `refresh_on_busy_change()` (the summary is rebuilt on input, the timer only tracks busy/idle). |
