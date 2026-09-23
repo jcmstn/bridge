@@ -33,7 +33,8 @@ from typing import Any, Callable, Iterator, Optional
 from nicegui import ui
 
 from instruments.run_time import RunCost, eta_s, format_duration
-from web import run_index, run_manager
+from instruments import run_index
+from web import run_manager
 
 log = logging.getLogger(__name__)
 
@@ -429,6 +430,7 @@ class RunController:
 
     def _drain(self) -> None:
         finished_item: Optional[dict] = None
+        got_points = False
         while True:
             try:
                 item = self._queue.get_nowait()
@@ -436,6 +438,7 @@ class RunController:
                 break
             kind = item["kind"]
             if kind == "point":
+                got_points = True
                 if self.handle is not None:
                     self.handle.records.append(item["record"])
                 self.on_record(item["record"])
@@ -452,6 +455,12 @@ class RunController:
                 self.on_log(item["text"], item["level"])
             elif kind == "finished":
                 finished_item = item
+
+        if got_points and finished_item is None and self.handle is not None:
+            try:
+                run_index.update_point_count(self.handle.run_id, len(self.handle.records))
+            except Exception:
+                log.exception("Could not update the run-history point count")
 
         if finished_item is not None:
             if self._timer is not None:

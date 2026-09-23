@@ -41,7 +41,7 @@ from nicegui import app, ui
 from web.dc import hall, iv_curve, gate_sweep, spin_valve
 from web.mfli import dual_harmonic, dual_harmonic_6221, diff_resistance, phase_calibration
 from web.sot import nonlocal_switching
-from web import run_index
+from instruments import run_index
 from web.run_controller import busy_banner
 
 APP_TITLE = "Bridge Measurement Suite"

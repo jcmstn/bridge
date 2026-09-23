@@ -1,11 +1,13 @@
 """
-SQLite run index for bridge/web
-===================================
+SQLite run index — shared by the web and TUI front ends
+=========================================================
 Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
-Created: 2026-08-07
+Created: 2026-08-07 (moved from web/ 2026-09-23 so the TUIs can record too)
 
-Records every run (start, finish, status, parameters, output paths) to
-drive the landing page's run-history table.
+Records every run (start, finish, status, parameters, output paths) from
+either front end, to drive the run-history tables on the web landing page
+and the bridge_tui.py menu. Pure sqlite — no NiceGUI/Textual import, so it
+sits in instruments/ below both front ends.
 
 Lives at a fixed location (_DATA_DIR / "runs.db", the sibling-of-bridge
 data/ directory) — deliberately independent of any given run's user-chosen
@@ -15,12 +17,15 @@ of where individual runs' data actually landed.
 Each helper opens a short-lived connection, does its one statement, commits,
 and closes — avoids sharing one sqlite3 connection across the worker thread
 (which calls finish_run() from its own `finally:`) and the event-loop thread
-(which calls update_point_count() from a ui.timer tick). WAL mode is set on
-first connect so a write from one thread doesn't block a read from another.
+(which calls update_point_count() from a ui.timer tick). WAL mode, the
+schema and the column migrations are applied once per process per database
+file, on first connect, so a write from one thread doesn't block a read
+from another.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
 from pathlib import Path
@@ -58,17 +63,31 @@ _MIGRATION_COLUMNS = [
 ]
 
 
-def _connect() -> sqlite3.Connection:
-    _DATA_DIR.mkdir(parents=True, exist_ok=True)
+_initialized: set[Path] = set()     # database files already set up this process
+
+
+@contextlib.contextmanager
+def _connect():
+    """One short-lived connection: commits on success, rolls back on error,
+    and is always closed (sqlite3's own `with conn:` only commits)."""
+    first = _DB_PATH not in _initialized
+    if first:
+        _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(_DB_PATH, timeout=10.0)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.executescript(_SCHEMA)
-    for name, sql_type in _MIGRATION_COLUMNS:
-        try:
-            conn.execute(f"ALTER TABLE runs ADD COLUMN {name} {sql_type}")
-        except sqlite3.OperationalError:
-            pass  # already migrated -- idempotent, same style as CREATE TABLE IF NOT EXISTS
-    return conn
+    try:
+        if first:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.executescript(_SCHEMA)
+            for name, sql_type in _MIGRATION_COLUMNS:
+                try:
+                    conn.execute(f"ALTER TABLE runs ADD COLUMN {name} {sql_type}")
+                except sqlite3.OperationalError:
+                    pass  # already migrated -- idempotent, same style as CREATE TABLE IF NOT EXISTS
+            _initialized.add(_DB_PATH)
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def start_run(suite: str, measurement: str, parameters: dict, data_dir: str,
@@ -99,7 +118,8 @@ def start_run(suite: str, measurement: str, parameters: dict, data_dir: str,
 
 
 def update_point_count(run_id: int, point_count: int) -> None:
-    """Called from the ui.timer drain tick, once per tick (not per point)."""
+    """Live point count of a running run — called once per UI tick that
+    brought new points (web drain tick / TUI point callback), not per point."""
     if run_id < 0:
         return
     with _connect() as conn:
