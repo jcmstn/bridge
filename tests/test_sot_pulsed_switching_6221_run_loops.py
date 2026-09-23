@@ -35,6 +35,7 @@ class _Fake6221AC:
         self._polls_until_pulse_off = polls_until_pulse_off
         self._poll_count = 0
         self._enabled = False
+        self.arms: list[dict] = []
 
     def _log(self, tag):
         if self.events is not None:
@@ -49,7 +50,22 @@ class _Fake6221AC:
         self._enabled = False
 
     def waveform_abort(self): self._log("6221.abort")
-    def waveform_arm(self):   self._log("6221.arm")
+
+    def waveform_arm(self):
+        self._log("6221.arm")
+        # WAVE state at each arm -- what the instrument would actually fire.
+        self.arms.append({k: getattr(self, k, None) for k in (
+            "waveform_function", "waveform_amplitude", "waveform_offset",
+            "waveform_use_phasemarker", "waveform_duration_cycles", "_infinite")})
+
+    def waveform_duration_set_infinity(self):
+        self._infinite = True
+        self.waveform_duration_cycles = None
+
+    def __setattr__(self, name, value):
+        if name == "waveform_duration_cycles" and value is not None:
+            object.__setattr__(self, "_infinite", False)
+        object.__setattr__(self, name, value)
 
     def waveform_start(self):
         self._log("6221.start")
@@ -259,3 +275,22 @@ def test_harmonic_is_configurable_and_recorded():
         [ps.PulsePoint(pulse_current_A=5e-3)], on_point=seen.append)
 
     assert seen[0]["harmonic"] == 1
+
+
+def test_read_rearms_the_sine_not_the_write_pulse():
+    """fire_wave_pulse() leaves WAVE set to a one-cycle square at the pulse
+    current with the marker off; the read must re-write the sine + marker
+    before arming, or it fires the write pulse a second time."""
+    pulse_cfg, read_cfg, demod_cfg, extref_cfg = _cfgs()
+    source = _Fake6221AC()
+    ps.run_measurement(source, _FakeDAQ(), demod_cfg, extref_cfg, pulse_cfg, read_cfg,
+                       [ps.PulsePoint(pulse_current_A=5e-3)], write_csv=_NULL_WRITER)
+
+    pulse_arm, read_arm = source.arms
+    assert pulse_arm["waveform_function"] == "square"
+    assert pulse_arm["waveform_use_phasemarker"] is False
+    assert read_arm["waveform_function"] == "sine"
+    assert read_arm["waveform_amplitude"] == read_cfg.sense_current_A
+    assert read_arm["waveform_offset"] == 0.0
+    assert read_arm["waveform_use_phasemarker"] is True
+    assert read_arm["_infinite"] is True

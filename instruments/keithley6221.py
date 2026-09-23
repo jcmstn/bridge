@@ -77,6 +77,24 @@ class ACSourceConfig:
     phasemarker_line: int     = 1        # Trigger Link line (1-6) the phase marker appears on — this lab's cable taps pin 1
 
 
+def apply_sine_wave(source: Keithley6221, cfg: ACSourceConfig) -> None:
+    """Write every WAVE parameter of the continuous sine + phase-marker read
+    (not yet armed — a WAVE write after `waveform_arm()` only takes effect
+    on the next arm). Shared by connect_ac_source() and any caller that
+    re-arms the read after fire_wave_pulse() has overwritten the WAVE state
+    with its one-cycle square pulse (marker off) — re-arming without this
+    would fire that pulse again instead of the sine."""
+    source.source_compliance = cfg.compliance_V
+    source.waveform_function = "sine"
+    source.waveform_amplitude = cfg.amplitude_A
+    source.waveform_offset = 0.0
+    source.waveform_frequency = cfg.frequency_Hz
+    source.waveform_ranging = cfg.ranging
+    source.waveform_use_phasemarker = True
+    source.waveform_phasemarker_line = cfg.phasemarker_line
+    source.waveform_duration_set_infinity()
+
+
 def connect_ac_source(cfg: ACSourceConfig) -> Keithley6221:
     """Open and arm a Keithley 6221 as an AC current source with its phase
     marker enabled. Every WAVE parameter (function/amplitude/frequency/
@@ -93,15 +111,7 @@ def connect_ac_source(cfg: ACSourceConfig) -> Keithley6221:
     """
     source = Keithley6221(cfg.visa_resource)
     source.reset()
-    source.source_compliance = cfg.compliance_V
-    source.waveform_function = "sine"
-    source.waveform_amplitude = cfg.amplitude_A
-    source.waveform_offset = 0.0
-    source.waveform_frequency = cfg.frequency_Hz
-    source.waveform_ranging = cfg.ranging
-    source.waveform_use_phasemarker = True
-    source.waveform_phasemarker_line = cfg.phasemarker_line
-    source.waveform_duration_set_infinity()
+    apply_sine_wave(source, cfg)
     source.waveform_arm()
     readback = source.waveform_phasemarker_line
     if int(readback) != cfg.phasemarker_line:

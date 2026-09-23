@@ -127,6 +127,7 @@ from pymeasure.instruments.keithley import Keithley6221
 from instruments.keithley6221 import (
     ACSourceConfig,
     PulseWaveConfig,
+    apply_sine_wave,
     connect_ac_source,
     fire_wave_pulse,
     shutdown_ac_source,
@@ -455,16 +456,16 @@ def _six221_ac_output_off(source: Keithley6221) -> None:
     source.disable_source()
 
 
-def _six221_ac_output_on(source: Keithley6221, compliance_V: float) -> None:
-    """Resume the AC wave + phase marker for the read. Re-arms and restarts
-    (rather than assuming a prior WAVE state survived the pulse phase in
-    between) — also hands the MFLI's PLL a clean, unambiguous edge to
-    re-lock to every time. WAVE parameters (function/amplitude/frequency/
-    phase marker) were set once by connect_ac_source() at startup and
-    persist across abort/re-arm — only compliance needs re-asserting here,
-    since fire_wave_pulse() changes it (and the function/amplitude/offset/
-    duty-cycle/duration) for the pulse phase."""
-    source.source_compliance = compliance_V
+def _six221_ac_output_on(source: Keithley6221, read_cfg: "ReadConfig") -> None:
+    """Resume the AC wave + phase marker for the read. Re-writes EVERY WAVE
+    parameter, then re-arms and restarts: fire_wave_pulse() just left the
+    6221 set to a one-cycle square at the pulse current with the phase
+    marker off, so a bare re-arm would fire the write pulse a second time
+    and the MFLI's PLL would have no marker to lock to. The fresh arm also
+    hands the PLL a clean, unambiguous edge to re-lock to every time."""
+    apply_sine_wave(source, ACSourceConfig(
+        amplitude_A=read_cfg.sense_current_A, frequency_Hz=read_cfg.frequency_Hz,
+        compliance_V=read_cfg.compliance_V, phasemarker_line=read_cfg.phasemarker_line))
     source.enable_source()
     source.waveform_arm()
     source.waveform_start()
@@ -537,7 +538,7 @@ def run_measurement(
         _interruptible_sleep(read_cfg.delay_after_pulse_s, stop_event)
 
         # ── 4. AC wave ON, wait for PLL lock, settle, read ────────────
-        _six221_ac_output_on(source, read_cfg.compliance_V)
+        _six221_ac_output_on(source, read_cfg)
         locked = wait_for_reference_lock(daq, extref_cfg, read_cfg.lock_timeout_s,
                                          stop_event)
         if not locked:
