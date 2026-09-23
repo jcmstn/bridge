@@ -48,6 +48,7 @@ from instruments.data_naming import (
 )
 from instruments.field_geometry import field_direction_summary_line
 from dc.dc_sweep_utils import safe_shutdown
+from web import run_manager
 from web.run_controller import (
     RunController, RunCallbacks, FinalStatus, num_field, text_field, textarea_field, bool_switch,
     optional_num_field, render_summary, busy_banner, is_busy,
@@ -56,7 +57,7 @@ from web.run_controller import (
 from web.directory_picker import validate_directory
 from web.field_diagram import build_field_diagram_figure
 from web.identity_bar import identity_bar
-from web.sample_picker import NEW_SAMPLE_SENTINEL, status_comment_dialog
+from web.sample_picker import NEW_SAMPLE_SENTINEL, prepare_data_root, status_comment_dialog
 
 log = logging.getLogger("web.mfli.dual_harmonic")
 
@@ -712,13 +713,19 @@ def page() -> None:
         if errors:
             ui.notify("Fix the blocking issues before starting.", type="negative")
             return
-        state["data_dir"] = identity.data_dir_input.value.strip()
+        state["data_dir"] = prepare_data_root(identity.data_dir_input.value, state["sample"])
 
         _save_settings(collect_raw())
 
+        # build_plan() allocates the run number -- check the global lock
+        # first, or a busy lock would leave an in_progress index row that is
+        # never finalized. (Same event-loop tick as try_start() below, so no
+        # other page can take the lock in between.)
+        if run_manager.snapshot() is not None:
+            ui.notify("Another measurement is already running — see the banner above.", type="warning")
+            return
         plan = build_plan(state)
         run_label.set_text(f"Run #{plan.run_ctx.run_str}")
-        Path(state["data_dir"]).mkdir(parents=True, exist_ok=True)
 
         rc = RunController(
             suite=SUITE, measurement=PAGE_TITLE, run_fn=make_run_fn(plan),

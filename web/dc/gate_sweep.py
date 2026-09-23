@@ -49,7 +49,7 @@ from web.run_controller import (
 )
 from web.directory_picker import validate_directory
 from web.identity_bar import identity_bar
-from web.sample_picker import NEW_SAMPLE_SENTINEL, status_comment_dialog
+from web.sample_picker import NEW_SAMPLE_SENTINEL, prepare_data_root, status_comment_dialog
 
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data"
 _SETTINGS_PATH = _DATA_DIR / "web_settings" / "dc_gate_sweep_web_settings.json"
@@ -636,12 +636,11 @@ def page() -> None:
         if errors:
             ui.notify("Fix the blocking issues before starting.", type="negative")
             return
-        state["data_dir"] = identity.data_dir_input.value.strip()
+        state["data_dir"] = prepare_data_root(identity.data_dir_input.value, state["sample"])
 
         _save_settings(collect_raw())
 
         plan = build_plan(state)
-        Path(state["data_dir"]).mkdir(parents=True, exist_ok=True)
         n_sense = len(plan.sense_currents_A)
         labels = [series_label(f, s, n_sense) for f, s in plan.series_values]
         run_contexts: list[RunContext] = []

@@ -40,13 +40,38 @@ def validate_sample_name(name: str, data_root: Path) -> str:
     return ""
 
 
-def _sample_option_map(data_root: Path) -> dict:
-    ensure_test_sample(data_root)
+def _existing_root(raw: str) -> Optional[Path]:
+    """The typed data root, `~`-expanded, if it names an existing directory,
+    else None. Gates every sample re-listing, like the TUIs'
+    _sync_data_root(): listing creates the _test/ pseudo-sample, so a
+    half-typed path must never be listed (one stray _test/ tree per
+    keystroke otherwise)."""
+    path = Path((raw or "").strip()).expanduser()
+    return path.resolve() if path.is_dir() else None
+
+
+def _sample_option_map(data_root: Optional[Path]) -> dict:
     options: dict = {TEST_SAMPLE: "— quick test (_test) —"}
-    for s in list_samples(data_root):
-        options[s] = s
+    if data_root is not None:
+        ensure_test_sample(data_root)
+        for s in list_samples(data_root):
+            options[s] = s
     options[NEW_SAMPLE_SENTINEL] = "+ New sample…"
     return options
+
+
+def prepare_data_root(raw: str, sample: str) -> str:
+    """The run's data root, `~`-expanded, with the sample's folder tree
+    guaranteed — called by every page's Start handler before any hardware is
+    touched (the TUIs' action_start does the same), so a sample missing from
+    a freshly chosen root can't fail allocate_run() with the instruments
+    already live."""
+    root = Path(raw.strip()).expanduser()
+    if sample:
+        ensure_sample(root, sample, create=True)
+    else:
+        root.mkdir(parents=True, exist_ok=True)
+    return str(root)
 
 
 async def new_sample_dialog(data_root: Path) -> Optional[str]:
@@ -113,19 +138,25 @@ def sample_select(data_root_getter: Callable[[], str], *, default: str = TEST_SA
     whenever the data root changes, to repopulate without altering the
     current selection.
     """
-    select = ui.select(_sample_option_map(Path(data_root_getter())), value=default, label="Sample") \
-        .classes("w-full").props("outlined dense")
+    options = _sample_option_map(_existing_root(data_root_getter()))
+    # A saved sample that no longer exists in this root falls back to _test
+    # (ui.select raises on a value outside its options).
+    select = ui.select(options, value=default if default in options else TEST_SAMPLE,
+                       label="Sample").classes("w-full").props("outlined dense")
 
     def refresh_options(select_value: Optional[str] = None) -> None:
-        select.options = _sample_option_map(Path(data_root_getter()))
-        if select_value is not None:
-            select.value = select_value
+        root = _existing_root(data_root_getter())
+        if root is None and select_value is None:
+            return          # half-typed / missing path: keep the current list
+        select.options = _sample_option_map(root)
+        value = select.value if select_value is None else select_value
+        select.value = value if value in select.options else TEST_SAMPLE
         select.update()
 
     async def _on_change() -> None:
         if select.value != NEW_SAMPLE_SENTINEL:
             return
-        result = await new_sample_dialog(Path(data_root_getter()))
+        result = await new_sample_dialog(Path(data_root_getter().strip()).expanduser())
         refresh_options(result if result else TEST_SAMPLE)
 
     select.on_value_change(_on_change)

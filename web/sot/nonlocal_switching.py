@@ -40,7 +40,7 @@ from web.run_controller import (
     is_busy, measurement_layout, num_field, optional_num_field, param_card, param_grid,
     render_summary, stable_card, stable_grid, text_field,
 )
-from web.sample_picker import NEW_SAMPLE_SENTINEL, status_comment_dialog
+from web.sample_picker import NEW_SAMPLE_SENTINEL, prepare_data_root, status_comment_dialog
 
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data"
 _SETTINGS_PATH = _DATA_DIR / "web_settings" / "sot_nonlocal_switching_web_settings.json"
@@ -433,12 +433,11 @@ def page() -> None:
         if errors:
             ui.notify("Fix the blocking issues before starting.", type="negative")
             return
-        state["data_dir"] = identity.data_dir_input.value.strip()
+        state["data_dir"] = prepare_data_root(identity.data_dir_input.value, state["sample"])
 
         _save_settings(collect_raw())
 
-        data_root = Path(state["data_dir"]).expanduser()
-        data_root.mkdir(parents=True, exist_ok=True)
+        data_root = Path(state["data_dir"])
         plan = build_plan(state, data_root)
         labels = [f"I_init={i:g}A" if i is not None and len(plan.series_values) > 1 else None
                   for i in plan.series_values]

@@ -50,7 +50,7 @@ from web.run_controller import (
     param_card, stable_card, param_grid, stable_grid, advanced_section, measurement_layout,
 )
 from web.directory_picker import validate_directory
-from web.sample_picker import NEW_SAMPLE_SENTINEL, status_comment_dialog
+from web.sample_picker import NEW_SAMPLE_SENTINEL, prepare_data_root, status_comment_dialog
 
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data"
 _SETTINGS_PATH = _DATA_DIR / "web_settings" / "dc_spin_valve_web_settings.json"
@@ -724,12 +724,11 @@ def page() -> None:
         if errors:
             ui.notify("Fix the blocking issues before starting.", type="negative")
             return
-        state["data_dir"] = identity.data_dir_input.value.strip()
+        state["data_dir"] = prepare_data_root(identity.data_dir_input.value, state["sample"])
 
         _save_settings(collect_raw())
 
         plan = build_plan(state)
-        Path(state["data_dir"]).mkdir(parents=True, exist_ok=True)
         n_currents = len(plan.sense_currents_A)
         n_gates = len(plan.gate_series_values)
         labels = [series_label(I, gv, n_currents, n_gates) for I, gv in plan.series_values]
