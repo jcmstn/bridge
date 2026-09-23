@@ -81,3 +81,42 @@ def test_parse_sweep_rows_rejects_wrong_field_count() -> None:
 def test_parse_sweep_rows_rejects_empty_text() -> None:
     with pytest.raises(ValueError):
         parse_sweep_rows("   \n  \n")
+
+
+# ── MAX_SWEEP_POINTS: a mistyped step/span must fail fast, not allocate ──────
+
+from dc.dc_sweep_utils import MAX_SWEEP_POINTS, sweep_point_count  # noqa: E402
+
+
+@pytest.mark.parametrize("call", [
+    lambda: build_segmented_sweep([(-20.0, 20.0, 10**12)], bidirectional=True),
+    lambda: linear_sweep(0.0, 1.0, 1e-12),
+    lambda: linear_sweep(0.0, 1e9, 1.0, bidirectional=False),
+    lambda: sweep_point_count(0.0, 1.0, 1e-12),
+])
+def test_oversized_sweep_raises_before_allocating(call) -> None:
+    with pytest.raises(ValueError, match="limit"):
+        call()
+
+
+@pytest.mark.parametrize("args", [(0.0, float("inf"), 1.0), (0.0, 1.0, float("nan")),
+                                  (float("-inf"), 0.0, 0.1)])
+def test_non_finite_sweep_raises_value_error(args) -> None:
+    with pytest.raises(ValueError, match="finite"):
+        linear_sweep(*args)
+    with pytest.raises(ValueError, match="finite"):
+        sweep_point_count(*args)
+
+
+@pytest.mark.parametrize("start, stop, step, bidi", [
+    (-20.0, 20.0, 2.0, True), (0.2, 2.0, 0.1, True), (1e-3, 10e-3, 0.5e-3, False), (5.0, -5.0, 0.3, True),
+])
+def test_point_count_matches_the_built_sweep(start, stop, step, bidi) -> None:
+    assert sweep_point_count(start, stop, step, bidi) == len(linear_sweep(start, stop, step, bidi))
+
+
+def test_the_cap_is_per_direction_and_itself_allowed() -> None:
+    n = MAX_SWEEP_POINTS
+    assert len(build_segmented_sweep([(0.0, 1.0, n)], bidirectional=True)) == 2 * n - 1
+    with pytest.raises(ValueError, match="limit"):
+        parse_sweep_rows(f"0, 1, {n}\n1, 2, 2")       # rows are checked as they are parsed

@@ -48,7 +48,6 @@ from textual.widgets import (
     Collapsible,
     Footer,
     Header,
-    Input,
     Select,
     Static,
     Switch,
@@ -72,7 +71,7 @@ from dc.dc_iv_curve import (
     shutdown_source,
     shutdown_temperature_controller,
 )
-from dc.dc_sweep_utils import linear_sweep, parse_value_list, safe_shutdown
+from dc.dc_sweep_utils import linear_sweep, parse_value_list, safe_shutdown, sweep_point_count
 from instruments.data_dir import validate_directory
 from instruments.data_naming import (
     RunContext,
@@ -317,12 +316,15 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     read_s = read_time_s(state["nplc"])
     info.append(f"Estimated 2182 reading time ≈ {read_s * 1000:.0f} ms (NPLC={state['nplc']:g})")
 
+    n_sweep_points = 0
     if state["step_A"] <= 0:
         errors.append("Sweep step size must be > 0 A.")
-        n_one_way = 0
     else:
-        n_one_way = max(2, round(abs(state["current_max_A"] - state["current_min_A"]) / state["step_A"]) + 1)
-    n_sweep_points = n_one_way if not state["bidirectional_sweep"] else max(0, 2 * n_one_way - 1)
+        try:
+            n_sweep_points = sweep_point_count(state["current_min_A"], state["current_max_A"],
+                                               state["step_A"], state["bidirectional_sweep"])
+        except ValueError as exc:
+            errors.append(str(exc))
     direction = (f"{state['current_min_A']:g} A → {state['current_max_A']:g} A → {state['current_min_A']:g} A"
                  if state["bidirectional_sweep"]
                  else f"{state['current_min_A']:g} A → {state['current_max_A']:g} A")
@@ -787,27 +789,7 @@ class DCIVCurveApp(MeasurementApp):
     # ── Form state I/O ───────────────────────────────────────────────────────
 
     def parse_state(self) -> tuple[dict, list[str]]:
-        errors: list[str] = []
-        state: dict = {}
-        for fid, caster in NUMERIC_FIELDS.items():
-            raw = self.query_one(f"#{fid}", Input).value.strip()
-            try:
-                state[fid] = caster(raw)
-            except ValueError:
-                errors.append(f"'{fid}' is not a valid number: {raw!r}")
-                state[fid] = 0
-        for fid in TEXT_FIELDS:
-            state[fid] = self.query_one(f"#{fid}", Input).value.strip()
-        for fid in OPTIONAL_NUMERIC_FIELDS:
-            raw = self.query_one(f"#{fid}", Input).value.strip()
-            if raw:
-                try:
-                    state[fid] = float(raw)
-                except ValueError:
-                    errors.append(f"'{fid}' is not a valid number: {raw!r}")
-                    state[fid] = None
-            else:
-                state[fid] = None
+        state, errors = self._parse_fields()
         state["auto_range"] = self.query_one("#auto_range", Switch).value
         state["bidirectional_sweep"] = self.query_one("#bidirectional_sweep", Switch).value
         state["enable_gate"] = self.query_one("#enable_gate", Switch).value
@@ -827,7 +809,7 @@ class DCIVCurveApp(MeasurementApp):
 
     # ── Reactivity ───────────────────────────────────────────────────────────
 
-    def refresh_summary(self) -> None:
+    def update_summary(self) -> None:
         state, parse_errors = self.parse_state()
         if parse_errors:
             info, warnings, errors = [], [], parse_errors

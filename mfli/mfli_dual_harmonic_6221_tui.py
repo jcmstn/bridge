@@ -41,7 +41,6 @@ from textual.widgets import (
     Collapsible,
     Footer,
     Header,
-    Input,
     Select,
     Static,
     Switch,
@@ -1425,27 +1424,7 @@ class MFLIDualHarmonic6221App(MeasurementApp):
     # ── Form state I/O ───────────────────────────────────────────────────────
 
     def parse_state(self) -> tuple[dict, list[str]]:
-        errors: list[str] = []
-        state: dict = {}
-        for fid, caster in NUMERIC_FIELDS.items():
-            raw = self.query_one(f"#{fid}", Input).value.strip()
-            try:
-                state[fid] = caster(raw)
-            except ValueError:
-                errors.append(f"'{fid}' is not a valid number: {raw!r}")
-                state[fid] = 0
-        for fid in TEXT_FIELDS:
-            state[fid] = self.query_one(f"#{fid}", Input).value.strip()
-        for fid in OPTIONAL_NUMERIC_FIELDS:
-            raw = self.query_one(f"#{fid}", Input).value.strip()
-            if raw:
-                try:
-                    state[fid] = float(raw)
-                except ValueError:
-                    errors.append(f"'{fid}' is not a valid number: {raw!r}")
-                    state[fid] = None
-            else:
-                state[fid] = None
+        state, errors = self._parse_fields()
         state["sinc_filter_1f"] = self.query_one("#sinc_filter_1f", Switch).value
         state["sinc_filter_2f"] = self.query_one("#sinc_filter_2f", Switch).value
         state["measure_rxx"] = self.query_one("#measure_rxx", Switch).value
@@ -1480,7 +1459,7 @@ class MFLIDualHarmonic6221App(MeasurementApp):
 
     # ── Reactivity ───────────────────────────────────────────────────────────
 
-    def refresh_summary(self) -> None:
+    def update_summary(self) -> None:
         state, parse_errors = self.parse_state()
         if parse_errors:
             info, warnings, errors = [], [], parse_errors

@@ -16,7 +16,7 @@ What all 13 {suite}/*_tui.py programs used to carry as verbatim copies:
   switch -> dependent-field greying, and Start.
 
 A program subclasses both and supplies only what is its own: the form
-(compose), refresh_summary / parse_state / _build_plan, the run loop
+(compose), update_summary / parse_state / _build_plan, the run loop
 (do_run), and a few small hooks (table columns + row, live-plot args, PNG
 + header builders). MeasurementApp reads the program's module-level names
 — SETTINGS_PATH, _DEFAULT_DATA_DIR, the *_FIELDS groups, build_summary,
@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import multiprocessing as mp
 import sys
 import threading
@@ -82,6 +83,13 @@ def parse_sensor_uids(raw: str) -> tuple:
     """Parse a comma-separated "MB1.T1, DB5.T1" field into a 1- or 2-tuple of UIDs."""
     uids = [u.strip() for u in raw.split(",") if u.strip()]
     return tuple(uids[:2])
+
+
+def _finite(value):
+    """`value`, or ValueError if it is a float inf/nan."""
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(f"not a finite number: {value!r}")
+    return value
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -495,7 +503,7 @@ class MeasurementRunScreen(Screen):
 
 class MeasurementApp(App):
     """The parameter form. Subclass supplies TITLE/SUB_TITLE/CSS, compose(),
-    parse_state(), refresh_summary(), _build_plan() and SWITCH_DEPENDENTS;
+    parse_state(), update_summary(), _build_plan() and SWITCH_DEPENDENTS;
     the program module supplies SETTINGS_PATH, _DEFAULT_DATA_DIR, DEFAULTS,
     NUMERIC_FIELDS / TEXT_FIELDS / OPTIONAL_NUMERIC_FIELDS (+ LIST_FIELDS),
     build_summary() and RunScreen."""
@@ -532,11 +540,67 @@ class MeasurementApp(App):
                 self._apply_switch_dependents(switch_id, switch.value)
         self.refresh_summary()
 
-    def refresh_summary(self) -> None:
+    def update_summary(self) -> None:
+        """Re-parse the form and repaint the sidebar summary + filename preview."""
         raise NotImplementedError
+
+    def refresh_summary(self) -> None:
+        """update_summary(), but an unexpected error in it (a run-time model
+        dividing by a just-typed 0, …) is shown in the sidebar and blocks
+        Start instead of closing the whole TUI — an exception escaping a
+        Textual event handler exits the app."""
+        try:
+            self.update_summary()
+        except Exception as exc:
+            log.exception("Could not evaluate the form")
+            for summary in self.query("#summary").results(Static):
+                summary.update(f"[bold red]Can't evaluate this form[/bold red]\n  [red]✗ {exc}[/red]")
+            for start in self.query("#start").results(Button):
+                start.disabled = True
 
     def parse_state(self) -> tuple[dict, list[str]]:
         raise NotImplementedError
+
+    def _parse_fields(self) -> tuple[dict, list[str]]:
+        """The shared head of every parse_state(): the NUMERIC_FIELDS (cast
+        with their type), TEXT_FIELDS, LIST_FIELDS (comma lists) and
+        OPTIONAL_NUMERIC_FIELDS Inputs. Only finite numbers pass — "1e999"
+        parses to inf, which the run-time model / field diagram can't take."""
+        p = self.program
+        errors: list[str] = []
+        state: dict = {}
+        for fid, caster in p.NUMERIC_FIELDS.items():
+            raw = self.query_one(f"#{fid}", Input).value.strip()
+            try:
+                state[fid] = _finite(caster(raw))
+            except ValueError:
+                errors.append(f"'{fid}' is not a valid number: {raw!r}")
+                state[fid] = 0
+        for fid in p.TEXT_FIELDS:
+            state[fid] = self.query_one(f"#{fid}", Input).value.strip()
+        for fid in getattr(p, "LIST_FIELDS", []):
+            raw = self.query_one(f"#{fid}", Input).value.strip()
+            values: list[float] = []
+            for part in raw.split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                try:
+                    values.append(_finite(float(part)))
+                except ValueError:
+                    errors.append(f"'{fid}' contains a value that isn't a number: {part!r}")
+            state[fid] = values
+        for fid in p.OPTIONAL_NUMERIC_FIELDS:
+            raw = self.query_one(f"#{fid}", Input).value.strip()
+            if raw:
+                try:
+                    state[fid] = _finite(float(raw))
+                except ValueError:
+                    errors.append(f"'{fid}' is not a valid number: {raw!r}")
+                    state[fid] = None
+            else:
+                state[fid] = None
+        return state, errors
 
     def _build_plan(self, state: dict):
         raise NotImplementedError
@@ -674,11 +738,12 @@ class MeasurementApp(App):
             self.refresh_summary()
 
     def action_start(self) -> None:
-        state, parse_errors = self.parse_state()
-        if parse_errors:
-            self.bell()
-            return
-        _, _, errors = self.program.build_summary(state)
+        try:
+            state, parse_errors = self.parse_state()
+            errors = parse_errors or self.program.build_summary(state)[2]
+        except Exception:
+            log.exception("Could not evaluate the form")
+            errors = ["unevaluable form"]
         if errors:
             self.bell()
             return

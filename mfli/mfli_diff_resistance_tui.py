@@ -43,12 +43,12 @@ from textual.widgets import (
     Collapsible,
     Footer,
     Header,
-    Input,
     Select,
     Static,
     Switch,
 )
 
+from dc.dc_sweep_utils import check_sweep_size
 from mfli.mfli_diff_resistance_vs_bias import (
     AcquisitionConfig,
     BiasPoint,
@@ -362,6 +362,11 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     if state["n_points"] < 2:
         errors.append("Points per sweep direction must be ≥ 2.")
     total_points = max(0, 2 * state["n_points"] - 1)
+    try:
+        check_sweep_size(state["n_points"])
+    except ValueError as exc:
+        errors.append(str(exc))
+        return info, warnings, errors      # don't model billions of points
     info.append(
         f"Bias sweep: {state['bias_min_V']:g} V → {state['bias_max_V']:g} V → "
         f"{state['bias_min_V']:g} V, {total_points} points (bidirectional — reveals hysteresis)"
@@ -783,27 +788,7 @@ class MFLIDiffResistanceApp(MeasurementApp):
     # ── Form state I/O ───────────────────────────────────────────────────────
 
     def parse_state(self) -> tuple[dict, list[str]]:
-        errors: list[str] = []
-        state: dict = {}
-        for fid, caster in NUMERIC_FIELDS.items():
-            raw = self.query_one(f"#{fid}", Input).value.strip()
-            try:
-                state[fid] = caster(raw)
-            except ValueError:
-                errors.append(f"'{fid}' is not a valid number: {raw!r}")
-                state[fid] = 0
-        for fid in TEXT_FIELDS:
-            state[fid] = self.query_one(f"#{fid}", Input).value.strip()
-        for fid in OPTIONAL_NUMERIC_FIELDS:
-            raw = self.query_one(f"#{fid}", Input).value.strip()
-            if raw:
-                try:
-                    state[fid] = float(raw)
-                except ValueError:
-                    errors.append(f"'{fid}' is not a valid number: {raw!r}")
-                    state[fid] = None
-            else:
-                state[fid] = None
+        state, errors = self._parse_fields()
         state["sinc_filter"] = self.query_one("#sinc_filter", Switch).value
         state["order"] = int(self.query_one("#order", Select).value)
         state["enable_temperature"] = self.query_one("#enable_temperature", Switch).value
@@ -813,7 +798,7 @@ class MFLIDiffResistanceApp(MeasurementApp):
 
     # ── Reactivity ───────────────────────────────────────────────────────────
 
-    def refresh_summary(self) -> None:
+    def update_summary(self) -> None:
         state, parse_errors = self.parse_state()
         if parse_errors:
             info, warnings, errors = [], [], parse_errors

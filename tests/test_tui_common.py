@@ -83,3 +83,33 @@ def test_single_run_lifecycle(tmp_path: Path, monkeypatch) -> None:
     assert (hist["suite"], hist["measurement"], hist["status"], hist["point_count"]) == \
         (_Screen.__module__.split(".")[0].upper(), "DC I-V Curve", "completed", 3)
     assert hist["run_number"] == str(ctx.run_number)
+
+
+def test_summary_errors_are_shown_not_fatal_and_infinity_is_a_parse_error(tmp_path, monkeypatch) -> None:
+    """A summary that raises (e.g. a model dividing by a just-typed 0) must not
+    close the TUI: the sidebar shows it and Start is disabled. And "1e999"
+    (float -> inf) is a parse error, not a value."""
+    import dc.dc_iv_curve_tui as iv
+    from textual.widgets import Button, Input, Static
+
+    monkeypatch.setattr(iv, "_DEFAULT_DATA_DIR", tmp_path)
+    monkeypatch.setattr(iv, "SETTINGS_PATH", tmp_path / "s.json")
+    monkeypatch.setattr(iv.DCIVCurveApp, "data_root", tmp_path)
+
+    async def go():
+        app = iv.DCIVCurveApp()
+        async with app.run_test(size=(200, 60)) as pilot:
+            await pilot.pause()
+            app.query_one("#nplc", Input).value = "1e999"
+            await pilot.pause()
+            _, parse_errors = app.parse_state()
+            assert any("nplc" in e for e in parse_errors)
+
+            def boom():
+                raise ZeroDivisionError("division by zero")
+            app.update_summary = boom
+            app.refresh_summary()
+            assert "division by zero" in str(app.query_one("#summary", Static).render())
+            assert app.query_one("#start", Button).disabled
+
+    asyncio.run(go())

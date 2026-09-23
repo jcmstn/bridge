@@ -100,6 +100,7 @@ from typing import Optional, Callable, List
 import zhinst.core as zi
 import zhinst.utils as ziutils
 
+from dc.dc_sweep_utils import check_sweep_size
 from instruments.run_time import GPIB_TXN_S
 from instruments.mfli_daq import (
     connect,
@@ -358,6 +359,7 @@ def bidirectional_bias_sweep(v_min: float, v_max: float, n_points: int) -> np.nd
     on top of each other for a clean, purely resistive contact. The
     turn-around point (v_max) is not duplicated.
     """
+    check_sweep_size(n_points)
     up   = np.linspace(v_min, v_max, n_points)
     down = np.linspace(v_max, v_min, n_points)[1:]
     return np.concatenate([up, down])

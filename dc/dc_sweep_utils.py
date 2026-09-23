@@ -14,11 +14,30 @@ exactly once.
 from __future__ import annotations
 
 import logging
+import math
 from typing import Callable
 
 import numpy as np
 
 log = logging.getLogger(__name__)
+
+# Upper bound on one sweep DIRECTION's point count (a bidirectional sweep may
+# have twice this). Every sweep a form previews on each keystroke goes through
+# parse_sweep_rows() / build_segmented_sweep() / linear_sweep(), so a mistyped
+# step (1e-12) or span (1e9) used to allocate billions of points and freeze --
+# or OOM-kill -- the TUI/web form. 100 000 points is ~28 h at 1 s/point, far
+# past any real sweep here; raise it if a real sweep ever needs more.
+MAX_SWEEP_POINTS = 100_000
+
+
+def check_sweep_size(n_points: int) -> None:
+    """ValueError (the form shows it as a blocking error) if one sweep
+    direction would have more than MAX_SWEEP_POINTS points -- checked BEFORE
+    anything is allocated."""
+    if n_points > MAX_SWEEP_POINTS:
+        raise ValueError(
+            f"Sweep would have {n_points:,} points per direction, more than the "
+            f"{MAX_SWEEP_POINTS:,} limit — use a larger step or fewer points.")
 
 
 def build_segmented_sweep(
@@ -42,6 +61,7 @@ def build_segmented_sweep(
     """
     if not rows:
         raise ValueError("At least one sweep row is required.")
+    check_sweep_size(sum(n for _, _, n in rows))
 
     def _join(chunks: list[np.ndarray]) -> np.ndarray:
         out = chunks[0]
@@ -67,11 +87,26 @@ def linear_sweep(start: float, stop: float, step: float, bidirectional: bool = T
     Thin wrapper over build_segmented_sweep for the single-row, step-size
     call sites (dc_iv_curve, dc_gate_sweep, sot_pulsed_switching*).
     """
+    n = _one_way_points(start, stop, step)
+    return build_segmented_sweep([(start, stop, n)], bidirectional)
+
+
+def _one_way_points(start: float, stop: float, step: float) -> int:
+    if not all(math.isfinite(v) for v in (start, stop, step)):
+        raise ValueError("Sweep start, stop and step must be finite numbers.")
     if step <= 0:
         raise ValueError(f"Step size must be > 0, got {step!r}.")
-
     n = max(2, int(round(abs(stop - start) / step)) + 1)
-    return build_segmented_sweep([(start, stop, n)], bidirectional)
+    check_sweep_size(n)
+    return n
+
+
+def sweep_point_count(start: float, stop: float, step: float, bidirectional: bool = True) -> int:
+    """How many points linear_sweep(start, stop, step, bidirectional) yields,
+    without building it. Same ValueErrors as linear_sweep(), including the
+    MAX_SWEEP_POINTS cap -- for summaries that only need the count."""
+    n = _one_way_points(start, stop, step)
+    return 2 * n - 1 if bidirectional else n
 
 
 def parse_sweep_rows(text: str) -> list[tuple[float, float, int]]:
@@ -103,6 +138,7 @@ def parse_sweep_rows(text: str) -> list[tuple[float, float, int]]:
         rows.append((start, stop, n))
     if not rows:
         raise ValueError("Expected at least one sweep row.")
+    check_sweep_size(sum(n for _, _, n in rows))
     return rows
 
 
@@ -120,9 +156,12 @@ def parse_value_list(text: str) -> list[float]:
     values: list[float] = []
     for token in tokens:
         try:
-            values.append(float(token))
+            value = float(token)
         except ValueError:
             raise ValueError(f"'{token}' is not a valid number.") from None
+        if not math.isfinite(value):
+            raise ValueError(f"'{token}' is not a finite number.")
+        values.append(value)
     return values
 
 

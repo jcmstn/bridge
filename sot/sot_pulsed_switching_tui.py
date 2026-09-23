@@ -30,7 +30,7 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.validation import Number
 from textual.widgets import (
-    Button, Collapsible, Footer, Header, Input, Select, Static, Switch,
+    Button, Collapsible, Footer, Header, Select, Static, Switch,
 )
 
 from sot.sot_pulsed_switching import (
@@ -1076,27 +1076,7 @@ class SOTPulsedSwitchingApp(MeasurementApp):
     # form I/O
 
     def parse_state(self) -> tuple[dict, list[str]]:
-        errors: list[str] = []
-        state: dict = {}
-        for fid, caster in NUMERIC_FIELDS.items():
-            raw = self.query_one(f"#{fid}", Input).value.strip()
-            try:
-                state[fid] = caster(raw)
-            except ValueError:
-                errors.append(f"'{fid}' is not a valid number: {raw!r}")
-                state[fid] = 0
-        for fid in TEXT_FIELDS:
-            state[fid] = self.query_one(f"#{fid}", Input).value.strip()
-        for fid in OPTIONAL_NUMERIC_FIELDS:
-            raw = self.query_one(f"#{fid}", Input).value.strip()
-            if raw:
-                try:
-                    state[fid] = float(raw)
-                except ValueError:
-                    errors.append(f"'{fid}' is not a valid number: {raw!r}")
-                    state[fid] = None
-            else:
-                state[fid] = None
+        state, errors = self._parse_fields()
         for sid in SWITCH_FIELD_IDS:
             state[sid] = self.query_one(f"#{sid}", Switch).value
         sample_value = self.query_one("#sample_select", Select).value
@@ -1109,7 +1089,7 @@ class SOTPulsedSwitchingApp(MeasurementApp):
             _resolve_sense_currents(state)
         return state, errors
 
-    def refresh_summary(self) -> None:
+    def update_summary(self) -> None:
         state, parse_errors = self.parse_state()
         if parse_errors:
             info, warnings, errors, preview = [], [], parse_errors, None

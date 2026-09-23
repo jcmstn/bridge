@@ -46,7 +46,6 @@ from textual.widgets import (
     Collapsible,
     Footer,
     Header,
-    Input,
     Select,
     Static,
     Switch,
@@ -76,7 +75,7 @@ from dc.dc_gate_sweep import (
     shutdown_source,
     shutdown_temperature_controller,
 )
-from dc.dc_sweep_utils import linear_sweep, parse_value_list, safe_shutdown
+from dc.dc_sweep_utils import linear_sweep, parse_value_list, safe_shutdown, sweep_point_count
 from instruments.data_dir import validate_directory
 from instruments.data_naming import (
     RunContext,
@@ -391,12 +390,15 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     if state["gate_min_V"] == state["gate_max_V"]:
         warnings.append("gate_min equals gate_max — sweep will repeat a single point.")
 
-    n_one_way = 0
+    n_sweep_points = 0
     if state["step_V"] <= 0:
         errors.append("Gate sweep step size must be > 0 V.")
     else:
-        n_one_way = max(2, round(abs(state["gate_max_V"] - state["gate_min_V"]) / state["step_V"]) + 1)
-    n_sweep_points = n_one_way if not state["bidirectional_sweep"] else max(0, 2 * n_one_way - 1)
+        try:
+            n_sweep_points = sweep_point_count(state["gate_min_V"], state["gate_max_V"],
+                                               state["step_V"], state["bidirectional_sweep"])
+        except ValueError as exc:
+            errors.append(str(exc))
     direction = (f"{state['gate_min_V']:g} V → {state['gate_max_V']:g} V → {state['gate_min_V']:g} V"
                  if state["bidirectional_sweep"]
                  else f"{state['gate_min_V']:g} V → {state['gate_max_V']:g} V")
@@ -932,27 +934,7 @@ class DCGateSweepApp(MeasurementApp):
     # ── Form state I/O ───────────────────────────────────────────────────────
 
     def parse_state(self) -> tuple[dict, list[str]]:
-        errors: list[str] = []
-        state: dict = {}
-        for fid, caster in NUMERIC_FIELDS.items():
-            raw = self.query_one(f"#{fid}", Input).value.strip()
-            try:
-                state[fid] = caster(raw)
-            except ValueError:
-                errors.append(f"'{fid}' is not a valid number: {raw!r}")
-                state[fid] = 0
-        for fid in TEXT_FIELDS:
-            state[fid] = self.query_one(f"#{fid}", Input).value.strip()
-        for fid in OPTIONAL_NUMERIC_FIELDS:
-            raw = self.query_one(f"#{fid}", Input).value.strip()
-            if raw:
-                try:
-                    state[fid] = float(raw)
-                except ValueError:
-                    errors.append(f"'{fid}' is not a valid number: {raw!r}")
-                    state[fid] = None
-            else:
-                state[fid] = None
+        state, errors = self._parse_fields()
         state["auto_range"] = self.query_one("#auto_range", Switch).value
         state["bidirectional_sweep"] = self.query_one("#bidirectional_sweep", Switch).value
         state["enable_field"] = self.query_one("#enable_field", Switch).value
@@ -979,7 +961,7 @@ class DCGateSweepApp(MeasurementApp):
 
     # ── Reactivity ───────────────────────────────────────────────────────────
 
-    def refresh_summary(self) -> None:
+    def update_summary(self) -> None:
         state, parse_errors = self.parse_state()
         if parse_errors:
             info, warnings, errors = [], [], parse_errors

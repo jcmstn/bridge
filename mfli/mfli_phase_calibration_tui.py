@@ -38,7 +38,6 @@ from textual.widgets import (
     Collapsible,
     Footer,
     Header,
-    Input,
     Select,
     Static,
     Switch,
@@ -417,6 +416,8 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
             info.append(f"Settling ≥ 5×TC ({recommended_settle:g} s) ✓")
     else:
         errors.append("Time constant must be > 0 s.")
+    if state["sample_rate_Hz"] <= 0:
+        errors.append("Demodulator sample rate must be > 0 Sa/s.")
 
     total_points = 0
     if state.get("sweep_rows_parse_error"):
@@ -453,7 +454,8 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
                      f"{merged_note}")
         info.append("Field measured live at each point via Lake Shore 475 Gaussmeter "
                      f"({state['gaussmeter_visa_resource']})")
-        info.extend(run_costs(state).lines("Estimated run time"))
+        if state["sample_rate_Hz"] > 0:        # the model divides by it
+            info.extend(run_costs(state).lines("Estimated run time"))
 
     if state["enable_amplitude_check"]:
         if len(state["amplitudes_V"]) < 2:
@@ -987,39 +989,7 @@ class MFLIPhaseCalibrationApp(MeasurementApp):
     # ── Form state I/O ───────────────────────────────────────────────────────
 
     def parse_state(self) -> tuple[dict, list[str]]:
-        errors: list[str] = []
-        state: dict = {}
-        for fid, caster in NUMERIC_FIELDS.items():
-            raw = self.query_one(f"#{fid}", Input).value.strip()
-            try:
-                state[fid] = caster(raw)
-            except ValueError:
-                errors.append(f"'{fid}' is not a valid number: {raw!r}")
-                state[fid] = 0
-        for fid in TEXT_FIELDS:
-            state[fid] = self.query_one(f"#{fid}", Input).value.strip()
-        for fid in LIST_FIELDS:
-            raw = self.query_one(f"#{fid}", Input).value.strip()
-            values: list[float] = []
-            for part in raw.split(","):
-                part = part.strip()
-                if not part:
-                    continue
-                try:
-                    values.append(float(part))
-                except ValueError:
-                    errors.append(f"'{fid}' contains a value that isn't a number: {part!r}")
-            state[fid] = values
-        for fid in OPTIONAL_NUMERIC_FIELDS:
-            raw = self.query_one(f"#{fid}", Input).value.strip()
-            if raw:
-                try:
-                    state[fid] = float(raw)
-                except ValueError:
-                    errors.append(f"'{fid}' is not a valid number: {raw!r}")
-                    state[fid] = None
-            else:
-                state[fid] = None
+        state, errors = self._parse_fields()
         state["sinc_filter"] = self.query_one("#sinc_filter", Switch).value
         state["enable_amplitude_check"] = self.query_one("#enable_amplitude_check", Switch).value
         state["enable_frequency_check"] = self.query_one("#enable_frequency_check", Switch).value
@@ -1040,7 +1010,7 @@ class MFLIPhaseCalibrationApp(MeasurementApp):
 
     # ── Reactivity ───────────────────────────────────────────────────────────
 
-    def refresh_summary(self) -> None:
+    def update_summary(self) -> None:
         state, parse_errors = self.parse_state()
         if parse_errors:
             info, warnings, errors = [], [], parse_errors

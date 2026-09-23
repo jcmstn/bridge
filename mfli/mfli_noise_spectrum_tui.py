@@ -38,7 +38,6 @@ from textual.widgets import (
     Collapsible,
     Footer,
     Header,
-    Input,
     Label,
     ProgressBar,
     RichLog,
@@ -311,6 +310,9 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     n_amps = max(1, len(state.get("amplitude_list", [])))
     amp_note = f" × {n_amps} excitation current(s)" if n_amps > 1 else ""
     info.append(f"{n_passes} pass(es) × {_N_CHANNELS} channels{amp_note}")
+    if state["duration_s"] <= 0:
+        errors.append("Recording duration must be > 0 s.")
+        return info, warnings, errors
     info.extend(run_costs(state).lines("Estimated total run time"))
     if state["duration_s"] < 10:
         warnings.append(f"Duration {state['duration_s']:g} s is short — the lowest "
@@ -687,27 +689,7 @@ class MFLINoiseSpectrumApp(MeasurementApp):
     # ── Form state I/O ───────────────────────────────────────────────────────
 
     def parse_state(self) -> tuple[dict, list[str]]:
-        errors: list[str] = []
-        state: dict = {}
-        for fid, caster in NUMERIC_FIELDS.items():
-            raw = self.query_one(f"#{fid}", Input).value.strip()
-            try:
-                state[fid] = caster(raw)
-            except ValueError:
-                errors.append(f"'{fid}' is not a valid number: {raw!r}")
-                state[fid] = 0
-        for fid in TEXT_FIELDS:
-            state[fid] = self.query_one(f"#{fid}", Input).value.strip()
-        for fid in OPTIONAL_NUMERIC_FIELDS:
-            raw = self.query_one(f"#{fid}", Input).value.strip()
-            if raw:
-                try:
-                    state[fid] = float(raw)
-                except ValueError:
-                    errors.append(f"'{fid}' is not a valid number: {raw!r}")
-                    state[fid] = None
-            else:
-                state[fid] = None
+        state, errors = self._parse_fields()
         state["also_measure_off"] = self.query_one("#also_measure_off", Switch).value
         state["leader_automode"] = int(self.query_one("#leader_automode", Select).value)
         state["follower_automode"] = int(self.query_one("#follower_automode", Select).value)
@@ -728,7 +710,7 @@ class MFLINoiseSpectrumApp(MeasurementApp):
     def on_switch_changed(self, event: Switch.Changed) -> None:
         self.refresh_summary()
 
-    def refresh_summary(self) -> None:
+    def update_summary(self) -> None:
         state, parse_errors = self.parse_state()
         if parse_errors:
             info, warnings, errors = [], [], parse_errors

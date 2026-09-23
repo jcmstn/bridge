@@ -12,7 +12,7 @@ import importlib
 from pathlib import Path
 
 import pytest
-from textual.widgets import Input, Select
+from textual.widgets import Input, Select, TextArea
 
 APPS = [
     ("dc.dc_hall_measurement_tui", "DCHallMeasurementApp"),
@@ -60,3 +60,47 @@ def test_app_mounts_and_settings_round_trip(module, app_name, tmp_path, monkeypa
     assert saved[field_id] == "HB9"
     assert (tmp_path / "settings.json").is_file()
     assert asyncio.run(mount(edit=False)) == saved
+
+
+# One sweep-defining field per program, set to a value that used to allocate
+# billions of points on the next keystroke (frozen / OOM-killed form).
+HUGE_SWEEP = {
+    "DCHallMeasurementApp": ("sweep_rows", "-20, 20, 100000000"),
+    "DCIVCurveApp": ("step_A", "1e-12"),
+    "DCGateSweepApp": ("step_V", "1e-12"),
+    "DCSpinValveApp": ("sweep_rows", "-20, 20, 100000000"),
+    "MFLIDualHarmonicApp": ("sweep_rows", "-20, 20, 100000000"),
+    "MFLIDualHarmonic6221App": ("sweep_rows", "-20, 20, 100000000"),
+    "MFLIDiffResistanceApp": ("n_points", "1000000000"),
+    "MFLIPhaseCalibrationApp": ("sweep_rows", "-20, 20, 100000000"),
+    "SOTPulsedSwitchingApp": ("amplitude_step_V", "1e-12"),
+    "SOTPulsedSwitching2HApp": ("amplitude_step_V", "1e-12"),
+    "SOTPulsedSwitching6221App": ("pulse_current_step_A", "1e-12"),
+    "NonlocalSwitchingApp": ("pulse_current_step_A", "1e-12"),
+}
+
+
+@pytest.mark.parametrize("module,app_name", [a for a in APPS if a[1] in HUGE_SWEEP],
+                         ids=[a for _, a in APPS if a in HUGE_SWEEP])
+def test_huge_sweep_is_a_form_error_not_a_freeze(module, app_name, tmp_path, monkeypatch):
+    mod = importlib.import_module(module)
+    app_cls = getattr(mod, app_name)
+    _isolate(mod, app_cls, tmp_path, monkeypatch)
+    field_id, value = HUGE_SWEEP[app_name]
+
+    async def go():
+        app = app_cls()
+        async with app.run_test(size=(220, 70)) as pilot:
+            await pilot.pause()
+            widget = app.query_one(f"#{field_id}")
+            if isinstance(widget, TextArea):
+                widget.text = value
+            else:
+                widget.value = value
+            await pilot.pause()              # the Changed event -> refresh_summary()
+            state, parse_errors = app.parse_state()
+            _, _, errors = mod.build_summary(state) if not parse_errors else ([], [], parse_errors)
+            return errors
+
+    errors = asyncio.run(go())
+    assert any("limit" in e for e in errors), errors
