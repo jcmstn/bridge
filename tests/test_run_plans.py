@@ -23,6 +23,9 @@ from instruments.data_naming import ensure_sample, read_raw
 # (module, App, {field: value} overrides that make the form describe a multi-run series)
 PROGRAMS = [
     ("dc.dc_hall_measurement_tui", "DCHallMeasurementApp", {"sense_current_values": "0.001, 0.002"}),
+    ("dc.dc_iv_curve_tui", "DCIVCurveApp", {"enable_gate": True, "gate_voltage_values": "0, 1"}),
+    ("dc.dc_gate_sweep_tui", "DCGateSweepApp", {"sense_current_values": "1e-6, 2e-6"}),
+    ("dc.dc_spin_valve_tui", "DCSpinValveApp", {"sense_current_values": "0.001, 0.002"}),
 ]
 
 _STUB_PREFIXES = ("connect", "shutdown", "setup_", "configure_", "sync_", "ramp_", "set_",

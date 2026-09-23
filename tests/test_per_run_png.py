@@ -31,9 +31,6 @@ import sot.sot_nonlocal_switching_tui as nlsw_tui  # noqa: E402
 import sot.sot_pulsed_switching_2h_tui as sot2h_tui  # noqa: E402
 import sot.sot_pulsed_switching_6221_tui as sot6221_tui  # noqa: E402
 import sot.sot_pulsed_switching_tui as sot_tui  # noqa: E402
-import web.dc.gate_sweep as gate_web  # noqa: E402
-import web.dc.iv_curve as iv_web  # noqa: E402
-import web.dc.spin_valve as sv_web  # noqa: E402
 from instruments.data_naming import allocate_run, ensure_sample  # noqa: E402
 
 
@@ -147,9 +144,6 @@ def _save_fn(mod, make, path):
     pytest.param(sot2h_tui, _sot2h, id="sot2h_tui"),
     pytest.param(sot6221_tui, _sot6221, id="sot6221_tui"),
     pytest.param(nlsw_tui, _nlsw, id="nonlocal_switching_tui"),
-    pytest.param(gate_web, _gate, id="gate_web"),
-    pytest.param(iv_web, _iv, id="iv_web"),
-    pytest.param(sv_web, _spin_valve, id="spin_valve_web"),
 ])
 def test_png_of_a_lone_run_ignores_its_position_in_the_series(tmp_path, mod, make) -> None:
     # Run #3 of a series must look like a manual run: the default blue, no
@@ -177,7 +171,7 @@ def test_hall_png_annotates_the_runs_own_sense_current(tmp_path) -> None:
 def test_spin_valve_png_annotates_the_runs_own_sense_current_and_gate(tmp_path) -> None:
     # Was plan-derived (only when the plan had a single value), which is
     # meaningless once each run of a series is plotted alone.
-    for mod in (sv_tui, sv_web):
+    for mod in (sv_tui,):
         figs = _capture_figs(lambda: mod._save_measurement_png(
             _records(_spin_valve, 1), tmp_path / "sv.png", plan=SimpleNamespace()))
         text = "\n".join(t.get_text() for t in figs[0].texts)

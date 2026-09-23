@@ -1,4 +1,4 @@
-"""Plan-purity tests for dc_iv_curve_tui.py and web/dc/iv_curve.py."""
+"""Plan-purity tests for the I-V build_plan() the TUI and web/dc/iv_curve.py share."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import pytest
 
 import dc.dc_iv_curve_tui as tui
 from instruments.data_naming import allocate_run, ensure_sample
-from web.dc.iv_curve import MEASUREMENT_TYPE, build_plan as web_build_plan
+from dc.dc_iv_curve_tui import MEASUREMENT_TYPE, build_plan
 
 
 def _tui_state(**overrides) -> dict:
@@ -36,10 +36,10 @@ def test_tui_build_plan(tmp_path: Path, monkeypatch) -> None:
     assert plan.series == ""
 
 
-def test_web_build_plan_and_series(tmp_path: Path) -> None:
+def test_build_plan_series_and_run_numbering(tmp_path: Path) -> None:
     ensure_sample(tmp_path, "A", create=True)
     state = _tui_state(data_dir=str(tmp_path), gate_voltage_list=[0.0, 1.0], enable_gate=True)
-    plan = web_build_plan(state)
+    plan = build_plan(state, tmp_path)
     assert plan.series.startswith("A_HB3_IV_")
 
     contexts = [

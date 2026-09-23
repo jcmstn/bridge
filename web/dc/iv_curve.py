@@ -20,8 +20,6 @@ from __future__ import annotations
 
 import json
 import logging
-import textwrap
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -30,31 +28,25 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from nicegui import background_tasks, ui
 
-from dc.dc_iv_curve import (
-    AcquisitionConfig, CurrentPoint, GateConfig, SourceConfig,
-    TemperatureControllerConfig, VoltmeterConfig,
-    connect_gate, connect_source, connect_temperature_controller, connect_voltmeter,
-    ramp_current_to_zero, run_measurement, set_gate_voltage, shutdown_gate,
-    shutdown_source, shutdown_temperature_controller,
-)
-from dc.dc_sweep_utils import linear_sweep, parse_value_list, safe_shutdown
+from dc.dc_sweep_utils import parse_value_list
+import dc.dc_iv_curve_tui as program
 from dc.dc_iv_curve_tui import (
-    DEFAULTS, NUMERIC_FIELDS, TEXT_FIELDS, OPTIONAL_NUMERIC_FIELDS, MEASUREMENT_TYPE,
-    DC_IV_DESCRIPTION, MeasurementPlan, build_header_fields, build_summary,
-    compute_filename_preview, format_si, parse_sensor_uids, run_costs,
+    build_plan,
+    DEFAULTS, NUMERIC_FIELDS, TEXT_FIELDS, OPTIONAL_NUMERIC_FIELDS, DC_IV_DESCRIPTION, MeasurementPlan, build_summary,
+    compute_filename_preview,
 )
 from instruments.data_naming import (
-    TEST_SAMPLE, RunContext, allocate_run, finalize_index_row,
-    make_incremental_writer, proc_path, write_record,
+    TEST_SAMPLE, RunContext,
 )
 from web.run_controller import (
-    RunController, RunCallbacks, FinalStatus, num_field, text_field,
+    RunController, FinalStatus, num_field, text_field,
     bool_switch, render_summary, busy_banner, is_busy,
     param_card, stable_card, param_grid, stable_grid, advanced_section, measurement_layout,
+    program_artifacts, program_run_fn, prompt_last_run,
 )
 from web.directory_picker import validate_directory
 from web.identity_bar import identity_bar
-from web.sample_picker import NEW_SAMPLE_SENTINEL, prepare_data_root, status_comment_dialog
+from web.sample_picker import NEW_SAMPLE_SENTINEL, prepare_data_root
 
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data"
 _SETTINGS_PATH = _DATA_DIR / "web_settings" / "dc_iv_curve_web_settings.json"
@@ -80,113 +72,8 @@ def _save_settings(raw: dict) -> None:
         pass
 
 
-def build_plan(state: dict) -> MeasurementPlan:
-    src_cfg = SourceConfig(
-        visa_resource=state["source_visa_resource"],
-        compliance_V=state["compliance_V"],
-        source_delay_s=state["source_delay_s"],
-        current_min_A=state["current_min_A"],
-        current_max_A=state["current_max_A"],
-    )
-    volt_cfg = VoltmeterConfig(
-        visa_resource=state["voltmeter_visa_resource"],
-        nplc=state["nplc"],
-        auto_range=state["auto_range"],
-    )
-    acq_cfg = AcquisitionConfig(
-        settling_time_s=state["settling_time_s"],
-        n_averages=int(state["n_averages"]),
-        output_file="",  # per-series, filled in by run_fn
-    )
-    currents_A = linear_sweep(
-        start=state["current_min_A"], stop=state["current_max_A"], step=state["step_A"],
-        bidirectional=state["bidirectional_sweep"],
-    )
-
-    gate_cfg = None
-    gate_voltages = None
-    if state["enable_gate"]:
-        gate_cfg = GateConfig(
-            visa_resource=state["gate_visa_resource"],
-            gate_voltage_limit_V=state["gate_voltage_limit_V"],
-            compliance_current_A=state["gate_compliance_current_A"],
-        )
-        gate_voltages = state["gate_voltage_list"]
-
-    temp_cfg = None
-    if state["enable_temperature"]:
-        uids = parse_sensor_uids(state["temperature_sensor_uids"])
-        if uids:
-            temp_cfg = TemperatureControllerConfig(
-                visa_resource=state["temperature_visa_resource"], sensor_uids=uids)
-
-    header_extra = {
-        "compliance_V": state["compliance_V"],
-        "n_averages": int(state["n_averages"]),
-        "settling_time_s": state["settling_time_s"],
-        "current_sweep_A": [state["current_min_A"], state["current_max_A"], state["step_A"]],
-    }
-    series = ""
-    if len(gate_voltages or []) > 1:
-        series = (f"{state['sample']}_{state['device']}_{MEASUREMENT_TYPE}_"
-                  f"{datetime.now():%Y%m%dT%H%M%S}")
-
-    return MeasurementPlan(
-        src_cfg=src_cfg, volt_cfg=volt_cfg, acq_cfg=acq_cfg, currents_A=currents_A,
-        sample=state["sample"], device=state["device"],
-        temperature_setpoint_K=state["temperature_setpoint_K"],
-        cooldown=state["cooldown"], header_extra=header_extra, series=series,
-        gate_cfg=gate_cfg, gate_voltages=gate_voltages, temp_cfg=temp_cfg,
-        run_cost=run_costs(len(currents_A), state),
-    )
-
-
 def series_label(gate_V: Optional[float]) -> Optional[str]:
     return f"Vg={gate_V:g}V" if gate_V is not None else None
-
-
-def _save_measurement_png(records: list[dict], png_path: Path,
-                           plan: Optional[MeasurementPlan] = None, comment: str = "") -> None:
-    """I-V + dV/dI PNG of ONE run's points (one PNG per gate voltage, like a
-    manual run).
-
-    `plan`/`comment` add a small "at a glance" text annotation (compliance
-    voltage, the operator's comment) -- see dc_iv_curve_tui.py's
-    _save_measurement_png for the same logic. Called once when the run
-    ends (comment="") and again, to overwrite the PNG in place, once the
-    operator's comment is known."""
-    if not records:
-        return
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(7, 8))
-    rows = sorted(records, key=lambda r: r["point_index"])
-    I = np.array([r["current_A"] for r in rows])
-    V = np.array([r["voltage_V"] for r in rows])
-    ax1.plot(I, V, ".-", color="tab:blue")
-    if len(I) > 1:
-        ax2.plot(I, np.gradient(V, I), ".-", color="tab:blue")
-    ax1.set_xlabel("Current (A)"); ax1.set_ylabel("Voltage (V)")
-    ax1.set_title("I-V curve"); ax1.grid(alpha=0.4)
-    ax2.set_xlabel("Current (A)"); ax2.set_ylabel("dV/dI (Ω)")
-    ax2.set_title("Differential resistance (numerical dV/dI)"); ax2.grid(alpha=0.4)
-    fig.tight_layout()
-
-    lines: list[str] = []
-    if plan is not None:
-        compliance_V = plan.header_extra.get("compliance_V")
-        if compliance_V is not None:
-            lines.append(f"Compliance: {format_si(compliance_V, 'V')}")
-    if comment:
-        lines.append(f"Comment: {textwrap.shorten(comment, width=90, placeholder='…')}")
-    if lines:
-        fig.text(0.01, 0.01, "\n".join(lines), fontsize=7, color="0.4", va="bottom")
-        fig.subplots_adjust(bottom=0.08 + 0.045 * len(lines))
-
-    fig.savefig(png_path, dpi=150)
-    plt.close(fig)
 
 
 def page() -> None:
@@ -438,44 +325,7 @@ def page() -> None:
     def on_log(text: str, level: int) -> None:
         log_area.push(text)
 
-    def _run_png_path(ctx: RunContext, data_root: str) -> Path:
-        return proc_path(Path(data_root), ctx.sample, ctx.run_str, ctx.device,
-                          MEASUREMENT_TYPE, "plot")
-
-    async def _prompt_status_comment(plan: MeasurementPlan, run_contexts: list[RunContext],
-                                      data_root: str, records: list[dict]) -> None:
-        # With several gate voltages the runs before the last were implicitly
-        # "skipped" -- left at the outcome status run_fn wrote right after
-        # each one, with no comment. Only the last run, the one the operator
-        # is looking at, gets the status/comment they entered.
-        result = await status_comment_dialog(page_client)
-        if result is None or not run_contexts:
-            return
-        status, comment = result
-        series_idx = len(run_contexts) - 1
-        ctx = run_contexts[series_idx]
-        iter_records = [r for r in records if r.get("series_index", 0) == series_idx]
-        gate_V = iter_records[0].get("gate_voltage_V") if iter_records else None
-        header_fields = build_header_fields(
-            plan, ctx, iter_records, status=status, comment=comment,
-            extra={"gate_voltage_V": gate_V} if gate_V is not None else None,
-        )
-        try:
-            # Never truncate an already-written raw file to an empty stub —
-            # only a run that never wrote a point gets a header-only write.
-            if iter_records or not ctx.raw_path.exists():
-                write_record(ctx.raw_path, iter_records, header_fields)
-            finalize_index_row(Path(data_root), ctx.sample, ctx.run_number, header_fields)
-        except Exception:
-            ui.notify("Could not save final status/comment.", type="negative")
-        if comment:
-            try:
-                _save_measurement_png(iter_records, _run_png_path(ctx, data_root),
-                                       plan=plan, comment=comment)
-            except Exception:
-                pass
-
-    def make_on_finished(plan: MeasurementPlan, run_contexts: list[RunContext], data_root: str):
+    def make_on_finished(plan: MeasurementPlan, run_contexts: list[RunContext], run_extras: list):
         def on_finished(final: FinalStatus, result) -> None:
             label = {"completed": "Measurement complete.", "aborted": "Measurement aborted.",
                       "error": f"ERROR: {final.error}"}[final.status]
@@ -486,115 +336,10 @@ def page() -> None:
             handle = controller["c"].handle if controller["c"] is not None else None
             records = list(handle.records) if handle is not None else []
             background_tasks.create(
-                _prompt_status_comment(plan, run_contexts, data_root, records),
+                prompt_last_run(page_client, program, plan, run_contexts, run_extras, records),
                 name="status_comment_prompt",
             )
         return on_finished
-
-    def make_run_fn(plan: MeasurementPlan, data_root: str, run_contexts: list[RunContext]):
-        def run_fn(stop_event, cb: RunCallbacks):
-            source = voltmeter = gate = temp_ctrl = None
-            try:
-                cb.on_status("Connecting to Keithley 6221 & 2182 …")
-                source = connect_source(plan.src_cfg)
-                voltmeter = connect_voltmeter(plan.volt_cfg)
-
-                if plan.temp_cfg is not None:
-                    cb.on_status("Connecting to MercuryiTC (temperature) …")
-                    temp_ctrl = connect_temperature_controller(plan.temp_cfg)
-
-                if plan.gate_cfg is not None:
-                    cb.on_status("Connecting gate (Keithley 2400) …")
-                    gate = connect_gate(plan.gate_cfg)
-
-                for series_idx, gate_V in enumerate(plan.series_values):
-                    if stop_event.is_set():
-                        break
-                    label = series_label(gate_V)
-                    if gate_V is not None:
-                        cb.on_status(f"Setting gate to {gate_V:g} V …")
-                        set_gate_voltage(gate, plan.gate_cfg, gate_V)
-
-                    key_axis = ("gate_V", gate_V) if gate_V is not None else None
-                    ctx = allocate_run(
-                        Path(data_root), plan.sample, plan.device, MEASUREMENT_TYPE,
-                        temperature_setpoint_K=plan.temperature_setpoint_K,
-                        key_axis=key_axis, series=plan.series,
-                    )
-                    run_contexts.append(ctx)
-                    cb.on_run_label(f"Run #{ctx.run_str}")
-                    plan.acq_cfg.output_file = str(ctx.raw_path)
-                    write_csv = make_incremental_writer(
-                        ctx.raw_path,
-                        lambda records, _ctx=ctx, _gv=gate_V: build_header_fields(
-                            plan, _ctx, records, status="in_progress", comment="",
-                            extra={"gate_voltage_V": _gv} if _gv is not None else None,
-                        ),
-                    )
-                    points = [CurrentPoint(current_A=float(i)) for i in plan.currents_A]
-
-                    iter_records: list[dict] = []
-
-                    def tagged_on_point(record: dict, _idx=series_idx, _label=label,
-                                         _iter=iter_records) -> None:
-                        record["series_index"] = _idx
-                        record["series_label"] = _label
-                        _iter.append(record)
-                        cb.on_point(record)
-
-                    status = "Running measurement …" if gate_V is None else f"Running measurement (Vg={gate_V:g} V) …"
-                    cb.on_status(status)
-                    iter_error: Optional[BaseException] = None
-                    try:
-                        run_measurement(
-                            source, voltmeter, plan.src_cfg, plan.acq_cfg, points,
-                            stop_event=stop_event, on_point=tagged_on_point,
-                            gate_voltage_V=gate_V, temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg,
-                            write_csv=write_csv,
-                        )
-                    except Exception as exc:
-                        iter_error = exc
-
-                    iter_status = "error" if iter_error is not None \
-                        else ("aborted" if stop_event.is_set() else "completed")
-                    header_fields = build_header_fields(
-                        plan, ctx, iter_records, status=iter_status, comment="",
-                        extra={"gate_voltage_V": gate_V} if gate_V is not None else None,
-                    )
-                    write_record(ctx.raw_path, iter_records, header_fields)
-                    finalize_index_row(Path(data_root), ctx.sample, ctx.run_number, header_fields)
-
-                    if iter_error is not None:
-                        raise iter_error
-                return None
-            finally:
-                # 6221 output off first (immediate, no current into the DUT).
-                if source is not None:
-                    safe_shutdown("source (ramp)", lambda: ramp_current_to_zero(source))
-                    safe_shutdown("source", lambda: shutdown_source(source))
-                if gate is not None:
-                    safe_shutdown("gate", lambda: shutdown_gate(gate))
-                if temp_ctrl is not None:
-                    safe_shutdown("MercuryiTC", lambda: shutdown_temperature_controller(temp_ctrl))
-        return run_fn
-
-    def _finish_artifacts(records: list[dict], run_contexts: list[RunContext], data_root: str,
-                           plan: MeasurementPlan) -> list[str]:
-        """One PNG per run -- as if each gate voltage had been started by hand,
-        no combined overlay."""
-        output_paths = [str(c.raw_path) for c in run_contexts]
-        for series_idx, ctx in enumerate(run_contexts):
-            png_path = _run_png_path(ctx, data_root)
-            try:
-                _save_measurement_png(
-                    [r for r in records if r.get("series_index", 0) == series_idx],
-                    png_path, plan=plan)
-            except Exception:
-                log.exception("Could not save measurement plot PNG for run %s", ctx.run_str)
-                continue
-            if png_path.exists():
-                output_paths.append(str(png_path))
-        return output_paths
 
     def on_start() -> None:
         state, parse_errors = parse_state()
@@ -610,18 +355,18 @@ def page() -> None:
 
         _save_settings(collect_raw())
 
-        plan = build_plan(state)
+        plan = build_plan(state, Path(state["data_dir"]))
         labels = [series_label(v) for v in plan.series_values]
         run_contexts: list[RunContext] = []
+        run_extras: list[dict] = []
 
         rc = RunController(
             suite=SUITE, measurement=PAGE_TITLE,
-            run_fn=make_run_fn(plan, state["data_dir"], run_contexts),
-            save_artifacts=lambda records, result, status: _finish_artifacts(
-                records, run_contexts, state["data_dir"], plan),
+            run_fn=program_run_fn(program, plan, run_contexts, run_extras),
+            save_artifacts=lambda records, result, status: program_artifacts(program, plan, run_contexts),
             parameters=state, data_dir=state["data_dir"], planned_output_paths=[],
             on_record=on_record, on_status=on_status, on_run_label=on_run_label, on_log=on_log,
-            on_finished=make_on_finished(plan, run_contexts, state["data_dir"]),
+            on_finished=make_on_finished(plan, run_contexts, run_extras),
             sample=plan.sample, device=plan.device, run_cost=plan.run_cost,
         )
         if not rc.try_start():

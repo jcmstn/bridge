@@ -6,7 +6,7 @@ from pathlib import Path
 
 import dc.dc_gate_sweep_tui as tui
 from instruments.data_naming import allocate_run, ensure_sample
-from web.dc.gate_sweep import MEASUREMENT_TYPE, build_plan as web_build_plan
+from dc.dc_gate_sweep_tui import MEASUREMENT_TYPE, build_plan
 
 
 def _state(**overrides) -> dict:
@@ -42,7 +42,7 @@ def test_tui_build_plan_series(tmp_path: Path, monkeypatch) -> None:
 def test_web_build_plan_and_per_iteration_allocation(tmp_path: Path) -> None:
     ensure_sample(tmp_path, "A", create=True)
     state = _state(data_dir=str(tmp_path))
-    plan = web_build_plan(state)
+    plan = build_plan(state, tmp_path)
     assert plan.series.startswith("A_HB3_GSWP_")
 
     contexts = [

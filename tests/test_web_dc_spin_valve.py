@@ -1,4 +1,4 @@
-"""Plan-purity test for web/dc/spin_valve.py's build_plan() and the
+"""Plan-purity test for shared build_plan() (TUI + web) and the
 multi-file-per-session (one file per sense-current x gate-voltage
 combination) run-numbering logic."""
 
@@ -7,7 +7,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from instruments.data_naming import allocate_run, ensure_sample
-from web.dc.spin_valve import MEASUREMENT_TYPE, build_plan
+from dc.dc_spin_valve_tui import MEASUREMENT_TYPE, build_plan
 
 
 def _state(data_dir: Path, **overrides) -> dict:
@@ -35,7 +35,7 @@ def _state(data_dir: Path, **overrides) -> dict:
 
 def test_build_plan_and_per_iteration_allocation(tmp_path: Path) -> None:
     ensure_sample(tmp_path, "A", create=True)
-    plan = build_plan(_state(tmp_path))
+    plan = build_plan(_state(tmp_path), tmp_path)
     assert plan.series.startswith("A_SV2_BSWP_")
 
     contexts = [
@@ -55,7 +55,7 @@ def test_sense_current_series_cross_product(tmp_path: Path) -> None:
         tmp_path,
         sense_current_values="0.001, 0.002", sense_current_list=[0.001, 0.002],
         gate_voltage_values="0, 5", gate_voltage_list=[0.0, 5.0],
-    ))
+    ), tmp_path)
     assert len(plan.series_values) == 4
 
     contexts = [
@@ -72,6 +72,6 @@ def test_build_plan_multi_row_sweep(tmp_path: Path) -> None:
         tmp_path,
         sweep_rows_parsed=[(-1.0, 1.0, 10), (1.0, 10.0, 10)],
         bidirectional_sweep=True,
-    ))
+    ), tmp_path)
     assert len(plan.currents_A) == 37
     assert plan.header_extra["field_sweep_rows_A"] == [(-1.0, 1.0, 10), (1.0, 10.0, 10)]
