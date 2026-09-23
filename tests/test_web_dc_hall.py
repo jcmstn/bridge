@@ -1,5 +1,5 @@
 """
-Plan-purity test for web/dc/hall.py's build_plan() and the multi-file-per-
+Plan-purity test for the Hall build_plan() that web/dc/hall.py and the TUI share and the multi-file-per-
 session (one file per sense current) run-numbering logic.
 
 No NiceGUI page render or hardware needed -- build_plan() is a plain
@@ -12,7 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from instruments.data_naming import allocate_run, ensure_sample
-from web.dc.hall import MEASUREMENT_TYPE, build_plan
+from dc.dc_hall_measurement_tui import MEASUREMENT_TYPE, build_plan
 
 
 def _state(data_dir: Path, **overrides) -> dict:
@@ -39,13 +39,13 @@ def _state(data_dir: Path, **overrides) -> dict:
 
 
 def test_build_plan_series_tag_only_set_for_a_real_family(tmp_path: Path) -> None:
-    plan_single = build_plan(_state(tmp_path))
+    plan_single = build_plan(_state(tmp_path), tmp_path)
     assert plan_single.series == ""
 
     plan_multi = build_plan(_state(
         tmp_path, sense_current_values="0.001, 0.002",
         sense_current_list=[0.001, 0.002],
-    ))
+    ), tmp_path)
     assert plan_multi.series.startswith("A_HB3_HALL_")
 
 
@@ -54,7 +54,7 @@ def test_multi_file_session_allocates_one_run_per_sense_current(tmp_path: Path) 
     plan = build_plan(_state(
         tmp_path, sense_current_values="0.001, -0.002",
         sense_current_list=[0.001, -0.002],
-    ))
+    ), tmp_path)
 
     contexts = [
         allocate_run(tmp_path, plan.sample, plan.device, MEASUREMENT_TYPE,
@@ -72,6 +72,6 @@ def test_build_plan_multi_row_sweep(tmp_path: Path) -> None:
         tmp_path, enable_sweep=True,
         sweep_rows_parsed=[(-1.0, 1.0, 10), (1.0, 10.0, 10)],
         bidirectional_sweep=True,
-    ))
+    ), tmp_path)
     assert len(plan.currents_A) == 37
     assert plan.header_extra["field_sweep_rows_A"] == [(-1.0, 1.0, 10), (1.0, 10.0, 10)]

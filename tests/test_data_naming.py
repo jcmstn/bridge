@@ -297,3 +297,89 @@ def test_allocate_run_is_unique_and_gap_free_under_concurrency(tmp_path: Path) -
     run_numbers = sorted(df["run"].tolist())
     expected = list(range(1, n_procs * n_per_proc + 1))
     assert run_numbers == expected
+
+
+# ── record_run / finish_last_run: the per-run lifecycle every run_plan uses ──
+
+import threading  # noqa: E402
+
+import pytest  # noqa: E402
+
+from instruments.data_naming import finish_last_run, read_raw, record_run  # noqa: E402
+
+
+def _header(ctx):
+    return lambda records, status: {"run": ctx.run_number, "sample": ctx.sample, "device": ctx.device,
+                                    "type": "IV", "status": status, "comment": "", "n": len(records)}
+
+
+def _index_row(root, run_number):
+    rows = pd.read_csv(root / "A" / "index.csv")
+    return rows[rows["run"] == run_number].iloc[0]
+
+
+def test_record_run_tags_finalizes_and_calls_on_finished(tmp_path) -> None:
+    ensure_sample(tmp_path, "A", create=True)
+    ctx = allocate_run(tmp_path, "A", "HB3", "IV")
+    seen, finished = [], []
+
+    def measure(on_point, write_csv):
+        recs = []
+        for i in range(3):
+            rec = {"point_index": i, "voltage_V": 0.1 * i}
+            recs.append(rec)
+            on_point(rec)
+            write_csv(recs)
+
+    out = record_run(tmp_path, ctx, _header(ctx), measure, threading.Event(),
+                     on_point=seen.append, tags={"series_index": 1, "series_label": "x"},
+                     on_finished=lambda c, r: finished.append((c.run_number, len(r))))
+    assert [r["series_index"] for r in out] == [1, 1, 1] and seen == out
+    assert list(read_raw(ctx.raw_path).columns) == ["point_index", "voltage_V", "series_index", "series_label"]
+    assert _index_row(tmp_path, ctx.run_number)["status"] == "completed"
+    assert finished == [(ctx.run_number, 3)]
+
+
+def test_record_run_finalizes_as_error_then_reraises_and_marks_aborts(tmp_path) -> None:
+    ensure_sample(tmp_path, "A", create=True)
+    ctx = allocate_run(tmp_path, "A", "HB3", "IV")
+
+    def boom(on_point, write_csv):
+        on_point({"point_index": 0})
+        raise RuntimeError("VISA timeout")
+
+    with pytest.raises(RuntimeError, match="VISA"):
+        record_run(tmp_path, ctx, _header(ctx), boom, threading.Event())
+    assert _index_row(tmp_path, ctx.run_number)["status"] == "error"
+
+    stop = threading.Event(); stop.set()
+    ctx2 = allocate_run(tmp_path, "A", "HB3", "IV")
+    record_run(tmp_path, ctx2, _header(ctx2), lambda op, w: None, stop)
+    assert _index_row(tmp_path, ctx2.run_number)["status"] == "aborted"
+
+
+def test_finish_last_run_rewrites_only_the_last_run_with_its_own_extras(tmp_path) -> None:
+    ensure_sample(tmp_path, "A", create=True)
+    ctxs = [allocate_run(tmp_path, "A", "HB3", "IV") for _ in range(2)]
+    records = []
+    for idx, ctx in enumerate(ctxs):
+        def measure(on_point, write_csv, _idx=idx):
+            rec = {"point_index": 0, "voltage_V": float(_idx)}
+            on_point(rec)
+            write_csv([rec])
+        records += record_run(tmp_path, ctx, _header(ctx), measure, None, tags={"series_index": idx})
+    seen_extra = []
+
+    def header(ctx, recs, *, status, comment, extra):
+        seen_extra.append(extra)
+        return {"run": ctx.run_number, "sample": "A", "device": "HB3", "type": "IV",
+                "status": status, "comment": comment}
+
+    ctx, recs = finish_last_run(tmp_path, ctxs, [{"g": 0}, {"g": 1}], records, "good", "nice", header)
+    assert ctx is ctxs[1] and [r["voltage_V"] for r in recs] == [1.0] and seen_extra == [{"g": 1}]
+    assert (_index_row(tmp_path, ctxs[1].run_number)[["status", "comment"]].tolist()) == ["good", "nice"]
+    assert _index_row(tmp_path, ctxs[0].run_number)["status"] == "completed"
+    # a run whose records are gone from memory keeps its data rows on disk
+    finish_last_run(tmp_path, ctxs, [], [], "open", "", header)
+    assert len(read_raw(ctxs[1].raw_path)) == 1
+    assert finish_last_run(tmp_path, [], [], [], "good", "", header) is None

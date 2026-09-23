@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Optional
 
 from rich.text import Text
+from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -53,7 +54,8 @@ from textual.widgets import (
 from instruments import run_index
 from instruments.data_dir import DataDirPickerScreen
 from instruments.data_naming import (
-    TEST_SAMPLE, RunContext, ensure_sample, finalize_index_row, proc_path, write_record,
+    TEST_SAMPLE, RunContext, ensure_sample, finalize_index_row, finish_last_run, proc_path,
+    write_record,
 )
 from instruments.live_plot import start_live_plot
 from instruments.run_time import progress_step, progress_total
@@ -229,12 +231,16 @@ def run_screen_bindings(abort_label: str) -> list:
 
 
 class MeasurementRunScreen(Screen):
-    """Executes a MeasurementPlan in a worker thread (the subclass's
-    do_run(), a `@work(thread=True, exclusive=True)` method) and shows live
-    progress. Multi-run programs append each run's RunContext (and its
-    header extras) to `_run_contexts` / `_run_extras` from do_run() and
-    finalize each run there; a single-run plan (`plan.run_ctx`) is
-    registered here and finalized by `finalize_single_run()`."""
+    """Executes a MeasurementPlan in a worker thread and shows live progress.
+
+    do_run() calls the program module's pure `run_plan(plan, stop_event, *,
+    on_status, on_run_label, on_point, on_run_finished, run_contexts,
+    run_extras)` — the same function the web page runs — which records every
+    run through data_naming.record_run() (finalized the instant it ends) and
+    appends each RunContext + its header extras here. The PNG and header
+    hooks default to the module's `save_run_png(plan, records, png_path,
+    comment=)` and `build_header_fields(plan, ctx, records, *, status,
+    comment, extra)`."""
 
     CSS = RUN_SCREEN_CSS
     ABORT_LABEL = "Abort (safe ramp-down)"
@@ -263,6 +269,11 @@ class MeasurementRunScreen(Screen):
         self._history_id = -1
         self._started = time.monotonic()
 
+    @property
+    def program(self):
+        """The subclass's own module — its pure run_plan / header / PNG API."""
+        return sys.modules[type(self).__module__]
+
     # ── program hooks ─────────────────────────────────────────────────
 
     def table_columns(self) -> tuple:
@@ -276,11 +287,12 @@ class MeasurementRunScreen(Screen):
         return None
 
     def save_png(self, records: list[dict], png_path: Path, comment: str = "") -> None:
-        raise NotImplementedError
+        self.program.save_run_png(self.plan, records, png_path, comment=comment)
 
     def build_header(self, ctx: RunContext, records: list[dict], *, status: str, comment: str,
                      extra: Optional[dict]) -> dict:
-        raise NotImplementedError
+        return self.program.build_header_fields(self.plan, ctx, records, status=status,
+                                                comment=comment, extra=extra)
 
     def progress_points(self) -> int:
         return self.plan.total_points
@@ -323,8 +335,24 @@ class MeasurementRunScreen(Screen):
         if self._plot_process is not None and self._plot_process.is_alive():
             self._plot_process.terminate()
 
+    DONE_STATUS = "Measurement complete."
+
+    @work(thread=True, exclusive=True)
     def do_run(self) -> None:
-        raise NotImplementedError
+        try:
+            self.program.run_plan(
+                self.plan, self._stop_event,
+                on_status=self._set_status_threadsafe,
+                on_run_label=self._set_run_label_threadsafe,
+                on_point=lambda record: self.app.call_from_thread(self._on_point, record),
+                on_run_finished=self._save_run_png,
+                run_contexts=self._run_contexts, run_extras=self._run_extras)
+            final = "Measurement aborted." if self._stop_event.is_set() else self.DONE_STATUS
+        except Exception as exc:
+            log.exception("Measurement failed")
+            final = f"ERROR: {exc}"
+        finally:
+            self.app.call_from_thread(self._on_finished, final)
 
     def _start_live_plot(self) -> None:
         args = self.live_plot_args()
@@ -430,23 +458,18 @@ class MeasurementRunScreen(Screen):
         # implicitly "skipped" -- left at the outcome status written right
         # after each one, with no comment. Only the last run, the one the
         # operator is looking at, gets the status/comment they entered.
-        last = self._last_run()
-        if result is None or last is None:
+        if result is None:
             return
         status, comment = result
-        ctx, records, extra = last
-        header_fields = self.build_header(ctx, records, status=status, comment=comment, extra=extra)
         try:
-            # Never truncate an already-written raw file to an empty stub —
-            # only a run that never wrote a point gets a header-only write.
-            if records or not ctx.raw_path.exists():
-                write_record(ctx.raw_path, records, header_fields)
-            finalize_index_row(self.plan.data_root, ctx.sample, ctx.run_number, header_fields)
+            done = finish_last_run(self.plan.data_root, self._run_contexts, self._run_extras,
+                                   self._records, status, comment, self.build_header)
         except Exception:
-            log.exception("Could not save final status/comment for run %d", ctx.run_number)
-        if comment and self._png_path is not None:
+            log.exception("Could not save the final status/comment")
+            done = None
+        if done is not None and comment and self._png_path is not None:
             try:
-                self.save_png(records, self._png_path, comment=comment)
+                self.save_png(done[1], self._png_path, comment=comment)
             except Exception:
                 log.exception("Could not re-save measurement plot PNG with comment")
 

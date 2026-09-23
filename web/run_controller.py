@@ -28,13 +28,17 @@ import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
+from types import ModuleType
 from typing import Any, Callable, Iterator, Optional
 
 from nicegui import ui
 
 from instruments.run_time import RunCost, eta_s, format_duration
 from instruments import run_index
+from instruments.data_naming import RunContext, finish_last_run, proc_path
 from web import run_manager
+from web.sample_picker import status_comment_dialog
 
 log = logging.getLogger(__name__)
 
@@ -459,3 +463,61 @@ class RunController:
             self.result = finished_item["result"]
             self.final = FinalStatus(status=finished_item["status"], error=finished_item["error"])
             self.on_finished(self.final, self.result)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# A program's pure run API, driven from a page
+# ─────────────────────────────────────────────────────────────────────────────
+# `program` is the program's TUI module ({suite}/{name}_tui.py), which exports
+# the same pure functions its RunScreen runs: run_plan(), build_header_fields(),
+# save_run_png(), MEASUREMENT_TYPE and (optionally) PNG_SUFFIX.
+
+def run_png_path(program: ModuleType, plan, ctx: RunContext) -> Path:
+    """The per-run PNG path, named exactly as the TUI names it."""
+    return proc_path(plan.data_root, ctx.sample, ctx.run_str, ctx.device,
+                     program.MEASUREMENT_TYPE, getattr(program, "PNG_SUFFIX", "plot"))
+
+
+def program_run_fn(program: ModuleType, plan, run_contexts: list, run_extras: list):
+    """RunController.run_fn for `program.run_plan`: every run is finalized and
+    gets its PNG the moment it ends (as in the TUI), and its RunContext +
+    header extras land in `run_contexts` / `run_extras` for the post-run
+    status/comment step."""
+    def run_fn(stop_event: threading.Event, cb: "RunCallbacks") -> None:
+        program.run_plan(
+            plan, stop_event, on_status=cb.on_status, on_run_label=cb.on_run_label,
+            on_point=cb.on_point,
+            on_run_finished=lambda ctx, records: program.save_run_png(
+                plan, records, run_png_path(program, plan, ctx)),
+            run_contexts=run_contexts, run_extras=run_extras)
+    return run_fn
+
+
+def program_artifacts(program: ModuleType, plan, run_contexts: list) -> list[str]:
+    """Raw files + the per-run PNGs already saved — RunController.save_artifacts."""
+    paths = [str(c.raw_path) for c in run_contexts]
+    return paths + [str(p) for c in run_contexts if (p := run_png_path(program, plan, c)).exists()]
+
+
+async def prompt_last_run(client, program: ModuleType, plan, run_contexts: list, run_extras: list,
+                          records: list[dict]) -> None:
+    """The post-run good/open/short/noisy + comment dialog, applied to the LAST
+    run of the session with the extras it was written with (see
+    data_naming.finish_last_run); re-saves that run's PNG with the comment."""
+    result = await status_comment_dialog(client)
+    if result is None:
+        return
+    status, comment = result
+    try:
+        done = finish_last_run(
+            plan.data_root, run_contexts, run_extras, records, status, comment,
+            lambda ctx, recs, **kw: program.build_header_fields(plan, ctx, recs, **kw))
+    except Exception:
+        log.exception("Could not save the final status/comment")
+        ui.notify("Could not save final status/comment.", type="negative")
+        return
+    if done is not None and comment:
+        try:
+            program.save_run_png(plan, done[1], run_png_path(program, plan, done[0]), comment=comment)
+        except Exception:
+            log.exception("Could not re-save the run's PNG with the comment")

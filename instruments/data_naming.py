@@ -36,6 +36,7 @@ and once more at end-of-run with the real outcome/status/comment.
 from __future__ import annotations
 
 import csv
+import logging
 import os
 from dataclasses import dataclass
 from datetime import datetime
@@ -44,6 +45,8 @@ from typing import Callable, Optional, Union
 
 import pandas as pd
 from filelock import FileLock
+
+log = logging.getLogger(__name__)
 
 TEST_SAMPLE = "_test"
 
@@ -506,6 +509,98 @@ def make_incremental_writer(
     def _write(records: list[dict]) -> None:
         write_record(raw_path, records, header_fields(records))
     return _write
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# One run's lifecycle  ── shared by every program's run_plan() (TUI + web)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def record_run(
+    data_root: Path, ctx: RunContext,
+    header: Callable[[list[dict], str], dict],
+    measure: Callable[[Callable[[dict], None], Callable[[list[dict]], None]], None],
+    stop_event=None, *,
+    on_point: Optional[Callable[[dict], None]] = None,
+    tags: Optional[dict] = None,
+    on_finished: Optional[Callable[[RunContext, list[dict]], None]] = None,
+) -> list[dict]:
+    """
+    Record ONE allocated run (`ctx`, from allocate_run()) and finalize it
+    UNCONDITIONALLY the instant it ends — the per-run block every program's
+    run_plan() needs, once.
+
+    `measure(on_point, write_csv)` does the acquisition (connects, runs
+    run_measurement(...), …) and may raise. Every record it emits is tagged
+    with `tags` (e.g. series_index / series_label — they become columns),
+    collected, and passed on to `on_point`. `header(records, status)` builds
+    the `# key: value` header for a status ("in_progress" while running);
+    the operator's comment comes later, via finish_last_run().
+
+    When measure() returns or raises, the raw file and index row are written
+    with the outcome status — "error" if it raised, else "aborted" if
+    `stop_event` is set, else "completed" — then `on_finished(ctx, records)`
+    runs (the per-run PNG; a failure there is logged, never raised), then
+    measure()'s exception, if any, is re-raised. Returns the run's records.
+    """
+    records: list[dict] = []
+
+    def _on_point(record: dict) -> None:
+        if tags:
+            record.update(tags)
+        records.append(record)
+        if on_point is not None:
+            on_point(record)
+
+    write_csv = make_incremental_writer(ctx.raw_path, lambda recs: header(recs, "in_progress"))
+    error: Optional[BaseException] = None
+    try:
+        measure(_on_point, write_csv)
+    except Exception as exc:
+        error = exc
+    status = "error" if error is not None \
+        else ("aborted" if stop_event is not None and stop_event.is_set() else "completed")
+    header_fields = header(records, status)
+    write_record(ctx.raw_path, records, header_fields)
+    finalize_index_row(data_root, ctx.sample, ctx.run_number, header_fields)
+    if on_finished is not None:
+        try:
+            on_finished(ctx, records)
+        except Exception:
+            log.exception("Could not finish run %s (per-run plot)", ctx.run_str)
+    if error is not None:
+        raise error
+    return records
+
+
+def finish_last_run(
+    data_root: Path, run_contexts: list[RunContext], run_extras: list, records: list[dict],
+    status: str, comment: str,
+    header: Callable[..., dict],
+) -> Optional[tuple[RunContext, list[dict]]]:
+    """
+    Apply the operator's post-session status/comment to the LAST run of the
+    session — the one they are looking at. Earlier runs of a series keep the
+    outcome status record_run() gave them. `records` is the whole session
+    (each run's rows carry their series_index; a single run's may carry
+    none); `header(ctx, records, status=, comment=, extra=)` rebuilds the
+    header with the SAME extras the run was written with.
+
+    Never truncates an already-written raw file to a header-only stub: only
+    a run that recorded no point gets a header-only write. Returns
+    (ctx, that run's records) — for re-saving its PNG with the comment — or
+    None if the session allocated no run.
+    """
+    if not run_contexts:
+        return None
+    idx = len(run_contexts) - 1
+    ctx = run_contexts[idx]
+    run_records = [r for r in records if r.get("series_index", 0) == idx]
+    extra = run_extras[idx] if idx < len(run_extras) else None
+    header_fields = header(ctx, run_records, status=status, comment=comment, extra=extra)
+    if run_records or not ctx.raw_path.exists():
+        write_record(ctx.raw_path, run_records, header_fields)
+    finalize_index_row(data_root, ctx.sample, ctx.run_number, header_fields)
+    return ctx, run_records
 
 
 # ─────────────────────────────────────────────────────────────────────────────

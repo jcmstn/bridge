@@ -27,14 +27,14 @@ from __future__ import annotations
 import logging
 import multiprocessing as mp
 import textwrap
+import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 import numpy as np
 
-from textual import work
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.validation import Number
@@ -75,10 +75,8 @@ from instruments.field_geometry import field_direction_summary_line, render_asci
 from instruments.data_naming import (
     RunContext,
     allocate_run,
-    finalize_index_row,
-    make_incremental_writer,
+    record_run,
     preview_raw_filename,
-    write_record,
 )
 from instruments.keithley2182 import read_time_s
 from instruments.keithley6221 import reversal_avg_s
@@ -630,15 +628,202 @@ def _save_measurement_png(records: list[dict], png_path: Path,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Plan + run  ── pure, shared by the TUI RunScreen and web/dc/hall.py
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_plan(state: dict, data_root: Path) -> MeasurementPlan:
+    """One parsed, validated run request from a state dict. Pure — shared by
+    the TUI and the web page."""
+    src_cfg = SourceConfig(
+        visa_resource=state["source_visa_resource"],
+        sense_current_A=state["sense_current_list"][0],
+        compliance_V=state["compliance_V"],
+        source_delay_s=state["source_delay_s"],
+    )
+    volt_cfg = VoltmeterConfig(
+        visa_resource=state["voltmeter_visa_resource"],
+        nplc=state["nplc"],
+        auto_range=state["auto_range"],
+        channel=1,
+    )
+    channel_map = resolve_channel_map(state["measure_rxx"], state["measure_rxy"])
+    acq_cfg = AcquisitionConfig(
+        settling_time_s=state["settling_time_s"],
+        field_settle_tolerance_mT=state["field_settle_tolerance_mT"],
+        n_reversals=state["n_reversals"],
+        output_file="",  # overwritten per series iteration
+    )
+
+    magnet_cfg = None
+    gauss_cfg = None
+    currents_A = None
+    if state["enable_sweep"]:
+        magnet_cfg = MagnetConfig(
+            visa_resource=state["magnet_visa_resource"],
+            current_limit_A=state["current_limit_A"],
+            voltage_compliance_V=state["voltage_compliance_V"],
+            ramp_step_A=state["ramp_step_A"],
+            ramp_delay_s=state["ramp_delay_s"],
+        )
+        gauss_cfg = GaussmeterConfig(
+            visa_resource=state["gaussmeter_visa_resource"],
+            n_averages=state["gaussmeter_n_averages"],
+            read_delay_s=state["gaussmeter_read_delay_s"],
+        )
+        currents_A = build_segmented_sweep(
+            state["sweep_rows_parsed"], state["bidirectional_sweep"],
+        )
+
+    temp_cfg = None
+    if state["enable_temperature"]:
+        uids = parse_sensor_uids(state["temperature_sensor_uids"])
+        if uids:
+            temp_cfg = TemperatureControllerConfig(
+                visa_resource=state["temperature_visa_resource"],
+                sensor_uids=uids,
+            )
+
+    header_extra = {
+        "compliance_V": state["compliance_V"],
+        "n_reversals": state["n_reversals"],
+        "settling_time_s": state["settling_time_s"],
+        "measure_rxy": "rxy" in channel_map,
+        "measure_rxx": "rxx" in channel_map,
+    }
+    if state["enable_sweep"]:
+        header_extra["field_sweep_rows_A"] = state["sweep_rows_parsed"]
+
+    # A "series" tag only means something for an actual family of runs
+    # (>1 sense current) -- a single-current run gets no series tag.
+    series = ""
+    if len(state["sense_current_list"]) > 1:
+        series = (f"{state['sample']}_{state['device']}_{MEASUREMENT_TYPE}_"
+                  f"{datetime.now():%Y%m%dT%H%M%S}")
+
+    return MeasurementPlan(
+        src_cfg=src_cfg, volt_cfg=volt_cfg, acq_cfg=acq_cfg,
+        channel_map=channel_map, channel_settle_s=state["channel_settle_s"],
+        magnet_cfg=magnet_cfg, gauss_cfg=gauss_cfg, currents_A=currents_A,
+        sense_currents_A=state["sense_current_list"],
+        temp_cfg=temp_cfg, data_root=data_root,
+        sample=state["sample"], device=state["device"],
+        temperature_setpoint_K=state["temperature_setpoint_K"],
+        field_theta_deg=state["field_theta_deg"],
+        field_phi_deg=state["field_phi_deg"],
+        cooldown=state["cooldown"], header_extra=header_extra, series=series,
+        run_cost=run_costs(currents_A, state),
+    )
+
+
+def _ignore(*_args) -> None:
+    pass
+
+
+def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
+             on_status: Callable[[str], None] = _ignore,
+             on_run_label: Callable[[str], None] = _ignore,
+             on_point: Callable[[dict], None] = _ignore,
+             on_run_finished: Optional[Callable[[RunContext, list], None]] = None,
+             run_contexts: Optional[list] = None,
+             run_extras: Optional[list] = None) -> None:
+    """Connect, then one run (own run number, own file) per sense current,
+    each recorded + finalized by record_run() before the next; always shut
+    the instruments down. Pure — the TUI's RunScreen and the web page each
+    pass their own callbacks (see sot_nonlocal_switching_tui.run_plan)."""
+    run_contexts = [] if run_contexts is None else run_contexts
+    run_extras = [] if run_extras is None else run_extras
+    source = voltmeter = magnet = gaussmeter = temp_ctrl = None
+    try:
+        on_status("Connecting to Keithley 6221 & 2182 …")
+        source = connect_source(plan.src_cfg)
+        extra_channels = (2,) if len(plan.channel_map) == 2 else ()
+        voltmeter = connect_voltmeter(plan.volt_cfg, extra_channels=extra_channels)
+
+        if plan.temp_cfg is not None:
+            on_status("Connecting to MercuryiTC (temperature) …")
+            temp_ctrl = connect_temperature_controller(plan.temp_cfg)
+
+        if plan.magnet_cfg is not None and plan.currents_A is not None:
+            on_status("Connecting magnet power supply …")
+            magnet = connect_magnet(plan.magnet_cfg)
+            on_status("Connecting gaussmeter …")
+            gaussmeter = connect_gaussmeter(plan.gauss_cfg)
+
+        n_series = len(plan.series_values)
+        for series_idx, I_sense in enumerate(plan.series_values):
+            if stop_event.is_set():
+                break
+            label = f"I={I_sense:g}A" if n_series > 1 else None
+            plan.src_cfg.sense_current_A = I_sense
+
+            # A fresh RunContext (own run number, own file) EVERY iteration --
+            # never reuse one across the sense-current series.
+            ctx = allocate_run(
+                plan.data_root, plan.sample, plan.device, MEASUREMENT_TYPE,
+                temperature_setpoint_K=plan.temperature_setpoint_K,
+                key_axis=("current_A", I_sense) if n_series > 1 else None, series=plan.series,
+            )
+            extra = {"sense_current_A": I_sense}
+            run_contexts.append(ctx)
+            run_extras.append(extra)
+            on_run_label(f"Run #{ctx.run_str}")
+            plan.acq_cfg.output_file = str(ctx.raw_path)
+
+            if magnet is not None and plan.currents_A is not None:
+                points = [
+                    FieldPoint(
+                        magnet_current_A=I,
+                        set_action=lambda I=I: set_magnet_current(
+                            magnet, plan.magnet_cfg, I, gaussmeter, plan.gauss_cfg,
+                            plan.acq_cfg.field_settle_tolerance_mT, stop_event),
+                    )
+                    for I in plan.currents_A
+                ]
+            else:
+                points = [FieldPoint()]
+
+            on_status("Running measurement …" if n_series == 1
+                      else f"Running measurement (I={I_sense:g} A) …")
+            record_run(
+                plan.data_root, ctx,
+                lambda records, status, _ctx=ctx, _x=extra: build_header_fields(
+                    plan, _ctx, records, status=status, comment="", extra=_x),
+                lambda point_cb, write_csv, _points=points: run_measurement(
+                    source, voltmeter, plan.src_cfg, plan.acq_cfg, _points,
+                    stop_event=stop_event, on_point=point_cb,
+                    gaussmeter=gaussmeter, gauss_cfg=plan.gauss_cfg,
+                    temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg,
+                    field_theta_deg=plan.field_theta_deg, field_phi_deg=plan.field_phi_deg,
+                    write_csv=write_csv, channel_map=plan.channel_map,
+                    channel_settle_s=plan.channel_settle_s),
+                stop_event, on_point=on_point,
+                tags={"series_index": series_idx, "series_label": label},
+                on_finished=on_run_finished)
+    finally:
+        # 6221 output off first (immediate, no current into the DUT), so the
+        # magnet can start its ramp-down right away rather than waiting behind it.
+        if source is not None:
+            safe_shutdown("source", lambda: shutdown_source(source))
+        if magnet is not None:
+            safe_shutdown("magnet", lambda: shutdown_magnet(magnet, plan.magnet_cfg))
+        if gaussmeter is not None:
+            safe_shutdown("gaussmeter", lambda: shutdown_gaussmeter(gaussmeter))
+        if temp_ctrl is not None:
+            safe_shutdown("MercuryiTC", lambda: shutdown_temperature_controller(temp_ctrl))
+
+
+def save_run_png(plan: MeasurementPlan, records: list[dict], png_path: Path, comment: str = "") -> None:
+    """One run's PNG (RunScreen and the web page both call this)."""
+    _save_measurement_png(records, png_path, plan=plan, comment=comment)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Run screen  ── executes the plan in a worker thread, shows live progress
 # ─────────────────────────────────────────────────────────────────────────────
 
 class RunScreen(MeasurementRunScreen):
     TABLE_COLUMNS = ("#", "I_sense (A)", "I_magnet (A)", "B (mT)", "R_xy (Ω)", "R_xx (Ω)", "n_rev", "T1 (K)", "T2 (K)")
     MEASUREMENT_TYPE = MEASUREMENT_TYPE
-
-    def save_png(self, records: list[dict], png_path: Path, comment: str = "") -> None:
-        _save_measurement_png(records, png_path, plan=self.plan, comment=comment)
 
     def live_plot_args(self):
         return (_live_plot_worker, self.plan.magnet_cfg is not None)
@@ -662,132 +847,6 @@ class RunScreen(MeasurementRunScreen):
             f"{T1:.3f}" if T1 is not None else "—",
             f"{T2:.3f}" if T2 is not None else "—",
         )
-
-    def build_header(self, ctx: RunContext, records: list[dict], *, status: str, comment: str,
-                     extra: Optional[dict]) -> dict:
-        return build_header_fields(self.plan, ctx, records, status=status, comment=comment, extra=extra)
-
-    @work(thread=True, exclusive=True)
-    def do_run(self) -> None:
-        plan = self.plan
-        source = None
-        voltmeter = None
-        magnet = None
-        gaussmeter = None
-        temp_ctrl = None
-        try:
-            self._set_status_threadsafe("Connecting to Keithley 6221 & 2182 …")
-            source = connect_source(plan.src_cfg)
-            extra_channels = (2,) if len(plan.channel_map) == 2 else ()
-            voltmeter = connect_voltmeter(plan.volt_cfg, extra_channels=extra_channels)
-
-            if plan.temp_cfg is not None:
-                self._set_status_threadsafe("Connecting to MercuryiTC (temperature) …")
-                temp_ctrl = connect_temperature_controller(plan.temp_cfg)
-
-            if plan.magnet_cfg is not None and plan.currents_A is not None:
-                self._set_status_threadsafe("Connecting magnet power supply …")
-                magnet = connect_magnet(plan.magnet_cfg)
-                self._set_status_threadsafe("Connecting gaussmeter …")
-                gaussmeter = connect_gaussmeter(plan.gauss_cfg)
-
-            for series_idx, I_sense in enumerate(plan.series_values):
-                if self._stop_event.is_set():
-                    break
-
-                label = f"I={I_sense:g}A" if len(plan.series_values) > 1 else None
-                plan.src_cfg.sense_current_A = I_sense
-
-                # A fresh RunContext (own run number, own file) EVERY
-                # iteration -- never reuse one across the sense-current
-                # series, or every file silently inherits the first
-                # iteration's run number.
-                key_axis = ("current_A", I_sense) if len(plan.series_values) > 1 else None
-                ctx = allocate_run(
-                    plan.data_root, plan.sample, plan.device, MEASUREMENT_TYPE,
-                    temperature_setpoint_K=plan.temperature_setpoint_K,
-                    key_axis=key_axis, series=plan.series,
-                )
-                self._run_contexts.append(ctx)
-                self._run_extras.append({"sense_current_A": I_sense})
-                self._set_run_label_threadsafe(f"Run #{ctx.run_str}")
-                plan.acq_cfg.output_file = str(ctx.raw_path)
-                write_csv = make_incremental_writer(
-                    ctx.raw_path,
-                    lambda records, _ctx=ctx, _I=I_sense: build_header_fields(
-                        plan, _ctx, records, status="in_progress", comment="",
-                        extra={"sense_current_A": _I},
-                    ),
-                )
-
-                if magnet is not None and plan.currents_A is not None:
-                    points = [
-                        FieldPoint(
-                            magnet_current_A=I,
-                            set_action=lambda I=I: set_magnet_current(
-                                magnet, plan.magnet_cfg, I, gaussmeter, plan.gauss_cfg,
-                                plan.acq_cfg.field_settle_tolerance_mT, self._stop_event),
-                        )
-                        for I in plan.currents_A
-                    ]
-                else:
-                    points = [FieldPoint()]
-
-                status = "Running measurement …" if len(plan.series_values) == 1 \
-                    else f"Running measurement (I={I_sense:g} A) …"
-                self._set_status_threadsafe(status)
-                iter_error: Optional[BaseException] = None
-                try:
-                    run_measurement(
-                        source, voltmeter, plan.src_cfg, plan.acq_cfg, points,
-                        stop_event=self._stop_event,
-                        on_point=self._make_on_point(series_idx, label),
-                        gaussmeter=gaussmeter, gauss_cfg=plan.gauss_cfg,
-                        temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg,
-                        field_theta_deg=plan.field_theta_deg,
-                        field_phi_deg=plan.field_phi_deg,
-                        write_csv=write_csv,
-                        channel_map=plan.channel_map,
-                        channel_settle_s=plan.channel_settle_s,
-                    )
-                except Exception as exc:
-                    iter_error = exc
-
-                # Finalize THIS iteration's header/index row UNCONDITIONALLY,
-                # right now -- never gated on the end-of-session status/
-                # comment prompt, so an aborted/crashed session never leaves
-                # a file stuck at "in_progress".
-                iter_status = "error" if iter_error is not None \
-                    else ("aborted" if self._stop_event.is_set() else "completed")
-                iter_records = [r for r in self._records if r.get("series_index", 0) == series_idx]
-                header_fields = build_header_fields(
-                    plan, ctx, iter_records, status=iter_status, comment="",
-                    extra={"sense_current_A": I_sense},
-                )
-                write_record(ctx.raw_path, iter_records, header_fields)
-                finalize_index_row(plan.data_root, ctx.sample, ctx.run_number, header_fields)
-                self._save_run_png(ctx, iter_records)
-
-                if iter_error is not None:
-                    raise iter_error
-
-            final = "Measurement aborted." if self._stop_event.is_set() else "Measurement complete."
-        except Exception as exc:
-            log.exception("Measurement failed")
-            final = f"ERROR: {exc}"
-        finally:
-            # 6221 output off first (immediate, no current into the DUT),
-            # so the magnet can start its ramp-down right away rather than
-            # waiting behind it.
-            if source is not None:
-                safe_shutdown("source", lambda: shutdown_source(source))
-            if magnet is not None:
-                safe_shutdown("magnet", lambda: shutdown_magnet(magnet, plan.magnet_cfg))
-            if gaussmeter is not None:
-                safe_shutdown("gaussmeter", lambda: shutdown_gaussmeter(gaussmeter))
-            if temp_ctrl is not None:
-                safe_shutdown("MercuryiTC", lambda: shutdown_temperature_controller(temp_ctrl))
-            self.app.call_from_thread(self._on_finished, final)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1066,85 +1125,7 @@ class DCHallMeasurementApp(MeasurementApp):
     # ── Start ────────────────────────────────────────────────────────────────
 
     def _build_plan(self, state: dict) -> MeasurementPlan:
-        src_cfg = SourceConfig(
-            visa_resource=state["source_visa_resource"],
-            sense_current_A=state["sense_current_list"][0],
-            compliance_V=state["compliance_V"],
-            source_delay_s=state["source_delay_s"],
-        )
-        volt_cfg = VoltmeterConfig(
-            visa_resource=state["voltmeter_visa_resource"],
-            nplc=state["nplc"],
-            auto_range=state["auto_range"],
-            channel=1,
-        )
-        channel_map = resolve_channel_map(state["measure_rxx"], state["measure_rxy"])
-        acq_cfg = AcquisitionConfig(
-            settling_time_s=state["settling_time_s"],
-            field_settle_tolerance_mT=state["field_settle_tolerance_mT"],
-            n_reversals=state["n_reversals"],
-            output_file="",  # overwritten per series iteration
-        )
-
-        magnet_cfg = None
-        gauss_cfg = None
-        currents_A = None
-        if state["enable_sweep"]:
-            magnet_cfg = MagnetConfig(
-                visa_resource=state["magnet_visa_resource"],
-                current_limit_A=state["current_limit_A"],
-                voltage_compliance_V=state["voltage_compliance_V"],
-                ramp_step_A=state["ramp_step_A"],
-                ramp_delay_s=state["ramp_delay_s"],
-            )
-            gauss_cfg = GaussmeterConfig(
-                visa_resource=state["gaussmeter_visa_resource"],
-                n_averages=state["gaussmeter_n_averages"],
-                read_delay_s=state["gaussmeter_read_delay_s"],
-            )
-            currents_A = build_segmented_sweep(
-                state["sweep_rows_parsed"], state["bidirectional_sweep"],
-            )
-
-        temp_cfg = None
-        if state["enable_temperature"]:
-            uids = parse_sensor_uids(state["temperature_sensor_uids"])
-            if uids:
-                temp_cfg = TemperatureControllerConfig(
-                    visa_resource=state["temperature_visa_resource"],
-                    sensor_uids=uids,
-                )
-
-        header_extra = {
-            "compliance_V": state["compliance_V"],
-            "n_reversals": state["n_reversals"],
-            "settling_time_s": state["settling_time_s"],
-            "measure_rxy": "rxy" in channel_map,
-            "measure_rxx": "rxx" in channel_map,
-        }
-        if state["enable_sweep"]:
-            header_extra["field_sweep_rows_A"] = state["sweep_rows_parsed"]
-
-        # A "series" tag only means something for an actual family of runs
-        # (>1 sense current) -- a single-current run gets no series tag.
-        series = ""
-        if len(state["sense_current_list"]) > 1:
-            series = (f"{state['sample']}_{state['device']}_{MEASUREMENT_TYPE}_"
-                      f"{datetime.now():%Y%m%dT%H%M%S}")
-
-        return MeasurementPlan(
-            src_cfg=src_cfg, volt_cfg=volt_cfg, acq_cfg=acq_cfg,
-            channel_map=channel_map, channel_settle_s=state["channel_settle_s"],
-            magnet_cfg=magnet_cfg, gauss_cfg=gauss_cfg, currents_A=currents_A,
-            sense_currents_A=state["sense_current_list"],
-            temp_cfg=temp_cfg, data_root=self.data_root,
-            sample=state["sample"], device=state["device"],
-            temperature_setpoint_K=state["temperature_setpoint_K"],
-            field_theta_deg=state["field_theta_deg"],
-            field_phi_deg=state["field_phi_deg"],
-            cooldown=state["cooldown"], header_extra=header_extra, series=series,
-            run_cost=run_costs(currents_A, state),
-        )
+        return build_plan(state, self.data_root)
 
 
 def main() -> None:
