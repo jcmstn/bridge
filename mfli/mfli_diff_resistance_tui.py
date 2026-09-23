@@ -205,13 +205,13 @@ def run_costs(n_points: int, state: dict) -> RunCost:
     """Modelled cost of the whole run, one entry per bias point. Also drives
     the run screen's progress bar, so estimate and live ETA cannot disagree."""
     rate = state["sample_rate_Hz"]
-    # Two sequential acquisitions per point (current-sense, then voltage-sense),
-    # each the loop's own window (3·TC floor included) + subscribe/sync overhead.
+    # One shared poll window per point for the current-sense + voltage-sense
+    # pair (acquire_averaged_pair; 3·TC floor included) + subscribe/sync overhead.
     acq = acquire_s(state["time_constant_s"], state["n_averages"], rate) if rate > 0 else 0.0
     has_temp = state.get("enable_temperature") and bool(parse_sensor_uids(state["temperature_sensor_uids"]))
     rc = RunCost(n_points)
     rc.each("settle", state["settling_time_s"])
-    rc.each("acquire", 2 * acq)
+    rc.each("acquire", acq)
     # set_bias (write + sync) + MDS status getInt + CSV rewrite / UI hand-off (+ temperature)
     rc.each("overhead", 3 * GPIB_TXN_S + POINT_OVERHEAD_S + (TEMP_READ_S if has_temp else 0.0))
     rc.at("per-run", PER_RUN_S + MDS_SYNC_S, 0)        # connects + setup_mds() sync wait

@@ -91,12 +91,12 @@ def test_summary_line_is_the_run_costs_total(tmp_path):
 
 # ── sot_pulsed_switching_2h ─────────────────────────────────────────────────
 
-def test_2h_uses_typical_lock_two_sequential_windows_and_rebuilds_the_6221_every_file():
+def test_2h_uses_typical_lock_one_shared_window_and_rebuilds_the_6221_every_file():
     state = h2_state()
     rc = h2.run_costs(state)
     n = len(state["amplitude_list"])
     window = acquire_s(0.3, 50, 857.0)
-    expect = (1.0 + pulse_once_s(1, 1e-3) + rt.ARM_S + rt.LOCK_TYP_S + 1.0 + 2 * window
+    expect = (1.0 + pulse_once_s(1, 1e-3) + rt.ARM_S + rt.LOCK_TYP_S + 1.0 + window
               + 8 * rt.GPIB_TXN_S + rt.POINT_OVERHEAD_S)
     assert rc.points[1] == pytest.approx(expect)
     assert rc.parts["PLL lock"] == pytest.approx(n * rt.LOCK_TYP_S)             # not the 5 s timeout

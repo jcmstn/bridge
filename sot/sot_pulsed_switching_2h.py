@@ -139,7 +139,7 @@ from instruments.keithley6221 import (
     shutdown_ac_source,
 )
 from instruments.mfli_daq import (
-    connect, connect_device, acquire_averaged,
+    connect, connect_device, acquire_averaged_pair,
     ExtRefConfig, configure_external_reference, wait_for_reference_lock,
 )
 from instruments.kepco_magnet import (
@@ -270,7 +270,7 @@ class AmplitudePoint:
 # ─────────────────────────────────────────────────────────────────────────────
 # MFLI setup helpers
 # ─────────────────────────────────────────────────────────────────────────────
-# connect / connect_device / acquire_averaged and the ExtRef PLL helpers are
+# connect / connect_device / acquire_averaged_pair and the ExtRef PLL helpers are
 # imported from instruments/mfli_daq.py — no MDS, no follower: a single MFLI.
 
 def configure_demodulator(daq: "zi.ziDAQServer", cfg: DemodConfig) -> None:
@@ -454,8 +454,7 @@ def run_measurement(
                        read_cfg.lock_timeout_s)
         _interruptible_sleep(read_cfg.settle_after_enable_s, stop_event)
 
-        d1 = acquire_averaged(daq, demod1_cfg, read_cfg.n_averages)
-        d2 = acquire_averaged(daq, demod2_cfg, read_cfg.n_averages)
+        d1, d2 = acquire_averaged_pair(daq, demod1_cfg, demod2_cfg, read_cfg.n_averages)
         if d1["overload"] or d2["overload"]:
             log.warning("Input overload at amp %.4g V (1f=%s, 2f=%s) — this "
                        "reading is not trustworthy.",

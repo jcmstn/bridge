@@ -69,6 +69,7 @@ from mfli.mfli_dual_harmonic import (
     TemperatureControllerConfig,
     _DATA_DIR,
     acquire_averaged,
+    acquire_averaged_pair,
     auto_null_phase,
     configure_demodulator,
     configure_output,
@@ -253,8 +254,7 @@ def run_field_sweep_diagnostic(
                            sweep_cfg.field_settle_tolerance_mT, stop_event)
         time.sleep(sweep_cfg.settling_time_s)
 
-        d1 = acquire_averaged(daq, demod1_cfg, sweep_cfg.n_averages)
-        d2 = acquire_averaged(daq, demod2_cfg, sweep_cfg.n_averages)
+        d1, d2 = acquire_averaged_pair(daq, demod1_cfg, demod2_cfg, sweep_cfg.n_averages)
         field_mT = read_field_mT(gaussmeter, gauss_cfg) if gaussmeter is not None else None
         residual_ratio = abs(d1["y_mean"]) / d1["r_mean"] if d1["r_mean"] > 0 else float("nan")
 

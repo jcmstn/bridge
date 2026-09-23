@@ -65,14 +65,15 @@ class _Fake6221AC:
 
 
 class _FakeDAQ:
-    """Enough of zi.ziDAQServer for acquire_averaged() / wait_for_reference_lock()
+    """Enough of zi.ziDAQServer for acquire_averaged_pair() / wait_for_reference_lock()
     — always reports locked, and returns a small distinct (x, y) sample per
-    poll() so demod1/demod2 reads land in a fresh CSV row without a NaN."""
+    subscribed path per poll() so demod1/demod2 reads land in a fresh CSV row
+    without a NaN."""
 
     def __init__(self, events=None):
         self.events = events
         self._n = itertools.count(1)
-        self._last_path = None
+        self._paths: list = []
 
     def _log(self, tag):
         if self.events is not None:
@@ -89,15 +90,15 @@ class _FakeDAQ:
     def sync(self): pass
 
     def subscribe(self, path: str) -> None:
-        self._last_path = path
+        self._paths.append(path)
 
     def unsubscribe(self, path: str) -> None:
-        pass
+        self._paths.remove(path)
 
     def poll(self, duration_s, timeout_ms, flat=True):
         self._log("mfli.read")
-        v = next(self._n) * 1e-4
-        return {self._last_path: {"x": np.array([v]), "y": np.array([0.0])}}
+        return {path: {"x": np.array([next(self._n) * 1e-4]), "y": np.array([0.0])}
+                for path in self._paths}
 
 
 def _pulsed_cfgs():

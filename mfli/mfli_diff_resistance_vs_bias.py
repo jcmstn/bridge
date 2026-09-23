@@ -91,7 +91,6 @@ import logging
 import threading
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -108,7 +107,7 @@ from instruments.mfli_daq import (
     setup_mds,
     check_mds_status,
     sync_follower_oscillator,
-    acquire_averaged,
+    acquire_averaged_pair,
 )
 from instruments.mercury_itc import (
     MercuryITC,
@@ -439,8 +438,10 @@ def run_measurement(
         log.info("   Settling %.2f s ...", settle)
         time.sleep(settle)
 
-        # ── 3. Acquire current-sense phasor (leader, Current Input → amps) ────
-        i_raw = acquire_averaged(daq, current_cfg, acq_cfg.n_averages)
+        # ── 3. Acquire the current-sense (leader, Current Input → amps) and
+        #       voltage-sense (follower, across the DUT) phasors over ONE shared
+        #       poll window — Z = V/I then comes from the same wall-clock interval
+        i_raw, v_raw = acquire_averaged_pair(daq, current_cfg, voltage_cfg, acq_cfg.n_averages)
         if current_cfg.use_current_input:
             I_phasor = complex(i_raw["x_mean"], i_raw["y_mean"])
         else:
@@ -448,8 +449,7 @@ def run_measurement(
         if i_raw["overload"]:
             log.warning("   Current-sense input is OVERLOADED — this reading is not trustworthy.")
 
-        # ── 4. Acquire voltage-sense phasor (follower, across the DUT) ─────────
-        v_raw = acquire_averaged(daq, voltage_cfg, acq_cfg.n_averages)
+        # ── 4. Voltage-sense phasor ──────────────────────────────────────────────
         V_phasor = complex(v_raw["x_mean"], v_raw["y_mean"])
         if v_raw["overload"]:
             log.warning("   Voltage-sense input is OVERLOADED — this reading is not trustworthy.")
@@ -515,6 +515,7 @@ def run_measurement(
 
 def plot_results(df: pd.DataFrame, out_path: Path) -> None:
     """Three-panel summary: R_diff, reactive component, and |Z|/phase, all vs. bias."""
+    import matplotlib.pyplot as plt     # only the standalone plot needs it — keeps imports light
     fig, axes = plt.subplots(3, 1, figsize=(7, 9), sharex=True)
 
     axes[0].plot(df["bias_V"], df["R_diff_ohm"], ".-", color="#2E3192")
@@ -643,6 +644,7 @@ def main() -> None:
         print("\n", df.to_string(index=False))
         plot_path = Path(acq_cfg.output_file).with_suffix(".png")
         plot_results(df, plot_path)
+        import matplotlib.pyplot as plt
         plt.show()
     finally:
         ramp_bias_to_zero(daq, out_cfg)

@@ -51,22 +51,23 @@ def _pc_state(**overrides) -> dict:
 
 # ── diff_resistance ──────────────────────────────────────────────────────────
 
-def test_diffres_two_windows_with_3tc_floor_about_twice_the_old_estimate() -> None:
+def test_diffres_one_shared_window_with_3tc_floor() -> None:
     state = _dr_state()
     n = 2 * state["n_points"] - 1                                    # bidirectional, turn-around not repeated
     rc = dr.run_costs(n, state)
     old_estimate = n * (1.5 + 2 * max(0.1, 50 * 1.5 / 857.0))        # settle + 2 windows WITHOUT the 3·TC floor
     assert old_estimate == pytest.approx(137.7, abs=0.1)
-    assert rc.total_s >= 2 * old_estimate
-    # one steady-state point = settle + two SEQUENTIAL acquisitions (3·TC = 0.9 s window each) + overhead
+    assert rc.total_s > old_estimate
+    # one steady-state point = settle + ONE shared I/V acquisition window
+    # (acquire_averaged_pair; 3·TC = 0.9 s) + overhead
     assert rc.points[1] == pytest.approx(
-        1.5 + 2 * acquire_s(0.3, 50, 857.0) + 3 * rt.GPIB_TXN_S + rt.POINT_OVERHEAD_S)
+        1.5 + acquire_s(0.3, 50, 857.0) + 3 * rt.GPIB_TXN_S + rt.POINT_OVERHEAD_S)
     assert acquire_s(0.3, 50, 857.0) == pytest.approx(poll_window_s(0.3, 50, 857.0) + rt.ACQ_OVERHEAD_S)
 
 
 def test_diffres_slow_filter_dominates_the_point() -> None:
     fast, slow = dr.run_costs(2, _dr_state()), dr.run_costs(2, _dr_state(time_constant_s=1.0))
-    assert slow.points[1] - fast.points[1] == pytest.approx(2 * (3.0 - 0.9))   # 3·TC per window, two windows
+    assert slow.points[1] - fast.points[1] == pytest.approx(3.0 - 0.9)   # 3·TC, one shared window
 
 
 def test_diffres_startup_on_first_point_teardown_off_the_bar() -> None:
@@ -96,14 +97,14 @@ def test_diffres_plan_and_sidebar_carry_the_cost(tmp_path, monkeypatch) -> None:
 
 # ── phase_calibration ────────────────────────────────────────────────────────
 
-def test_phasecal_far_above_the_old_34s_and_counts_two_windows() -> None:
+def test_phasecal_far_above_the_old_34s_and_counts_one_shared_window() -> None:
     state = _pc_state()
     rc = pc.run_costs(state)
     assert len(rc.points) == 21                                       # (-20, 20, 11) bidirectional
     old_estimate = 21 * (1.5 + max(0.1, 20 * 1.5 / 857.0))            # one window, no 3·TC floor: ~34 s
     assert old_estimate == pytest.approx(33.6, abs=0.1)
     assert rc.total_s >= 185                                          # the audit's floor (no GPIB latency)
-    assert rc.parts["acquire"] == pytest.approx(21 * 2 * acquire_s(0.3, 20, 857.0))
+    assert rc.parts["acquire"] == pytest.approx(21 * acquire_s(0.3, 20, 857.0))   # 1f + 2f together
 
 
 def test_phasecal_hops_start_from_the_calibration_point_and_teardown_is_off_the_bar() -> None:

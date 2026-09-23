@@ -310,7 +310,7 @@ def run_costs(state: dict) -> RunCost:
         rc.at("magnet", typ, i, worst_extra=worst - typ)
         prev = current
     rc.each("settle", settle)
-    rc.each("acquire", 2 * acquire_s(tc, state["sweep_n_averages"], rate))
+    rc.each("acquire", acquire_s(tc, state["sweep_n_averages"], rate))    # 1f + 2f in one window
     rc.each("gaussmeter", read_field_s(gauss_cfg))
     rc.each("overhead", POINT_OVERHEAD_S + (TEMP_READ_S if has_temp else 0.0))
 

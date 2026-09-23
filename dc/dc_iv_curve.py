@@ -53,7 +53,6 @@ import logging
 import threading
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -262,6 +261,7 @@ def plot_results(df: pd.DataFrame, out_path: Path) -> None:
     resistance dV/dI (via np.gradient — needs neighbouring points, so it's
     computed here rather than incrementally during the sweep).
     """
+    import matplotlib.pyplot as plt     # only the standalone plot needs it — keeps imports light
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(7, 8))
 
     ax1.plot(df["current_A"], df["voltage_V"], ".-", color="#2E3192")
@@ -335,6 +335,7 @@ def main() -> None:
         print("\n", df.to_string(index=False))
         plot_path = Path(acq_cfg.output_file).with_suffix(".png")
         plot_results(df, plot_path)
+        import matplotlib.pyplot as plt
         plt.show()
     finally:
         ramp_current_to_zero(source)

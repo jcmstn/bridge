@@ -311,15 +311,15 @@ def run_costs(state: dict) -> RunCost:
     has_temp = state["enable_temperature"] and bool(parse_sensor_uids(state["temperature_sensor_uids"]))
     lock_typ = min(LOCK_TYP_S, state["lock_timeout_s"])   # the lock wait returns at the first lock
     # run_measurement(): 6221 AC off (2 writes) -> PMU pulse -> wait -> AC on (enable, ARM, START =
-    # 3 writes) -> PLL lock -> settle -> 1f then 2f acquire, sequential -> AC off (2) ->
+    # 3 writes) -> PLL lock -> settle -> 1f + 2f acquire, one shared window -> AC off (2) ->
     # frequency read-back (1) -> temperature -> CSV rewrite
     rc.each("post-pulse wait", state["delay_after_pulse_s"])
     rc.each("PMU pulse", pulse_once_s(state["n_pulses"], state["pulse_period_s"]))
     rc.each("6221 re-arm", ARM_S)
     rc.each("PLL lock", lock_typ, worst_extra=max(0.0, state["lock_timeout_s"] - lock_typ))
     rc.each("settle", state["settle_after_enable_s"])
-    rc.each("MFLI reads", 2 * acquire_s(state["filter_time_constant_s"], state["n_averages"],
-                                        max(state["sample_rate_Hz"], 1.0)))
+    rc.each("MFLI reads", acquire_s(state["filter_time_constant_s"], state["n_averages"],
+                                    max(state["sample_rate_Hz"], 1.0)))
     rc.each("overhead", 8 * GPIB_TXN_S + POINT_OVERHEAD_S + (TEMP_READ_S if has_temp else 0.0))
     prev = 0.0                                       # magnet starts at 0 A
     for k, (_I_sense, I_mag) in enumerate(series):
