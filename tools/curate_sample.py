@@ -36,11 +36,6 @@ on one axes, for comparing repeats at a glance.
 CAVEAT: matplotlib needs an actual display. If you run this over SSH,
 you'll need X11 forwarding (ssh -X) or a VNC session — the Textual side
 works fine headless, but the plot window will not.
-
-This script assumes the data_naming.py API described in your data storage
-convention doc: ensure_sample, list_samples, finalize_index_row,
-TEST_SAMPLE, and (optionally) BASE_COLUMNS. Adjust the import block below
-if your actual module lives somewhere else or names things differently.
 """
 
 from __future__ import annotations
@@ -60,38 +55,16 @@ from textual.screen import ModalScreen
 from textual.widgets import Footer, Header, Input, Label, Static, Tree
 from textual.widgets.tree import TreeNode
 
-# --------------------------------------------------------------------------
-# Wiring into your repo. This mirrors the "_DATA_DIR = three .parents up"
-# convention from the other scripts — adjust if this file doesn't live at
-# the same depth (e.g. bridge/tools/curate_sample.py).
-# --------------------------------------------------------------------------
-_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
+from instruments.data_naming import (
+    BASE_COLUMNS,
+    ensure_sample,
+    finalize_index_row,
+    list_samples,
+    read_raw,
+)
 
-try:
-    from instruments.data_naming import (
-        TEST_SAMPLE,
-        ensure_sample,
-        finalize_index_row,
-        list_samples,
-        read_raw,
-    )
-except ImportError as exc:  # pragma: no cover
-    sys.exit(
-        f"Could not import instruments.data_naming ({exc}).\n"
-        "Run this from inside the bridge repo, or fix _REPO_ROOT above."
-    )
-
-try:
-    from instruments.data_naming import BASE_COLUMNS
-except ImportError:
-    BASE_COLUMNS = [
-        "run", "timestamp", "sample", "device", "type",
-        "T_setpoint_K", "T_K", "cooldown", "status", "comment", "series",
-    ]
-
-_DATA_DIR = _REPO_ROOT / "data"
+# <repo>/../data — the same default data root as every measurement program
+_DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 
 CURATION_COLUMNS = ["paper_include", "figure_ref", "curation_note"]
 BAD_STATUSES = {"error", "aborted"}
@@ -565,7 +538,7 @@ def main() -> None:
     data_root = args.data_root or _DATA_DIR
     selection = args.sample
 
-    samples = [s for s in list_samples(data_root) if s != TEST_SAMPLE]
+    samples = list_samples(data_root)                  # real samples; never _test
     if not samples:
         sys.exit(f"No samples found under {data_root}")
 
