@@ -83,6 +83,7 @@ from instruments.run_time import (
     GPIB_TXN_S, PER_FILE_S, PER_RUN_S, POINT_OVERHEAD_S, TEMP_READ_S,
     RunCost,
 )
+from instruments.summary_lines import summary_markup
 from instruments.tui_common import (
     MeasurementApp,
     MeasurementRunScreen,
@@ -99,12 +100,8 @@ from instruments.tui_sample_picker import (
 )
 
 DC_HALL_DESCRIPTION = (
-    "Sources a fixed DC sense current with a Keithley 6221 and reads R_xy "
-    "(transverse/Hall) and/or R_xx (longitudinal) voltage with a Keithley "
-    "2182's two channels, reversing the current each rep to cancel "
-    "thermal-EMF offsets. Optionally sweeps a Kepco electromagnet's field "
-    "(bidirectionally, for hysteresis) with the field measured live via a "
-    "Lake Shore 475 Gaussmeter at every point."
+    "6221 DC current (±I reversal) · 2182 ch1 R_xy / ch2 R_xx. Optional Kepco field "
+    "sweep, field read by Lake Shore 475."
 )
 
 # Wiring schematic — shown on this program's card in bridge_tui.py.
@@ -376,7 +373,7 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     if not channel_map:
         errors.append("Enable at least one of R_xy or R_xx.")
     elif len(channel_map) == 2:
-        info.append("R_xy on ch1, R_xx on ch2.")
+        info.append("Channels: R_xy ch1, R_xx ch2 — ~2× per-point time")
         warnings.append("R_xy + R_xx: the 2182's ch1 LO and ch2 LO are one node "
                         "inside the instrument. Wire both LO leads to the SAME "
                         "sample contact. On two different contacts the 2182 "
@@ -386,12 +383,9 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
                         "and meter between the two LO leads. Lead resistance "
                         "only = same contact, OK. Sample resistance = different "
                         "contacts, do not run both.")
-        info.append("Both channels read per point — roughly doubles the "
-                     "per-point acquisition time.")
     else:
         label = next(iter(channel_map))
-        info.append(f"{label.upper()} only, on channel 1 (identical wiring/timing "
-                     "to a single-channel run).")
+        info.append(f"Channels: {label.upper()} only, ch1")
 
     if state.get("sense_current_parse_error"):
         errors.append(f"Sense current list: {state['sense_current_parse_error']}")
@@ -403,16 +397,15 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     n_series = len(current_list)
     if n_series > 1:
         currents_str = ", ".join(format_si(i, "A") for i in current_list)
-        info.append(f"Sense currents: {currents_str} — {n_series} complete measurements, "
-                     f"one file each")
+        info.append(f"Sense currents: {currents_str} — {n_series} runs, one file each")
     elif n_series == 1:
-        info.append(f"Sense current I = {format_si(current_list[0], 'A')}")
+        info.append(f"Sense current: {format_si(current_list[0], 'A')}")
 
     if state["compliance_V"] <= 0:
         errors.append("Compliance voltage must be > 0 V.")
 
     read_s = read_time_s(state["nplc"])
-    info.append(f"Estimated 2182 reading time ≈ {read_s * 1000:.0f} ms (NPLC={state['nplc']:g})")
+    info.append(f"2182 read: ≈ {read_s * 1000:.0f} ms — NPLC {state['nplc']:g}")
 
     total_points = 0
     resolved = None
@@ -435,11 +428,10 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
             n_raw = sum(n for _, _, n in rows)
             n_merged = (2 * n_raw if state["bidirectional_sweep"] else n_raw) - total_points
             merged_note = f", {n_merged} shared boundary point(s) merged" if n_merged else ""
-            info.append(f"Sweep: {len(rows)} row(s), {total_points} points"
-                         f"{' (bidirectional)' if state['bidirectional_sweep'] else ''}"
+            info.append(f"Field sweep: {total_points} points — {len(rows)} row(s)"
+                         f"{', bidirectional' if state['bidirectional_sweep'] else ''}"
                          f"{merged_note}")
-        info.append("Field measured live at each point via Lake Shore 475 Gaussmeter "
-                     f"({state['gaussmeter_visa_resource']})")
+        info.append(f"Field read: Lake Shore 475 — {state['gaussmeter_visa_resource']}")
         tol_mT = state["field_settle_tolerance_mT"]
         if tol_mT <= 0:
             warnings.append("Field-settle tolerance is 0 — every magnet step will wait the "
@@ -448,10 +440,10 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
             warnings.append(f"Field-settle tolerance {tol_mT:g} mT is below the 475's typical "
                              "reading noise — points may stall until the settle timeout.")
         info.extend(run_costs(resolved if resolved is not None else [], state)
-                    .lines("Estimated total run time"))
+                    .lines())
     else:
-        info.append("Single point — no field sweep, magnet untouched.")
-        info.extend(run_costs(None, state).lines("Estimated total run time"))
+        info.append("Field: none — single point, magnet untouched")
+        info.extend(run_costs(None, state).lines())
 
     if state["enable_temperature"]:
         uids = parse_sensor_uids(state["temperature_sensor_uids"])
@@ -459,10 +451,9 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
             warnings.append("Temperature logging is on but no sensor UID is set — "
                              "temperature columns will be empty.")
         else:
-            info.append(f"Temperature logged via MercuryiTC ({', '.join(uids)}) — "
-                         "if unreachable, columns are simply left empty.")
+            info.append(f"Temperature: MercuryiTC {', '.join(uids)} — empty if unreachable")
     else:
-        info.append("Temperature logging off.")
+        info.append("Temperature: off")
 
     info.append(field_direction_summary_line(
         state.get("field_theta_deg"), state.get("field_phi_deg")))
@@ -902,11 +893,11 @@ class DCHallMeasurementApp(MeasurementApp):
 
     .card-title { text-style: bold underline; margin-bottom: 1; }
     .field { margin-bottom: 1; }
-    .field-label { text-style: bold; }
-    .hint { text-style: italic; color: $text-muted; }
+    .field-label { text-style: bold; width: 100%; }
+    .hint { text-style: italic; color: $text-muted; width: 100%; }
     .sweep-rows { height: 5; margin-bottom: 1; }
-    .switch-row { height: 3; }
-    .switch-row Label { margin-left: 1; content-align: left middle; height: 3; }
+    .switch-row { height: auto; }
+    .switch-row Label { padding-left: 1; content-align: left middle; width: 1fr; height: auto; min-height: 3; }
     .plane-btn-row { height: 3; margin-bottom: 1; }
     .plane-btn-row Button { min-width: 5; margin-right: 1; }
     .field-diagram { color: $text-muted; margin-top: 1; }
@@ -928,9 +919,7 @@ class DCHallMeasurementApp(MeasurementApp):
                         "Source current (Keithley 6221)",
                         field("sense_current_values", "Sense current (A)",
                               DEFAULTS["sense_current_values"], kind="text",
-                              hint="Reversed +I/-I each rep to cancel thermal-EMF offsets. "
-                                   "Single value, or comma-separated list — one complete "
-                                   "measurement runs per value, each saved to its own file."),
+                              hint="±I reversed each rep. Comma-separate for one run + file per value."),
                     )
                     yield card(
                         "Quantities (Keithley 2182)",
@@ -957,12 +946,11 @@ class DCHallMeasurementApp(MeasurementApp):
                         field("field_theta_deg", "θ — tilt from out-of-plane (°)",
                               DEFAULTS["field_theta_deg"], kind="number", valid_empty=True,
                               validators=[Number(0, 180, failure_description="0-180°")],
-                              hint="0° = fully out-of-plane (film normal), 90° = in-plane."),
+                              hint="0° = out-of-plane, 90° = in-plane."),
                         field("field_phi_deg", "φ — azimuth from current axis (°)",
                               DEFAULTS["field_phi_deg"], kind="number", valid_empty=True,
                               validators=[Number(0, 360, failure_description="0-360°")],
-                              hint="0° = along sense current, 90° = transverse in-plane. "
-                                   "Meaningless when θ=0°."),
+                              hint="0° = along current. Ignored when θ=0°."),
                         Horizontal(
                             Button("xy", id="plane_xy", classes="plane-btn"),
                             Button("zx", id="plane_zx", classes="plane-btn"),
@@ -990,7 +978,7 @@ class DCHallMeasurementApp(MeasurementApp):
                             "Acquisition timing",
                             field("settling_time_s", "Settling time per point (s)",
                                   DEFAULTS["settling_time_s"],
-                                  hint="Dead-time after a field change, before acquiring.",
+                                  hint="Wait after a field change.",
                                   validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
                             field("n_reversals", "+I/-I reversal pairs averaged",
                                   DEFAULTS["n_reversals"], kind="integer",
@@ -998,8 +986,7 @@ class DCHallMeasurementApp(MeasurementApp):
                                   validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
                             field("channel_settle_s", "2182 channel-mux settle (s)",
                                   DEFAULTS["channel_settle_s"],
-                                  hint="Only used when both R_xy and R_xx are on — dead time "
-                                       "after switching the 2182's active channel, before reading.",
+                                  hint="Wait after a 2182 channel switch (R_xy + R_xx only).",
                                   validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
                         )
 
@@ -1023,9 +1010,7 @@ class DCHallMeasurementApp(MeasurementApp):
                         yield card(
                             "Source & ramp safety",
                             field("source_delay_s", "6221 source delay (s)", DEFAULTS["source_delay_s"],
-                                  hint="Also the settle time between a current reversal and "
-                                       "reading the voltmeter, so the reversal has actually "
-                                       "finished before the 2182 integrates."),
+                                  hint="Also the settle after each ±I reversal."),
                             field("current_limit_A", "Magnet software current limit (A)",
                                   DEFAULTS["current_limit_A"],
                                   hint="Hard safety ceiling."),
@@ -1044,10 +1029,7 @@ class DCHallMeasurementApp(MeasurementApp):
                                   DEFAULTS["gaussmeter_read_delay_s"]),
                             field("field_settle_tolerance_mT", "Field-settle tolerance (mT)",
                                   DEFAULTS["field_settle_tolerance_mT"],
-                                  hint="Advanced: after each magnet step, the field counts as "
-                                       "settled once a short window of gaussmeter readings spans "
-                                       "less than this. Raise it if points stall waiting; lower "
-                                       "for tighter field control before acquiring.",
+                                  hint="Field settled when readings span less than this. Raise if points stall.",
                                   validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
                             field("temperature_sensor_uids", "MercuryiTC sensor board UID(s)",
                                   DEFAULTS["temperature_sensor_uids"], kind="text",
@@ -1083,17 +1065,7 @@ class DCHallMeasurementApp(MeasurementApp):
             else "[dim]File:  (choose a sample and device to preview the filename)[/dim]"
         )
 
-        lines: list[str] = []
-        if errors:
-            lines.append("[bold red]Blocking issues[/bold red]")
-            lines += [f"  [red]✗ {e}[/red]" for e in errors]
-        if warnings:
-            lines.append("[bold yellow]Warnings[/bold yellow]")
-            lines += [f"  [yellow]⚠ {w}[/yellow]" for w in warnings]
-        lines.append("[bold]Derived values[/bold]")
-        lines += [f"  [dim]•[/dim] {i}" for i in info]
-
-        self.query_one("#summary", Static).update("\n".join(lines))
+        self.query_one("#summary", Static).update(summary_markup(info, warnings, errors))
         self.query_one("#start", Button).disabled = bool(errors)
 
         theta = None if parse_errors else state.get("field_theta_deg")

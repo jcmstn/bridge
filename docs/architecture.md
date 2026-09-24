@@ -67,14 +67,14 @@ verbatim by the matching `web/{suite}/{name}.py`:
 | `MEASUREMENT_TYPE` | the locked type code (`"HALL"`, `"IV"`, …) — see `data_convention.md` |
 | `MeasurementPlan` | frozen dataclass: one parsed, validated run request |
 | `resolve_state(state) -> dict` | the derived values of a parsed form (sweep lists, value lists, their parse errors) — called by the TUI's `parse_state()` and the web's `form_state()` alike |
-| `build_summary(state) -> (info, warnings, errors)` | the live sidebar text + warnings/errors, computed from the parsed state |
+| `build_summary(state) -> (info, warnings, errors)` | the live sidebar text + warnings/errors, computed from the parsed state. Each `info` line is `"Key: value — note"` (`instruments/summary_lines.py`): both front ends show the value bold, key and note muted |
 | `build_plan(state, data_root) -> MeasurementPlan` | the validated run request; a single-run program allocates its run here (`plan.run_ctx`) |
 | `run_plan(plan, stop_event, *, on_status, on_run_label, on_point, on_run_finished, run_contexts, run_extras)` | the whole run — connect, loop over the series (one `record_run()` per output file), teardown. Both the TUI `RunScreen` and the web page run exactly this; it fills `run_contexts` / `run_extras` for the post-run status/comment prompt |
 | `save_run_png(plan, records, png_path, comment="")` + `PNG_SUFFIX` | the per-run PNG, same in both front ends |
 | `build_header_fields(plan, ctx, …) -> dict` | the `# key: value` CSV header for this run |
 | `compute_filename_preview(state) -> str` | placeholder filename for the live preview (calls `preview_raw_filename`, never `allocate_run`) |
 | `parse_sensor_uids(text)` | MercuryiTC sensor-UID parsing, shared |
-| `{NAME}_DESCRIPTION` | one-paragraph blurb, shown on the program's `bridge_tui.py` card, its web page and (DC/SOT) its sidebar |
+| `{NAME}_DESCRIPTION` | one- or two-line blurb — instruments + anything non-obvious, not what the measurement is — shown on the program's `bridge_tui.py` card, its web page and (DC/SOT) its sidebar |
 | `{NAME}_SCHEMATIC` | the wiring schematic shown on the program's `bridge_tui.py` card |
 
 If you add a form field, it goes in `DEFAULTS` + the right `*_FIELDS`

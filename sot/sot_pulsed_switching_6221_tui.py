@@ -165,8 +165,7 @@ AUTOMODE_OPTIONS: list[tuple[str, int]] = [
     ("3 — high bandwidth", 3),
     ("4 — dynamic (auto)", 4),
 ]
-AUTOMODE_HINT = ("2=most forgiving acquisition (marginal/noisy signal), "
-                 "3=fastest tracking once locked, 4=auto-adapts (default).")
+AUTOMODE_HINT = "2 = most forgiving, 3 = fastest tracking, 4 = auto (default)."
 
 NUMERIC_FIELDS: dict = {
     "pulse_current_start_A": float,
@@ -407,11 +406,11 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         if over:
             errors.append(f"Pulse current(s) {over} A exceed the 6221's hardware range "
                           f"±{_WRITE_CURRENT_HARD_MAX_A:g} A.")
-        loop = " loop" if state["amplitude_bidirectional"] else ""
-        info.append(f"Pulse sweep: {len(amps)} pulses "
-                    f"{format_si(state['pulse_current_start_A'], 'A')} → "
-                    f"{format_si(state['pulse_current_stop_A'], 'A')} step "
-                    f"{format_si(state['pulse_current_step_A'], 'A')}{loop}" if amps else "")
+        loop = ", up and back" if state["amplitude_bidirectional"] else ""
+        info.append(f"Pulse sweep: {format_si(state['pulse_current_start_A'], 'A')} → "
+                    f"{format_si(state['pulse_current_stop_A'], 'A')} — step "
+                    f"{format_si(state['pulse_current_step_A'], 'A')}, {len(amps)} pulses{loop}"
+                    if amps else "")
         if not state["amplitude_bidirectional"]:
             warnings.append("One-way sweep — turn on 'Sweep up then back down' for a "
                             "hysteresis loop; the sweep is what sets each pulse's starting "
@@ -420,12 +419,9 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         errors.append("Pulse width must be > 0 s.")
     if state["pulse_compliance_V"] <= 0:
         errors.append("Pulse compliance must be > 0 V.")
-    info.append("Hardware-timed write pulse (WAVE square, one cycle) — no independent rise/fall "
-               "control, and the true floor is range/load-dependent. Check "
-               "pulse_width_measured_s on the first run, and read the module docstring's "
-               "'How the write pulse works' section: Joule heating scales as I²R·t, so a slower "
-               "pulse at switching current can be far hotter than the 4200A-PMU variants' ns "
-               "pulse. Start well below the expected switching current.")
+    info.append("Write pulse: 6221 WAVE, one cycle — no rise/fall control; check "
+                "pulse_width_measured_s on the first run. Joule heating ∝ I²R·t: start well below "
+                "the switching current")
 
     # read (6221 AC + MFLI)
     sense_currents = state.get("sense_currents_A", [])
@@ -485,16 +481,14 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     n_currents = max(1, len(currents))
     n_sense = max(1, len(sense_currents))
     n_files = n_currents * n_sense
-    info.append(f"{n} amplitudes, one pulse each"
-                + (f", × {n_files} files ({n_currents} assist current(s) x {n_sense} sense "
-                   f"current(s)) = {n * n_files} total points"
-                   if n_files > 1 else ""))
-    info.extend(run_costs(state).lines("Estimated run time"))
-    info.append(f"For P(V) / I50 statistics, re-run this sweep several times.")
+    info.append(f"Points: {n * n_files} — one pulse each"
+                + (f"; {n} amplitudes × {n_files} files ({n_currents} assist × {n_sense} "
+                   "sense current(s))" if n_files > 1 else ""))
+    info.extend(run_costs(state).lines())
     if sense_currents:
         info.append(f"AC excitation: {format_si(sense_currents[0], 'A')} peak @ "
-                    f"{state['frequency_Hz']:g} Hz, {state['harmonic']}f read, phase marker on "
-                    f"Trigger Link pin {state['phasemarker_line']} → MFLI Aux In "
+                    f"{state['frequency_Hz']:g} Hz — {state['harmonic']}f read; phase marker "
+                    f"Trigger Link {state['phasemarker_line']} → MFLI Aux In "
                     f"{state['aux_input_ch'] + 1}")
 
     if state["pll_demod_index"] == state["demod_index"]:
@@ -505,21 +499,17 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
 
     if len(currents) > 1:
         cur_str = ", ".join(f"{i:g}" for i in currents)
-        info.append(f"Assist field: {len(currents)} magnet currents ({cur_str} A) — each gets "
-                    "its own complete amplitude sweep and its own file (measured live by the "
-                    "475). Include a negative value for the ±H_z control.")
+        info.append(f"Magnet currents: {cur_str} A — one sweep + file each, field read by 475")
     elif currents:
-        info.append(f"Static field via magnet current {currents[0]:g} A "
-                    "(measured live by the 475). Comma-separate more values to scan the "
-                    "assist field, or add the opposite sign for the ±H_z control.")
+        info.append(f"Magnet current: {currents[0]:g} A — static, field read by 475")
     info.append(field_direction_summary_line(state["field_theta_deg"], state.get("field_phi_deg")))
 
     if state["enable_temperature"]:
         uids = parse_sensor_uids(state["temperature_sensor_uids"])
-        info.append(f"Temperature logged via MercuryiTC ({', '.join(uids) or 'no UID set'})."
-                    if uids else "Temperature on but no sensor UID — columns stay empty.")
+        info.append(f"Temperature: MercuryiTC {', '.join(uids)}" if uids
+                    else "Temperature: no sensor UID — columns stay empty")
     else:
-        info.append("Temperature logging off.")
+        info.append("Temperature: off")
 
     return info, warnings, errors
 

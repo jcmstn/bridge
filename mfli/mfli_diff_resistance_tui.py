@@ -82,6 +82,7 @@ from instruments.run_time import (
     GPIB_TXN_S, MDS_SYNC_S, PER_FILE_S, PER_RUN_S, POINT_OVERHEAD_S, TEMP_READ_S,
     RunCost,
 )
+from instruments.summary_lines import summary_markup
 from instruments.tui_common import (
     MeasurementApp,
     MeasurementRunScreen,
@@ -114,12 +115,7 @@ MEASUREMENT_TYPE = "DIFFR"
 # One-paragraph blurb + wiring schematic — shown on this program's card in
 # bridge_tui.py, and the description also on its web page.
 MFLI_DIFF_RESISTANCE_DESCRIPTION = (
-    "Superimposes a small AC excitation on top of a DC bias applied to the DUT, "
-    "sweeps that DC bias, and records the complex ratio dV/dI at each point — an "
-    "'I-V-curve-equivalent' characterization far more informative than a "
-    "single-point resistance for anything nonlinear (contacts, tunnel junctions, "
-    "diodes, gated 2D systems). No magnet is involved; the bias sweep is the "
-    "whole measurement."
+    "MFLI: AC excitation on a swept DC bias → dV/dI. No magnet."
 )
 
 MFLI_DIFF_RESISTANCE_SCHEMATIC = """\
@@ -314,11 +310,8 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
 
     if state["series_R_ohm"] > 0:
         I = state["ac_amplitude_V"] / state["series_R_ohm"]
-        info.append(
-            f"AC excitation current ≈ {format_si(I, 'A')} if R_series >> R_DUT "
-            "(rough order-of-magnitude only, for sizing the Current Input range "
-            "below — the actual I is measured directly, not derived from this)."
-        )
+        info.append(f"AC current: ≈ {format_si(I, 'A')} — if R_series ≫ R_DUT; "
+                    "for sizing the Current Input range, I is measured")
     else:
         errors.append("Series resistor must be > 0 Ω.")
 
@@ -332,8 +325,7 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
             )
 
     required_peak_V = max(abs(state["bias_min_V"]), abs(state["bias_max_V"])) + state["ac_amplitude_V"]
-    info.append(f"Output must cover ±{required_peak_V:.3g} V (bias + AC amplitude) — "
-                "device auto-ranges to the nearest valid range.")
+    info.append(f"Output span: ±{required_peak_V:.3g} V — bias + AC, auto-ranged")
 
     if state["bias_min_V"] == state["bias_max_V"]:
         warnings.append("bias_min equals bias_max — sweep will repeat a single point.")
@@ -347,11 +339,11 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
                 f"({recommended_settle:g} s) — filter may not have settled."
             )
         else:
-            info.append(f"Settling ≥ 5×TC ({recommended_settle:g} s) ✓")
+            info.append(f"Settling: ✓ — ≥ 5×TC ({recommended_settle:g} s)")
 
         bw = 1.0 / (2 * math.pi * tc)
         min_rate = 4 * bw
-        info.append(f"Filter noise bandwidth ≈ {bw:.3g} Hz")
+        info.append(f"Noise bandwidth: ≈ {bw:.3g} Hz")
         if state["sample_rate_Hz"] < min_rate:
             warnings.append(
                 f"Sample rate {state['sample_rate_Hz']:g} Sa/s may be low for this TC "
@@ -368,11 +360,9 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     except ValueError as exc:
         errors.append(str(exc))
         return info, warnings, errors      # don't model billions of points
-    info.append(
-        f"Bias sweep: {state['bias_min_V']:g} V → {state['bias_max_V']:g} V → "
-        f"{state['bias_min_V']:g} V, {total_points} points (bidirectional — reveals hysteresis)"
-    )
-    info.extend(run_costs(total_points, state).lines("Estimated total run time"))
+    info.append(f"Bias sweep: {state['bias_min_V']:g} → {state['bias_max_V']:g} → "
+                f"{state['bias_min_V']:g} V — {total_points} points")
+    info.extend(run_costs(total_points, state).lines())
 
     if state["enable_temperature"]:
         uids = parse_sensor_uids(state["temperature_sensor_uids"])
@@ -380,10 +370,9 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
             warnings.append("Temperature logging is on but no sensor UID is set — "
                              "temperature columns will be empty.")
         else:
-            info.append(f"Temperature logged via MercuryiTC ({', '.join(uids)}) — "
-                         "if unreachable, columns are simply left empty.")
+            info.append(f"Temperature: MercuryiTC {', '.join(uids)} — empty if unreachable")
     else:
-        info.append("Temperature logging off.")
+        info.append("Temperature: off")
 
     return info, warnings, errors
 
@@ -725,10 +714,10 @@ class MFLIDiffResistanceApp(MeasurementApp):
     #body { height: 1fr; }
     #form { width: 1fr; padding: 1 2; }
     #sidebar { width: 48; border-left: solid $primary; padding: 1 2; overflow-y: auto; }
-    .field-label { text-style: bold; }
-    .hint { text-style: italic; color: $text-muted; }
-    .switch-row { height: 3; }
-    .switch-row Label { margin-left: 1; content-align: left middle; height: 3; }
+    .field-label { text-style: bold; width: 100%; }
+    .hint { text-style: italic; color: $text-muted; width: 100%; }
+    .switch-row { height: auto; }
+    .switch-row Label { padding-left: 1; content-align: left middle; width: 1fr; height: auto; min-height: 3; }
     .sidebar-title { text-style: bold underline; margin-bottom: 1; }
     #actionbar { height: 3; align: center middle; }
 
@@ -760,7 +749,7 @@ class MFLIDiffResistanceApp(MeasurementApp):
             with VerticalScroll(id="form"):
                 yield identity_bar(DEFAULTS, _DEFAULT_DATA_DIR, self.data_root,
                                    temperature_label="Temperature setpoint (K, optional)",
-                                   temperature_hint="Drives only the filename's T###K token.",
+                                   temperature_hint="Filename T###K token only.",
                                    cell_classes=None)
 
                 # ── Tier 1: what defines this run — always visible ──────────
@@ -771,24 +760,22 @@ class MFLIDiffResistanceApp(MeasurementApp):
                         field("bias_max_V", "DC bias sweep max (V)", DEFAULTS["bias_max_V"]),
                         field("n_points", "Points per sweep direction",
                               DEFAULTS["n_points"], kind="integer",
-                              hint="Bidirectional: min → max → min (reveals hysteresis).",
+                              hint="Swept min → max → min.",
                               validators=[Number(minimum=2, failure_description="must be ≥ 2")]),
                     )
                     yield card(
                         "Excitation",
                         field("frequency_Hz", "AC excitation frequency (Hz)",
                               DEFAULTS["frequency_Hz"],
-                              hint="Avoid exact multiples of 50/60 Hz (mains pickup).",
+                              hint="Avoid multiples of 50/60 Hz.",
                               validators=[Number(minimum=1e-3, failure_description="must be > 0")]),
                         field("ac_amplitude_V", "AC excitation amplitude (V, peak)",
                               DEFAULTS["ac_amplitude_V"],
-                              hint="Keep small vs. any bias step over which R_diff changes "
-                                   "— this is a small-signal (linear-response) measurement.",
+                              hint="Keep small: linear response.",
                               validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
                         field("series_R_ohm", "Series resistor (Ω)",
                               DEFAULTS["series_R_ohm"],
-                              hint="Current-limiting/protection resistor — not used to compute I, "
-                                   "the leader's Current Input reads DUT current directly.",
+                              hint="Protection only — I is measured, not computed.",
                               validators=[Number(minimum=1.0, failure_description="must be > 0")]),
                     )
                     yield card(
@@ -805,7 +792,7 @@ class MFLIDiffResistanceApp(MeasurementApp):
                             "Lock-in filter",
                             field("time_constant_s", "Filter time constant (s)",
                                   DEFAULTS["time_constant_s"],
-                                  hint="Bigger = quieter but slower & longer settling.",
+                                  hint="Bigger = quieter but slower.",
                                   validators=[Number(minimum=1e-6, failure_description="must be > 0")]),
                             select_field("order", "Filter order", list(range(1, 9)),
                                          int(DEFAULTS["order"])),
@@ -816,7 +803,7 @@ class MFLIDiffResistanceApp(MeasurementApp):
                             "Input ranges",
                             field("current_input_range_A", "Current-sense input range (A)",
                                   DEFAULTS["current_input_range_A"],
-                                  hint="Leader's Current Input 1 — size to the actual DUT current.",
+                                  hint="Leader Current Input 1 — size to DUT current.",
                                   validators=[Number(minimum=1e-6, failure_description="must be > 0")]),
                             field("voltage_input_range_V", "Voltage-sense input range (V)",
                                   DEFAULTS["voltage_input_range_V"],
@@ -830,7 +817,7 @@ class MFLIDiffResistanceApp(MeasurementApp):
                             "Acquisition timing",
                             field("settling_time_s", "Settling time per bias point (s)",
                                   DEFAULTS["settling_time_s"],
-                                  hint="Rule of thumb: ≥ 5 × time constant.",
+                                  hint="≥ 5 × TC.",
                                   validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
                             field("n_averages", "Samples to average per point (each demod)",
                                   DEFAULTS["n_averages"], kind="integer",
@@ -856,11 +843,10 @@ class MFLIDiffResistanceApp(MeasurementApp):
                             "Temperature controller",
                             field("temperature_visa_resource", "MercuryiTC VISA resource",
                                   DEFAULTS["temperature_visa_resource"], kind="text",
-                                  hint="e.g. TCPIP0::<ip>::7020::SOCKET or an ASRL resource."),
+                                  hint="e.g. TCPIP0::<ip>::7020::SOCKET or ASRL."),
                             field("temperature_sensor_uids", "Sensor board UID(s)",
                                   DEFAULTS["temperature_sensor_uids"], kind="text",
-                                  hint="1 or 2 board UIDs, comma-separated, e.g. 'MB1.T1, DB5.T1'. "
-                                       "Missing readings just leave the column empty."),
+                                  hint="1-2 UIDs, e.g. MB1.T1, DB5.T1."),
                             muted=True,
                         )
 
@@ -898,17 +884,7 @@ class MFLIDiffResistanceApp(MeasurementApp):
             f"File:  [bold]{preview}[/bold]" if preview
             else "[dim]File:  (choose a sample and device to preview the filename)[/dim]"
         )
-        lines: list[str] = []
-        if errors:
-            lines.append("[bold red]Blocking issues[/bold red]")
-            lines += [f"  [red]✗ {e}[/red]" for e in errors]
-        if warnings:
-            lines.append("[bold yellow]Warnings[/bold yellow]")
-            lines += [f"  [yellow]⚠ {w}[/yellow]" for w in warnings]
-        lines.append("[bold]Derived values[/bold]")
-        lines += [f"  [dim]•[/dim] {i}" for i in info]
-
-        self.query_one("#summary", Static).update("\n".join(lines))
+        self.query_one("#summary", Static).update(summary_markup(info, warnings, errors))
         self.query_one("#start", Button).disabled = bool(errors)
 
     # ── Start ────────────────────────────────────────────────────────────────

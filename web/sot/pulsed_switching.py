@@ -168,39 +168,35 @@ def page() -> None:
                     fld("pulse_current_stop_A", "Pulse current stop (A)")
                     fld("pulse_current_step_A", "Pulse current step (A)", "One pulse per step.")
                     fld("wave_pulse_width_s", "Requested pulse width (s)",
-                        "No rise/fall control; actual width is measured and logged as "
-                        "pulse_width_measured_s.")
+                        "No rise/fall control. Measured width is logged.")
                     fld("pulse_compliance_V", "Pulse voltage compliance (V)")
 
                 with param_card("Delayed read"):
                     fld("delay_after_pulse_s", "Delay after pulse (s)", "Wait between pulse end and the read.")
                     fld("sense_current_values", "6221 read current (A)",
-                        "DC read: ±I sense current; lock-in read: AC amplitude, peak. Keep well below "
-                        "the switching current. Single value, or comma-separated list — one complete "
-                        "amplitude sweep runs per value, each saved to its own file.")
+                        "DC: ±I; lock-in: AC peak. Comma-separate for one sweep + file per value.")
 
                 with param_card("DC R_xy read (6221 ±I + 2182)") as mode_cards["mode_dc_read"]:
                     fld("n_reversals", "Reversal pairs per read")
                     fld("settle_after_enable_s", "6221 settle after enable (s)")
 
                 with param_card("Lock-in read (6221 AC + MFLI)") as mode_cards["mode_lockin_read"]:
-                    fld("frequency_Hz", "AC excitation frequency (Hz)", "Avoid exact multiples of 50/60 Hz.")
+                    fld("frequency_Hz", "AC excitation frequency (Hz)", "Avoid multiples of 50/60 Hz.")
                     fld("n_averages", "MFLI samples averaged per read")
                     fld("lock_settle_s", "Settle after PLL lock (s)")
                     fld("lock_timeout_s", "PLL lock timeout (s)",
-                        "A timeout is logged, not fatal — the row is tagged reference_locked=False.")
+                        "Timeout is logged, not fatal.")
 
                 with param_card("Lock-in harmonic (6221 pulse)") as mode_cards["mode_sot1i_harmonic"]:
                     fld("harmonic", "Harmonic to lock in on",
-                        "2 = standard harmonic-Hall SOT signal (default). 1 = resistive AHE/PHE.")
+                        "2 = SOT harmonic Hall, 1 = AHE/PHE.")
 
                 with param_card("Static field (Kepco magnet)"):
                     fld("magnet_current_A", "Assist current(s) (A)",
-                        "One value, or comma-separated for several — each gets its own complete "
-                        "sweep and file. Add the opposite sign for ±H_z.")
+                        "Comma-separate for one sweep + file per value.")
                     fld("field_theta_deg", "θ — mount tilt from OOP (°)",
-                        "0° = out-of-plane, 90° = in-plane. Recorded, not set.")
-                    fld("field_phi_deg", "φ — azimuth from current axis (°)", "Optional. Meaningless when θ=0°.")
+                        "0° = out-of-plane. Recorded, not set.")
+                    fld("field_phi_deg", "φ — azimuth from current axis (°)", "Optional. Ignored when θ=0°.")
                     with ui.row().classes("gap-2 mb-1"):
                         ui.button("xy", on_click=lambda: inputs["field_theta_deg"].set_value(90)).props("dense outline")
                         ui.button("zx", on_click=lambda: optional_inputs["field_phi_deg"].set_value(0)).props("dense outline")
@@ -221,31 +217,28 @@ def page() -> None:
                             "GPIB0::17::INSTR  or  TCPIP0::<ip>::1225::SOCKET")
                         fld("pmu_library", "KULT pulse library", "Confirm against the `UL` output in the run log.")
                         fld("pmu_module", "KULT pulse module name",
-                            "Default = instruments/kult/bridge_sot_pulse.c — compile it in KULT first.")
+                            "instruments/kult/bridge_sot_pulse.c, compiled in KULT.")
                         fld("pmu_channel", "PMU channel")
                         fld("pmu_id", "PMU card name", "e.g. PMU1 (lowest-numbered slot).")
                         fld("pmu_return_names", "Module return params (comma-sep)",
-                            "Order must match the module's outputs. Blank = none, and the measured "
-                            "pulse columns stay empty.")
+                            "Must match the module's output order. Blank = none.")
                         fld("pmu_v_range_V", "PMU voltage range (V)", "10 or 40.")
                         fld("pmu_i_range_A", "PMU current measure range (A)",
-                            "With an RPM on the 10 V range the ceiling is 0.01 A.")
+                            "RPM on the 10 V range: max 0.01 A.")
                         fld("pmu_v_limit_V", "Pulse amplitude software limit (V)")
                         fld("pulse_delay_s", "Pulse delay before rise (s)", "Dead time before the rise. Normally 0.")
                         fld("n_pulses", "Pulses per point (burst-average)",
-                            "PMU averages N identical pulses for the measured V/I readback only. Leave "
-                            "at 1 for switching — N means N switching attempts per amplitude.")
+                            "Keep 1: N pulses = N switching attempts.")
                         fld("pmu_sample_rate", "PMU sample rate (S/s)")
                         fld("pmu_meas_start_perc", "Spot-mean window start (0-1)")
                         fld("pmu_meas_stop_perc", "Spot-mean window stop (0-1)")
                         fld("pmu_dut_res_ohm", "DUT resistance for load-line (Ω)",
-                            "Set near the real channel R (4-probe it first). Also drives the summary's "
-                            "current estimate.")
+                            "Real channel R (4-probe). Drives the current estimate.")
 
                     with stable_card("Keithley 6221"):
                         fld("source_visa_resource", "6221 VISA resource")
                         fld("compliance_V", "6221 compliance (V)",
-                            "Keep low — caps what an open contact can put on the shared bus. Read needs < 1 V.")
+                            "Keep low (read needs < 1 V) — protects the shared bus.")
 
                     with stable_card("Keithley 2182 + DC read") as mode_cards["mode_dc_instruments"]:
                         fld("voltmeter_visa_resource", "2182 (Hall voltage)")
@@ -261,8 +254,7 @@ def page() -> None:
                         fld("osc_index", "Oscillator locked by the PLL")
                         fld("extref_index", "ExtRef/PLL module index")
                         fld("pll_demod_index", "PLL phase-detector demod index (≠ the read demods)",
-                            "extrefs/N/adcselect is read-only on real firmware — the PLL is steered via "
-                            "THIS dedicated demod's own adcselect/oscselect instead.")
+                            "Dedicated PLL demod — not a read demod.")
                         automode_select = ui.select(_AUTOMODE_OPTIONS, value=int(d("automode")),
                                                     label="PLL bandwidth adaptation").classes("w-full")
                         ui.label(program.h2.AUTOMODE_HINT).classes("text-xs text-grey-6 -mt-2 mb-2")
@@ -276,22 +268,21 @@ def page() -> None:
                         switches["filter_sinc"] = bool_switch("Sinc filter (extra harmonic rejection)",
                                                               d("filter_sinc"))
                         fld("phasemarker_line", "Trigger Link phase-marker pin (1-6)",
-                            "Wire this pin to the MFLI's Aux In. Confirm it isn't the 6221's "
-                            "factory-default Trigger Link pin before assuming it's free.")
+                            "Wire to MFLI Aux In; check it isn't a 6221 default pin.")
 
                     with stable_card("MFLI demodulators (1f + 2f)") as mode_cards["mode_sot2h_demods"]:
                         fld("demod1_index", "1f demodulator index")
                         fld("demod2_index", "2f demodulator index",
-                            "Defaults skip index 0 — that's the PLL phase-detector demod above.")
+                            "Not the PLL demod index.")
 
                     with stable_card("MFLI demodulator") as mode_cards["mode_sot1i_demod"]:
                         fld("demod_index", "Demodulator index",
-                            "Default skips index 0 — that's the PLL phase-detector demod above.")
+                            "Not the PLL demod index.")
 
                     with stable_card("Kepco magnet + Lake Shore 475"):
                         fld("magnet_visa_resource", "Kepco VISA resource")
                         fld("current_limit_A", "Magnet current limit (A)",
-                            "Hard safety ceiling — independent of the supply's own range.")
+                            "Hard safety ceiling.")
                         fld("magnet_voltage_compliance_V", "Magnet voltage compliance (V)")
                         fld("ramp_step_A", "Magnet ramp step (A)")
                         fld("ramp_delay_s", "Magnet ramp delay (s)")

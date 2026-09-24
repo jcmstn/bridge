@@ -100,15 +100,13 @@ def page() -> None:
                 with param_card("Sense current (Keithley 6221)"):
                     inputs["sense_current_values"] = text_field(
                         "Sense current (A)", d("sense_current_values"),
-                        hint="Single value, or comma-separated list — one complete gate sweep "
-                             "runs per value, each saved to its own file and plotted together.")
+                        hint="Comma-separate for one sweep + file per value.")
 
                 with param_card("Field (Kepco magnet, optional)"):
                     switches["enable_field"] = bool_switch("Park field (Kepco magnet)", d("enable_field"))
                     inputs["field_current_values"] = text_field(
                         "Magnet current (A)", d("field_current_values"),
-                        hint="Single value, or comma-separated list — one complete gate sweep runs "
-                             "per value, each saved to its own file and plotted together.")
+                        hint="Comma-separate for one sweep + file per value.")
 
                 with param_card("Temperature logging"):
                     switches["enable_temperature"] = bool_switch(
@@ -136,14 +134,14 @@ def page() -> None:
                         inputs["magnet_visa_resource"] = text_field("Magnet VISA resource", d("magnet_visa_resource"))
                         inputs["gaussmeter_visa_resource"] = text_field(
                             "Gaussmeter VISA resource", d("gaussmeter_visa_resource"),
-                            hint="Lake Shore 475 — measures the actual field once parked.")
+                            hint="Lake Shore 475.")
                         inputs["temperature_visa_resource"] = text_field("MercuryiTC VISA resource", d("temperature_visa_resource"))
 
                     with stable_card("Source & gate limits"):
                         inputs["source_delay_s"] = num_field("6221 source delay (s)", float(d("source_delay_s")))
                         inputs["gate_voltage_limit_V"] = num_field(
                             "Gate voltage software limit (V)", float(d("gate_voltage_limit_V")),
-                            hint="Hard safety ceiling — independent of the sweep range above.")
+                            hint="Hard safety ceiling.")
                         inputs["gate_compliance_current_A"] = num_field("Gate leakage compliance (A)", float(d("gate_compliance_current_A")))
 
                     with stable_card("Magnet ramp safety"):
@@ -158,8 +156,7 @@ def page() -> None:
                         inputs["gaussmeter_read_delay_s"] = num_field("Delay between readings (s)", float(d("gaussmeter_read_delay_s")))
                         inputs["field_settle_tolerance_mT"] = num_field(
                             "Field-settle tolerance (mT)", float(d("field_settle_tolerance_mT")),
-                            hint="Advanced: after parking the magnet, wait until a short window of "
-                                 "gaussmeter readings spans less than this before the dwell above.")
+                            hint="Field settled when readings span less than this. Raise if parking stalls.")
                         inputs["temperature_sensor_uids"] = text_field("Sensor board UID(s)", d("temperature_sensor_uids"))
 
         with regions.summary:

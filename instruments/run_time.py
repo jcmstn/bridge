@@ -1,6 +1,6 @@
 """
-Run-time model — the numbers behind every program's "Estimated run time"
-==========================================================================
+Run-time model — the numbers behind every program's "Run time" estimate
+=========================================================================
 Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
 Created: 2026-09-21
 
@@ -28,7 +28,7 @@ Usage example:
     rc.each("reads", 0.5)
     rc.at("ramps", 10.0, 0)                 # one-off cost before point 0
     rc.tail("ramps", 10.0)                  # teardown after the last point (not on the bar)
-    info.extend(rc.lines())                 # → "Estimated run time ≈ 1m 42s (…)"
+    info.extend(rc.lines())                 # → "Run time: ≈ 1m 42s — …"
     ProgressBar(total=progress_total(rc, 41))
 """
 from __future__ import annotations
@@ -108,14 +108,14 @@ class RunCost:
     def total_s(self) -> float:
         return sum(self.points) + self.tail_s
 
-    def lines(self, prefix: str = "Estimated run time") -> list[str]:
+    def lines(self) -> list[str]:
         """Sidebar lines: total + breakdown, and a worst case if any wait is bounded."""
         parts = sorted(((v, k) for k, v in self.parts.items() if v >= 0.5), reverse=True)
         detail = " · ".join(f"{k} {format_duration(v)}" for v, k in parts[:5])
-        out = [f"{prefix} ≈ {format_duration(self.total_s)}" + (f"  ({detail})" if detail else "")]
+        out = [f"Run time: ≈ {format_duration(self.total_s)}" + (f" — {detail}" if detail else "")]
         if self.worst_extra_s >= 5.0:
-            out.append(f"  worst case ≈ {format_duration(self.total_s + self.worst_extra_s)} "
-                       f"if the bounded waits (field settle, PLL lock, ...) run into their timeouts")
+            out.append(f"Worst case: ≈ {format_duration(self.total_s + self.worst_extra_s)} "
+                       "— if settle / lock waits time out")
         return out
 
 

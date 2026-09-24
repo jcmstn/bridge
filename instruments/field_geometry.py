@@ -139,13 +139,13 @@ def field_direction_summary_line(theta_deg: Optional[float], phi_deg: Optional[f
     summary panel. Shared here so the wording doesn't drift across the six
     measurement modules that carry these fields."""
     if theta_deg is None:
-        return "Field direction unset — field_theta_deg/field_phi_deg columns left blank."
+        return "Field direction: unset — θ/φ columns left blank"
     phi_txt = f"{phi_deg:g}°" if phi_deg is not None else "unset"
     if theta_deg == 0:
-        return "Field fully out-of-plane (θ=0°) — φ irrelevant."
+        return "Field direction: θ=0° — out-of-plane"
     if theta_deg == 90:
-        return f"Field in-plane (θ=90°), φ={phi_txt} from current axis."
-    return f"Field tilted {theta_deg:g}° from out-of-plane, φ={phi_txt}."
+        return f"Field direction: θ=90°, φ={phi_txt} — in-plane, φ from current axis"
+    return f"Field direction: θ={theta_deg:g}°, φ={phi_txt}"
 
 
 def demo() -> None:

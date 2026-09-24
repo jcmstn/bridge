@@ -165,7 +165,7 @@ def test_hall_png_annotates_the_runs_own_sense_current(tmp_path) -> None:
         figs = _capture_figs(lambda: mod._save_measurement_png(
             _records(_hall, 1), tmp_path / "h.png", plan=plan))
         text = "\n".join(t.get_text() for t in figs[0].texts)
-        assert "Sense current: 2.000 mA" in text
+        assert "Sense current: 2 mA" in text
 
 
 def test_spin_valve_png_annotates_the_runs_own_sense_current_and_gate(tmp_path) -> None:
@@ -175,5 +175,5 @@ def test_spin_valve_png_annotates_the_runs_own_sense_current_and_gate(tmp_path) 
         figs = _capture_figs(lambda: mod._save_measurement_png(
             _records(_spin_valve, 1), tmp_path / "sv.png", plan=SimpleNamespace()))
         text = "\n".join(t.get_text() for t in figs[0].texts)
-        assert "Sense current: 2.000 mA" in text
-        assert "Gate voltage: 4.000 V" in text
+        assert "Sense current: 2 mA" in text
+        assert "Gate voltage: 4 V" in text

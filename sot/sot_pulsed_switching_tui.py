@@ -86,6 +86,7 @@ from instruments.run_time import (
     GPIB_TXN_S, PER_FILE_S, PER_RUN_S, POINT_OVERHEAD_S, TEMP_READ_S,
     RunCost,
 )
+from instruments.summary_lines import summary_markup
 from instruments.tui_common import (
     MeasurementApp,
     MeasurementRunScreen,
@@ -109,16 +110,9 @@ SETTINGS_PATH = _DEFAULT_DATA_DIR / "sot_pulsed_switching_tui_settings.json"
 MEASUREMENT_TYPE = "SOTPS"
 
 SOT_PULSED_DESCRIPTION = (
-    "SOT switching curve: ONE write pulse per amplitude into the main channel, then "
-    "after a fixed delay a small read of the Hall arms — at a static field held "
-    "slightly out of plane so the two in-plane remanent states read differently. "
-    "Write pulse: the 4200A PMU (ns, through RPM1; KULT module "
-    "instruments/kult/bridge_sot_pulse.c) or the 6221 WAVE (hardware-timed µs–ms). "
-    "Read: DC R_xy (6221 ±I, 2182, reversal-averaged) or the lock-in harmonic "
-    "(6221 AC + MFLI ExtRef-locked to its phase marker; 1f+2f with the PMU, one "
-    "chosen harmonic with the 6221 pulse). Make the amplitude list a full loop "
-    "(up then down) for the hysteresis; each assist-field / read current gets its "
-    "own complete sweep and file. Re-run for switching-probability statistics."
+    "Write: 4200A PMU (ns, RPM1, KULT bridge_sot_pulse) or 6221 WAVE (µs–ms). Read: "
+    "DC R_xy (6221 ±I + 2182) or lock-in (6221 AC + MFLI). Kepco static field, read "
+    "by Lake Shore 475."
 )
 
 # Wiring schematic — shown on this program's card in bridge_tui.py.
@@ -479,10 +473,10 @@ def _build_summary_ps(state: dict) -> tuple[list[str], list[str], list[str]]:
         if over_range:
             errors.append(f"Pulse amplitude(s) {over_range} V exceed the "
                           f"{state['pmu_v_range_V']:g} V PMU range.")
-        loop = " loop" if state["amplitude_bidirectional"] else ""
-        info.append(f"Amplitude sweep: {len(amps)} pulses "
-                    f"{state['amplitude_start_V']:g} → {state['amplitude_stop_V']:g} V "
-                    f"step {state['amplitude_step_V']:g}{loop}" if amps else "")
+        loop = ", up and back" if state["amplitude_bidirectional"] else ""
+        info.append(f"Amplitude sweep: {state['amplitude_start_V']:g} → "
+                    f"{state['amplitude_stop_V']:g} V — step {state['amplitude_step_V']:g} V, "
+                    f"{len(amps)} pulses{loop}" if amps else "")
         if not state["amplitude_bidirectional"]:
             warnings.append("One-way sweep — turn on 'Sweep up then back down' for a "
                             "hysteresis loop; the sweep is what sets each pulse's starting "
@@ -535,14 +529,12 @@ def _build_summary_ps(state: dict) -> tuple[list[str], list[str], list[str]]:
     n_currents = max(1, len(currents))
     n_sense = max(1, len(sense_currents))
     n_files = n_currents * n_sense
-    info.append(f"{n} amplitudes, one pulse each"
-                + (f", × {n_files} files ({n_currents} assist current(s) x {n_sense} sense "
-                   f"current(s)) = {n * n_files} total points"
-                   if n_files > 1 else ""))
-    info.extend(run_costs(state).lines("Estimated run time"))
-    info.append(f"For P(V) / I50 statistics, re-run this sweep several times.")
+    info.append(f"Points: {n * n_files} — one pulse each"
+                + (f"; {n} amplitudes × {n_files} files ({n_currents} assist × {n_sense} "
+                   "sense current(s))" if n_files > 1 else ""))
+    info.extend(run_costs(state).lines())
     info.append(f"PMU module: {state['pmu_library']}/{state['pmu_module'] or '<unset>'} "
-                f"({state['pmu_id']} ch {state['pmu_channel']})")
+                f"— {state['pmu_id']} ch {state['pmu_channel']}")
 
     # Display-only current estimate off the load-line DUT resistance. It is a hint
     # for picking amplitudes; the honest pulse axis is the module's measured
@@ -551,10 +543,9 @@ def _build_summary_ps(state: dict) -> tuple[list[str], list[str], list[str]]:
     if r_ch > 0 and amps and sense_currents:
         i_lo, i_hi = min(amps) / r_ch, max(amps) / r_ch
         i_sense0 = sense_currents[0]
-        info.append(f"At DUT R ≈ {r_ch:g} Ω: pulses ≈ "
-                    f"{format_si(i_lo, 'A')}…{format_si(i_hi, 'A')}; 6221 read current "
-                    f"{format_si(i_sense0, 'A')} → "
-                    f"≈ {format_si(i_sense0 * r_ch, 'V')} across the channel")
+        info.append(f"Pulse current: ≈ {format_si(i_lo, 'A')}…{format_si(i_hi, 'A')} — at "
+                    f"R ≈ {r_ch:g} Ω; read {format_si(i_sense0, 'A')} → "
+                    f"≈ {format_si(i_sense0 * r_ch, 'V')} across channel")
         if (state["pmu_v_range_V"] == 10.0
                 and max(abs(i_lo), abs(i_hi)) > _RPM_10V_IMEAS_MAX_A
                 and state["pmu_i_range_A"] <= _RPM_10V_IMEAS_MAX_A):
@@ -566,21 +557,17 @@ def _build_summary_ps(state: dict) -> tuple[list[str], list[str], list[str]]:
 
     if len(currents) > 1:
         cur_str = ", ".join(f"{i:g}" for i in currents)
-        info.append(f"Assist field: {len(currents)} magnet currents ({cur_str} A) — each gets "
-                    "its own complete amplitude sweep and its own file (measured live by the "
-                    "475). Include a negative value for the ±H_z control.")
+        info.append(f"Magnet currents: {cur_str} A — one sweep + file each, field read by 475")
     elif currents:
-        info.append(f"Static field via magnet current {currents[0]:g} A "
-                    "(measured live by the 475). Comma-separate more values to scan the "
-                    "assist field, or add the opposite sign for the ±H_z control.")
+        info.append(f"Magnet current: {currents[0]:g} A — static, field read by 475")
     info.append(field_direction_summary_line(state["field_theta_deg"], state.get("field_phi_deg")))
 
     if state["enable_temperature"]:
         uids = parse_sensor_uids(state["temperature_sensor_uids"])
-        info.append(f"Temperature logged via MercuryiTC ({', '.join(uids) or 'no UID set'})."
-                    if uids else "Temperature on but no sensor UID — columns stay empty.")
+        info.append(f"Temperature: MercuryiTC {', '.join(uids)}" if uids
+                    else "Temperature: no sensor UID — columns stay empty")
     else:
-        info.append("Temperature logging off.")
+        info.append("Temperature: off")
 
     return info, warnings, errors
 
@@ -1091,10 +1078,10 @@ class SOTPulsedSwitchingApp(MeasurementApp):
     .stable-card .field-label { color: $text-muted; text-style: none; }
     .card-title { text-style: bold underline; margin-bottom: 1; }
     .field { margin-bottom: 1; }
-    .field-label { text-style: bold; }
-    .hint { text-style: italic; color: $text-muted; }
-    .switch-row { height: 3; }
-    .switch-row Label { margin-left: 1; content-align: left middle; height: 3; }
+    .field-label { text-style: bold; width: 100%; }
+    .hint { text-style: italic; color: $text-muted; width: 100%; }
+    .switch-row { height: auto; }
+    .switch-row Label { padding-left: 1; content-align: left middle; width: 1fr; height: auto; min-height: 3; }
     .plane-btn-row { height: 3; margin-bottom: 1; }
     .plane-btn-row Button { min-width: 5; margin-right: 1; }
     .field-diagram { color: $text-muted; margin-top: 1; }
@@ -1152,8 +1139,7 @@ class SOTPulsedSwitchingApp(MeasurementApp):
                               hint="One pulse per step."),
                         field("wave_pulse_width_s", "Requested pulse width (s)",
                               DEFAULTS["wave_pulse_width_s"],
-                              hint="No rise/fall control; actual width is measured and logged "
-                                   "as pulse_width_measured_s. See the module docstring."),
+                              hint="No rise/fall control. Measured width is logged."),
                         field("pulse_compliance_V", "Pulse voltage compliance (V)",
                               DEFAULTS["pulse_compliance_V"]),
                         id="mode_6221_pulse",
@@ -1166,10 +1152,7 @@ class SOTPulsedSwitchingApp(MeasurementApp):
                               hint="Wait between pulse end and the read."),
                         field("sense_current_values", "6221 read current (A)",
                               DEFAULTS["sense_current_values"], kind="text",
-                              hint="DC read: ±I sense current; lock-in read: AC amplitude, peak. "
-                                   "Keep well below the switching current. Single value, or "
-                                   "comma-separated list — one complete amplitude sweep runs "
-                                   "per value, each saved to its own file."),
+                              hint="DC: ±I; lock-in: AC peak. Comma-separate for one sweep + file per value."),
                     )
                     yield card(
                         "DC R_xy read (6221 ±I + 2182)",
@@ -1185,7 +1168,7 @@ class SOTPulsedSwitchingApp(MeasurementApp):
                         "Lock-in read (6221 AC + MFLI)",
                         field("frequency_Hz", "AC excitation frequency (Hz)",
                               DEFAULTS["frequency_Hz"],
-                              hint="Avoid exact multiples of 50/60 Hz."),
+                              hint="Avoid multiples of 50/60 Hz."),
                         field("n_averages", "MFLI samples averaged per read",
                               DEFAULTS["n_averages"], kind="integer",
                               validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
@@ -1195,32 +1178,29 @@ class SOTPulsedSwitchingApp(MeasurementApp):
                         field("lock_timeout_s", "PLL lock timeout (s)",
                               DEFAULTS["lock_timeout_s"],
                               validators=[Number(minimum=0.0, failure_description="must be ≥ 0")],
-                              hint="A timeout is logged, not fatal — the row is tagged "
-                                   "reference_locked=False."),
+                              hint="Timeout is logged, not fatal."),
                         id="mode_lockin_read",
                     )
                     yield card(
                         "Lock-in harmonic (6221 pulse)",
                         field("harmonic", "Harmonic to lock in on", DEFAULTS["harmonic"],
                               kind="integer",
-                              hint="2 = standard harmonic-Hall SOT signal (default). "
-                                   "1 = resistive AHE/PHE."),
+                              hint="2 = SOT harmonic Hall, 1 = AHE/PHE."),
                         id="mode_sot1i_harmonic",
                     )
                     yield card(
                         "Static field (Kepco magnet)",
                         field("magnet_current_A", "Assist current(s) (A)",
                               DEFAULTS["magnet_current_A"], kind="text",
-                              hint="One value, or comma-separated for several — each gets its "
-                                   "own complete sweep and file. Add the opposite sign for ±H_z."),
+                              hint="Comma-separate for one sweep + file per value."),
                         field("field_theta_deg", "θ — mount tilt from OOP (°)",
                               DEFAULTS["field_theta_deg"],
                               validators=[Number(0, 180, failure_description="0-180°")],
-                              hint="0° = out-of-plane, 90° = in-plane. Recorded, not set."),
+                              hint="0° = out-of-plane. Recorded, not set."),
                         field("field_phi_deg", "φ — azimuth from current axis (°)",
                               DEFAULTS["field_phi_deg"], kind="number", valid_empty=True,
                               validators=[Number(0, 360, failure_description="0-360°")],
-                              hint="Optional. Meaningless when θ=0°."),
+                              hint="Optional. Ignored when θ=0°."),
                         Horizontal(
                             Button("xy", id="plane_xy", classes="plane-btn"),
                             Button("zx", id="plane_zx", classes="plane-btn"),
@@ -1252,20 +1232,18 @@ class SOTPulsedSwitchingApp(MeasurementApp):
                                   hint="Confirm against the `UL` output in the run log."),
                             field("pmu_module", "KULT pulse module name", DEFAULTS["pmu_module"],
                                   kind="text",
-                                  hint="Default = instruments/kult/bridge_sot_pulse.c — compile "
-                                       "it in KULT first (see that folder's README)."),
+                                  hint="instruments/kult/bridge_sot_pulse.c, compiled in KULT."),
                             field("pmu_channel", "PMU channel", DEFAULTS["pmu_channel"], kind="integer"),
                             field("pmu_id", "PMU card name", DEFAULTS["pmu_id"], kind="text",
                                   hint="e.g. PMU1 (lowest-numbered slot)."),
                             field("pmu_return_names", "Module return params (comma-sep)",
                                   DEFAULTS["pmu_return_names"], kind="text",
-                                  hint="Order must match the module's outputs. Blank = none, "
-                                       "and the measured pulse columns stay empty."),
+                                  hint="Must match the module's output order. Blank = none."),
                             field("pmu_v_range_V", "PMU voltage range (V)",
                                   DEFAULTS["pmu_v_range_V"], hint="10 or 40."),
                             field("pmu_i_range_A", "PMU current measure range (A)",
                                   DEFAULTS["pmu_i_range_A"],
-                                  hint="With an RPM on the 10 V range the ceiling is 0.01 A."),
+                                  hint="RPM on the 10 V range: max 0.01 A."),
                             field("pmu_v_limit_V", "Pulse amplitude software limit (V)",
                                   DEFAULTS["pmu_v_limit_V"]),
                             field("pulse_delay_s", "Pulse delay before rise (s)",
@@ -1274,9 +1252,7 @@ class SOTPulsedSwitchingApp(MeasurementApp):
                                   hint="Dead time before the rise. Normally 0."),
                             field("n_pulses", "Pulses per point (burst-average)",
                                   DEFAULTS["n_pulses"], kind="integer",
-                                  hint="PMU averages N identical pulses for the measured V/I "
-                                       "readback only. Leave at 1 for switching — N means N "
-                                       "switching attempts per amplitude."),
+                                  hint="Keep 1: N pulses = N switching attempts."),
                             field("pmu_sample_rate", "PMU sample rate (S/s)",
                                   DEFAULTS["pmu_sample_rate"]),
                             field("pmu_meas_start_perc", "Spot-mean window start (0-1)",
@@ -1285,8 +1261,7 @@ class SOTPulsedSwitchingApp(MeasurementApp):
                                   DEFAULTS["pmu_meas_stop_perc"]),
                             field("pmu_dut_res_ohm", "DUT resistance for load-line (Ω)",
                                   DEFAULTS["pmu_dut_res_ohm"],
-                                  hint="Set near the real channel R (4-probe it first). "
-                                       "Also drives the sidebar current estimate."),
+                                  hint="Real channel R (4-probe). Drives the current estimate."),
                             muted=True,
                             id="mode_pmu_config",
                         )
@@ -1295,8 +1270,7 @@ class SOTPulsedSwitchingApp(MeasurementApp):
                             field("source_visa_resource", "6221 VISA resource",
                                   DEFAULTS["source_visa_resource"], kind="text"),
                             field("compliance_V", "6221 compliance (V)", DEFAULTS["compliance_V"],
-                                  hint="Keep low — caps what an open contact can put on the "
-                                       "shared bus. Read needs < 1 V."),
+                                  hint="Keep low (read needs < 1 V) — protects the shared bus."),
                             muted=True,
                         )
                         yield card(
@@ -1326,9 +1300,7 @@ class SOTPulsedSwitchingApp(MeasurementApp):
                                   kind="integer"),
                             field("pll_demod_index", "PLL phase-detector demod index (≠ 1f/2f demods)",
                                   DEFAULTS["pll_demod_index"], kind="integer",
-                                  hint="extrefs/N/adcselect is read-only on real firmware — the PLL "
-                                       "is steered via THIS dedicated demod's own adcselect/oscselect "
-                                       "instead. Must differ from both demod indices below."),
+                                  hint="Dedicated PLL demod — not a read demod."),
                             select_field("automode", "PLL bandwidth adaptation",
                                   h2.AUTOMODE_OPTIONS, int(DEFAULTS["automode"]),
                                   hint=h2.AUTOMODE_HINT),
@@ -1349,9 +1321,7 @@ class SOTPulsedSwitchingApp(MeasurementApp):
                                   DEFAULTS["filter_sinc"]),
                             field("phasemarker_line", "Trigger Link phase-marker pin (1-6)",
                                   DEFAULTS["phasemarker_line"], kind="integer",
-                                  hint="Wire this pin to the MFLI's Aux In. Confirm it isn't the "
-                                       "6221's factory-default Trigger Link pin before assuming "
-                                       "it's free."),
+                                  hint="Wire to MFLI Aux In; check it isn't a 6221 default pin."),
                             muted=True,
                             id="mode_mfli",
                         )
@@ -1361,8 +1331,7 @@ class SOTPulsedSwitchingApp(MeasurementApp):
                                   kind="integer"),
                             field("demod2_index", "2f demodulator index", DEFAULTS["demod2_index"],
                                   kind="integer",
-                                  hint="Defaults skip index 0 — that's the PLL phase-detector demod "
-                                       "above. See the module docstring's 'Bench-verify' section."),
+                                  hint="Not the PLL demod index."),
                             muted=True,
                             id="mode_sot2h_demods",
                         )
@@ -1370,8 +1339,7 @@ class SOTPulsedSwitchingApp(MeasurementApp):
                             "MFLI demodulator",
                             field("demod_index", "Demodulator index", DEFAULTS["demod_index"],
                                   kind="integer",
-                                  hint="Default skips index 0 — that's the PLL phase-detector demod "
-                                       "above. See the module docstring's 'Bench-verify' section."),
+                                  hint="Not the PLL demod index."),
                             muted=True,
                             id="mode_sot1i_demod",
                         )
@@ -1427,16 +1395,7 @@ class SOTPulsedSwitchingApp(MeasurementApp):
             f"File:  [bold]{preview}[/bold]" if preview
             else "[dim]File:  (choose a sample and device to preview)[/dim]")
 
-        lines: list[str] = []
-        if errors:
-            lines.append("[bold red]Blocking issues[/bold red]")
-            lines += [f"  [red]✗ {e}[/red]" for e in errors]
-        if warnings:
-            lines.append("[bold yellow]Warnings[/bold yellow]")
-            lines += [f"  [yellow]⚠ {w}[/yellow]" for w in warnings]
-        lines.append("[bold]Derived values[/bold]")
-        lines += [f"  [dim]•[/dim] {i}" for i in info if i]
-        self.query_one("#summary", Static).update("\n".join(lines))
+        self.query_one("#summary", Static).update(summary_markup(info, warnings, errors))
         self.query_one("#start", Button).disabled = bool(errors)
 
         theta = None if parse_errors else state.get("field_theta_deg")

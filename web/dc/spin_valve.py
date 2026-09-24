@@ -96,33 +96,25 @@ def page() -> None:
                     inputs["sweep_rows"] = textarea_field(
                         "Sweep rows: start, stop, points (one per line)",
                         d("sweep_rows"),
-                        hint="Adjacent rows sharing a boundary value are merged, not duplicated.")
+                        hint="Shared boundary points are merged.")
                     switches["bidirectional_sweep"] = bool_switch(
                         "Bidirectional (retrace the merged rows)", d("bidirectional_sweep"))
 
                 with param_card("Sense current (Keithley 6221)"):
                     inputs["sense_current_values"] = text_field(
                         "Sense current (A)", d("sense_current_values"),
-                        hint="Reversed +I/-I each rep to cancel thermal-EMF offsets, unless "
-                             "reversal is switched off below. Single value, or comma-separated "
-                             "list — one complete field sweep runs per value, each saved to "
-                             "its own file.")
+                        hint="Comma-separate for one sweep + file per value.")
                     switches["reversal_enabled"] = bool_switch(
                         "Reverse current each rep (+I/-I)", d("reversal_enabled"))
                     ui.label(
-                        "Turn off for bias-direction-dependent devices (diodes, asymmetric "
-                        "spin-orbit stacks, ...) where reversing the current destroys rather "
-                        "than cleans up the signal — the sense current is then just held "
-                        "fixed at +I and plainly averaged instead."
+                        "Off for bias-direction-dependent devices: fixed +I, plain average."
                     ).classes("text-xs text-grey-6 -mt-1 mb-1")
 
                 with param_card("Gate voltage (Keithley 2400, optional)"):
                     switches["enable_gate"] = bool_switch("Enable gate (Keithley 2400)", d("enable_gate"))
                     inputs["gate_voltage_values"] = text_field(
                         "Gate voltage (V)", d("gate_voltage_values"),
-                        hint="Single value, or comma-separated list — one complete field "
-                             "sweep runs per value, each saved to its own file and plotted "
-                             "together.")
+                        hint="Comma-separate for one sweep + file per value.")
 
                 with param_card("Temperature logging"):
                     switches["enable_temperature"] = bool_switch(
@@ -139,11 +131,10 @@ def page() -> None:
                     with param_card("Acquisition timing"):
                         inputs["settling_time_s"] = num_field(
                             "Settling time per point (s)", float(d("settling_time_s")),
-                            hint="Dead-time after a field change, before acquiring.")
+                            hint="Wait after a field change.")
                         inputs["n_averages"] = num_field(
                             "Voltage averages per point", float(d("n_averages")), integer=True,
-                            hint="Reversal on: +I/-I reversal pairs. Reversal off: plain voltage "
-                                 "samples at the fixed sense current.")
+                            hint="± pairs with reversal, plain samples without.")
 
             # ── Tier 3: instrument wiring & safety — collapsed ──────────────
             with advanced_section("Instrument configuration & addresses", icon="settings"):
@@ -157,16 +148,14 @@ def page() -> None:
                         inputs["magnet_visa_resource"] = text_field("Magnet VISA resource", d("magnet_visa_resource"))
                         inputs["gaussmeter_visa_resource"] = text_field(
                             "Gaussmeter VISA resource", d("gaussmeter_visa_resource"),
-                            hint="Lake Shore 475 — measures the actual field at each point.")
+                            hint="Lake Shore 475.")
                         inputs["temperature_visa_resource"] = text_field(
                             "MercuryiTC VISA resource", d("temperature_visa_resource"))
 
                     with stable_card("Source & gate limits"):
                         inputs["source_delay_s"] = num_field(
                             "6221 source delay (s)", float(d("source_delay_s")),
-                            hint="Also the settle time between a current reversal and reading "
-                                 "the voltmeter, so the reversal has actually finished before "
-                                 "it's read.")
+                            hint="Also the settle after each ±I reversal.")
                         inputs["gate_voltage_limit_V"] = num_field(
                             "Gate voltage software limit (V)", float(d("gate_voltage_limit_V")))
                         inputs["gate_compliance_current_A"] = num_field(
@@ -175,7 +164,7 @@ def page() -> None:
                     with stable_card("Magnet ramp safety"):
                         inputs["current_limit_A"] = num_field(
                             "Software current limit (A)", float(d("current_limit_A")),
-                            hint="Hard safety ceiling — independent of the supply's own range.")
+                            hint="Hard safety ceiling.")
                         inputs["voltage_compliance_V"] = num_field(
                             "Voltage compliance (V)", float(d("voltage_compliance_V")))
                         inputs["ramp_step_A"] = num_field("Ramp step (A)", float(d("ramp_step_A")))
@@ -188,9 +177,7 @@ def page() -> None:
                             "Delay between readings (s)", float(d("gaussmeter_read_delay_s")))
                         inputs["field_settle_tolerance_mT"] = num_field(
                             "Field-settle tolerance (mT)", float(d("field_settle_tolerance_mT")),
-                            hint="Advanced: after each magnet step, the field counts as settled "
-                                 "once a short window of gaussmeter readings spans less than this. "
-                                 "Raise it if points stall; lower for tighter field control.")
+                            hint="Field settled when readings span less than this. Raise if points stall.")
                         inputs["temperature_sensor_uids"] = text_field(
                             "Sensor board UID(s)", d("temperature_sensor_uids"))
 

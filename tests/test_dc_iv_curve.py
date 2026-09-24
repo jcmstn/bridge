@@ -57,13 +57,13 @@ def test_iv_estimate_counts_more_than_settle_plus_reads(tmp_path: Path) -> None:
     n = 81                                                       # ±1 mA, 50 µA step, bidirectional
     info, _, errors = tui.build_summary(state)
     assert not errors
-    line = next(i for i in info if i.startswith("Estimated total run time"))
+    line = next(i for i in info if i.startswith("Run time"))
     rc = tui.run_costs(n, state)
     assert len(rc.points) == n
     old_estimate = n * (0.2 + 5 * 5 / 50.0)                      # what the sidebar used to say: 57 s
     assert rc.total_s > old_estimate + 3.0 + 1.5                 # + per-run, per-file, GPIB/CSV per point
     assert rc.total_s == pytest.approx(n * (0.2 + 5 * (5 / 50.0 + 0.02) + 0.02 + 0.10) + 1.5 + 3.0 + 0.2)
-    assert line.startswith("Estimated total run time ≈ ")
+    assert line.startswith("Run time: ≈ ")
 
 
 def test_iv_estimate_multiplies_gate_series_and_plan_carries_cost(tmp_path: Path, monkeypatch) -> None:

@@ -91,8 +91,8 @@ def test_diffres_plan_and_sidebar_carry_the_cost(tmp_path, monkeypatch) -> None:
     plan = app._build_plan(_dr_state())
     assert plan.total_points == 81 == len(plan.run_cost.points)
     info, _, _ = dr.build_summary(_dr_state(data_dir=str(tmp_path)))
-    line = next(i for i in info if i.startswith("Estimated total run time"))
-    assert dr.run_costs(81, _dr_state()).lines("Estimated total run time")[0] == line
+    line = next(i for i in info if i.startswith("Run time"))
+    assert dr.run_costs(81, _dr_state()).lines()[0] == line
 
 
 # ── phase_calibration ────────────────────────────────────────────────────────
@@ -144,9 +144,9 @@ def test_phasecal_null_helpers_typical_vs_worst() -> None:
 
 def test_phasecal_worst_case_line_and_summary(tmp_path) -> None:
     rc = pc.run_costs(_pc_state())
-    assert rc.worst_extra_s > 0 and any("worst case" in ln for ln in rc.lines())
+    assert rc.worst_extra_s > 0 and any("Worst case" in ln for ln in rc.lines())
     info, _, _ = pc.build_summary(_pc_state(data_dir=str(tmp_path)))
-    assert any(i.startswith("Estimated run time ≈ ") for i in info)
+    assert any(i.startswith("Run time: ≈ ") for i in info)
 
 
 def test_phasecal_plan_carries_cost_aligned_with_total_points(tmp_path, monkeypatch) -> None:

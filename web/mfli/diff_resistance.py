@@ -89,18 +89,18 @@ def page() -> None:
                     inputs["bias_max_V"] = num_field("DC bias sweep max (V)", float(d("bias_max_V")))
                     inputs["n_points"] = num_field(
                         "Points per sweep direction", float(d("n_points")), integer=True,
-                        hint="Bidirectional: min → max → min (reveals hysteresis).")
+                        hint="Swept min → max → min.")
 
                 with param_card("Excitation"):
                     inputs["frequency_Hz"] = num_field(
                         "AC excitation frequency (Hz)", float(d("frequency_Hz")),
-                        hint="Avoid exact multiples of 50/60 Hz (mains pickup).")
+                        hint="Avoid multiples of 50/60 Hz.")
                     inputs["ac_amplitude_V"] = num_field(
                         "AC excitation amplitude (V, peak)", float(d("ac_amplitude_V")),
-                        hint="Keep small vs. any bias step over which R_diff changes.")
+                        hint="Keep small: linear response.")
                     inputs["series_R_ohm"] = num_field(
                         "Series resistor (Ω)", float(d("series_R_ohm")),
-                        hint="Current-limiting/protection resistor — not used to compute I.")
+                        hint="Protection only — I is measured, not computed.")
 
                 with param_card("Temperature logging"):
                     switches["enable_temperature"] = bool_switch(
@@ -112,14 +112,14 @@ def page() -> None:
                     with param_card("Lock-in filter"):
                         inputs["time_constant_s"] = num_field(
                             "Filter time constant (s)", float(d("time_constant_s")),
-                            hint="Bigger = quieter but slower & longer settling.")
+                            hint="Bigger = quieter but slower.")
                         order_select = ui.select(list(range(1, 9)), value=int(d("order")), label="Filter order").classes("w-full")
                         switches["sinc_filter"] = bool_switch("Sinc filter (extra harmonic rejection)", d("sinc_filter"))
 
                     with param_card("Input ranges"):
                         inputs["current_input_range_A"] = num_field(
                             "Current-sense input range (A)", float(d("current_input_range_A")),
-                            hint="Leader's Current Input 1 — size to the actual DUT current.")
+                            hint="Leader Current Input 1 — size to DUT current.")
                         inputs["voltage_input_range_V"] = num_field(
                             "Voltage-sense input range (V)", float(d("voltage_input_range_V")),
                             hint="Follower input, across the DUT.")
@@ -128,7 +128,7 @@ def page() -> None:
                     with param_card("Acquisition timing"):
                         inputs["settling_time_s"] = num_field(
                             "Settling time per bias point (s)", float(d("settling_time_s")),
-                            hint="Rule of thumb: ≥ 5 × time constant.")
+                            hint="≥ 5 × TC.")
                         inputs["n_averages"] = num_field(
                             "Samples to average per point (each demod)", float(d("n_averages")), integer=True)
 

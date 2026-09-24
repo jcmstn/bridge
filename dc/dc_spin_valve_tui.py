@@ -88,6 +88,7 @@ from instruments.run_time import (
     GATE_RAMP_S, GPIB_TXN_S, PER_FILE_S, PER_RUN_S, POINT_OVERHEAD_S, TEMP_READ_S,
     RunCost,
 )
+from instruments.summary_lines import summary_markup
 from instruments.tui_common import (
     MeasurementApp,
     MeasurementRunScreen,
@@ -115,20 +116,9 @@ SETTINGS_PATH = _DEFAULT_DATA_DIR / "dc_spin_valve_tui_settings.json"
 MEASUREMENT_TYPE = "BSWP"
 
 DC_SPIN_VALVE_DESCRIPTION = (
-    "Sources a fixed DC sense current with a Keithley 6221 and reads the "
-    "longitudinal voltage with a Keithley 2182, reversing the current each "
-    "rep to cancel thermal-EMF offsets by default — the same "
-    "reversal-averaging technique as the Hall measurement, but for a "
-    "longitudinal (spin-valve / magnetoresistance) read. Reversal can be "
-    "switched off for bias-direction-dependent devices, where flipping the "
-    "current destroys rather than cleans up the signal — the sense current "
-    "is then just held fixed and plainly averaged instead. Sweeps a Kepco "
-    "electromagnet's field (bidirectionally, for hysteresis) with the "
-    "field measured live via a Lake Shore 475 Gaussmeter at every point. "
-    "The gate voltage (Keithley 2400, optional — off by default needs no "
-    "2400 connected) is held fixed for each field sweep — single value or "
-    "a comma-separated list — one complete sweep per value, each saved to "
-    "its own file and plotted together in different colors."
+    "6221 fixed current (±I reversal, can be off) · 2182 voltage. Kepco field "
+    "sweep, read by Lake Shore 475. Optional 2400 gate: fixed, or a list → one "
+    "sweep per value."
 )
 
 # Wiring schematic — shown on this program's card in bridge_tui.py.
@@ -389,22 +379,20 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     n_current_series = len(current_list)
     if n_current_series > 1:
         currents_str = ", ".join(format_si(i, "A") for i in current_list)
-        info.append(f"Sense currents: {currents_str} — {n_current_series} complete field "
-                     f"sweeps, one file each, plotted together")
+        info.append(f"Sense currents: {currents_str} — {n_current_series} field sweeps, one file each")
     elif n_current_series == 1:
-        info.append(f"Sense current I = {format_si(current_list[0], 'A')}")
+        info.append(f"Sense current: {format_si(current_list[0], 'A')}")
 
     if state["compliance_V"] <= 0:
         errors.append("Compliance voltage must be > 0 V.")
 
     if state["reversal_enabled"]:
-        info.append("Sense current reversed +I/-I each rep to cancel thermal-EMF offsets.")
+        info.append("Reversal: on — ±I each rep")
     else:
-        info.append("Reversal off — sense current held fixed at +I "
-                     "(use for bias-direction-dependent devices).")
+        info.append("Reversal: off — fixed +I")
 
     read_s = read_time_s(state["nplc"])
-    info.append(f"Estimated 2182 reading time ≈ {read_s * 1000:.0f} ms (NPLC={state['nplc']:g})")
+    info.append(f"2182 read: ≈ {read_s * 1000:.0f} ms — NPLC {state['nplc']:g}")
 
     n_gate_series = 1
     if state["enable_gate"]:
@@ -423,12 +411,12 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
                 )
         n_gate_series = len(gate_list)
         if n_gate_series > 1:
-            info.append(f"Gate: {n_gate_series} values {gate_list} V — {n_gate_series} complete field "
-                        f"sweeps (per sense current), one file each, plotted together")
+            info.append(f"Gate: {', '.join(format_si(v, 'V') for v in gate_list)} — "
+                        f"{n_gate_series} field sweeps per sense current, one file each")
         elif n_gate_series == 1:
-            info.append(f"Gate held fixed at {format_si(gate_list[0], 'V')}")
+            info.append(f"Gate: {format_si(gate_list[0], 'V')} — fixed")
     else:
-        info.append("Gate off — Keithley 2400 not used, single field sweep run.")
+        info.append("Gate: off")
 
     n_sweep_points = 0
     resolved: list = []
@@ -450,11 +438,10 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         n_raw = sum(n for _, _, n in rows)
         n_merged = (2 * n_raw if state["bidirectional_sweep"] else n_raw) - n_sweep_points
         merged_note = f", {n_merged} shared boundary point(s) merged" if n_merged else ""
-        info.append(f"Field sweep: {len(rows)} row(s), {n_sweep_points} points"
-                     f"{' (bidirectional)' if state['bidirectional_sweep'] else ''}"
+        info.append(f"Field sweep: {n_sweep_points} points — {len(rows)} row(s)"
+                     f"{', bidirectional' if state['bidirectional_sweep'] else ''}"
                      f"{merged_note}")
-    info.append("Field measured live at each point via Lake Shore 475 Gaussmeter "
-                 f"({state['gaussmeter_visa_resource']})")
+    info.append(f"Field read: Lake Shore 475 — {state['gaussmeter_visa_resource']}")
     tol_mT = state["field_settle_tolerance_mT"]
     if tol_mT <= 0:
         warnings.append("Field-settle tolerance is 0 — every magnet step will wait the "
@@ -463,7 +450,7 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         warnings.append(f"Field-settle tolerance {tol_mT:g} mT is below the 475's typical "
                          "reading noise — points may stall until the settle timeout.")
 
-    info.extend(run_costs(resolved, state).lines("Estimated total run time"))
+    info.extend(run_costs(resolved, state).lines())
 
     if state["enable_temperature"]:
         uids = parse_sensor_uids(state["temperature_sensor_uids"])
@@ -471,10 +458,9 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
             warnings.append("Temperature logging is on but no sensor UID is set — "
                              "temperature columns will be empty.")
         else:
-            info.append(f"Temperature logged via MercuryiTC ({', '.join(uids)}) — "
-                         "if unreachable, columns are simply left empty.")
+            info.append(f"Temperature: MercuryiTC {', '.join(uids)} — empty if unreachable")
     else:
-        info.append("Temperature logging off.")
+        info.append("Temperature: off")
 
     return info, warnings, errors
 
@@ -894,11 +880,11 @@ class DCSpinValveApp(MeasurementApp):
 
     .card-title { text-style: bold underline; margin-bottom: 1; }
     .field { margin-bottom: 1; }
-    .field-label { text-style: bold; }
-    .hint { text-style: italic; color: $text-muted; }
+    .field-label { text-style: bold; width: 100%; }
+    .hint { text-style: italic; color: $text-muted; width: 100%; }
     .sweep-rows { height: 5; margin-bottom: 1; }
-    .switch-row { height: 3; }
-    .switch-row Label { margin-left: 1; content-align: left middle; height: 3; }
+    .switch-row { height: auto; }
+    .switch-row Label { padding-left: 1; content-align: left middle; width: 1fr; height: auto; min-height: 3; }
     .sidebar-title { text-style: bold underline; margin-bottom: 1; }
     .card-desc { color: $text-muted; margin-bottom: 1; }
     #actionbar { height: 3; align: center middle; }
@@ -923,17 +909,11 @@ class DCSpinValveApp(MeasurementApp):
                         "Sense current (Keithley 6221)",
                         field("sense_current_values", "Sense current (A)",
                               DEFAULTS["sense_current_values"], kind="text",
-                              hint="Reversed +I/-I each rep to cancel thermal-EMF offsets, "
-                                   "unless reversal is switched off below. Single value, or "
-                                   "comma-separated list — one complete field sweep runs per "
-                                   "value, each saved to its own file."),
+                              hint="Comma-separate for one sweep + file per value."),
                         switch_field("reversal_enabled", "Reverse current each rep (+I/-I)",
                                      DEFAULTS["reversal_enabled"]),
                         Label(
-                            "Turn off for bias-direction-dependent devices (diodes, asymmetric "
-                            "spin-orbit stacks, ...) where reversing the current destroys rather "
-                            "than cleans up the signal — the sense current is then just held "
-                            "fixed at +I and plainly averaged instead.",
+                            "Off for bias-direction-dependent devices: fixed +I, plain average.",
                             classes="hint",
                         ),
                     )
@@ -943,9 +923,7 @@ class DCSpinValveApp(MeasurementApp):
                                      DEFAULTS["enable_gate"]),
                         field("gate_voltage_values", "Gate voltage (V)",
                               DEFAULTS["gate_voltage_values"], kind="text",
-                              hint="Single value, or comma-separated list — one complete "
-                                   "field sweep runs per value, each saved to its own file "
-                                   "and plotted together."),
+                              hint="Comma-separate for one sweep + file per value."),
                     )
                     yield card(
                         "Temperature logging",
@@ -971,12 +949,11 @@ class DCSpinValveApp(MeasurementApp):
                             "Acquisition timing",
                             field("settling_time_s", "Settling time per point (s)",
                                   DEFAULTS["settling_time_s"],
-                                  hint="Dead-time after a field change, before acquiring.",
+                                  hint="Wait after a field change.",
                                   validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
                             field("n_averages", "Voltage averages per point",
                                   DEFAULTS["n_averages"], kind="integer",
-                                  hint="Reversal on: (V(+I)-V(-I))/2 is the reported R. "
-                                       "Reversal off: plain samples at the fixed sense current.",
+                                  hint="± pairs with reversal, plain samples without.",
                                   validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
                         )
 
@@ -1002,11 +979,10 @@ class DCSpinValveApp(MeasurementApp):
                         yield card(
                             "Source & gate limits",
                             field("source_delay_s", "6221 source delay (s)", DEFAULTS["source_delay_s"],
-                                  hint="Also the settle time between a current reversal and "
-                                       "reading the voltmeter."),
+                                  hint="Also the settle after each ±I reversal."),
                             field("gate_voltage_limit_V", "Gate voltage software limit (V)",
                                   DEFAULTS["gate_voltage_limit_V"],
-                                  hint="Hard safety ceiling — independent of the values above."),
+                                  hint="Hard safety ceiling."),
                             field("gate_compliance_current_A", "Gate leakage compliance (A)",
                                   DEFAULTS["gate_compliance_current_A"]),
                             muted=True,
@@ -1015,7 +991,7 @@ class DCSpinValveApp(MeasurementApp):
                             "Magnet ramp safety",
                             field("current_limit_A", "Software current limit (A)",
                                   DEFAULTS["current_limit_A"],
-                                  hint="Hard safety ceiling — independent of the supply's own range."),
+                                  hint="Hard safety ceiling."),
                             field("voltage_compliance_V", "Voltage compliance (V)",
                                   DEFAULTS["voltage_compliance_V"]),
                             field("ramp_step_A", "Ramp step (A)", DEFAULTS["ramp_step_A"]),
@@ -1031,10 +1007,7 @@ class DCSpinValveApp(MeasurementApp):
                                   DEFAULTS["gaussmeter_read_delay_s"]),
                             field("field_settle_tolerance_mT", "Field-settle tolerance (mT)",
                                   DEFAULTS["field_settle_tolerance_mT"],
-                                  hint="Advanced: after each magnet step, the field counts as "
-                                       "settled once a short window of gaussmeter readings spans "
-                                       "less than this. Raise it if points stall waiting; lower "
-                                       "for tighter field control before acquiring.",
+                                  hint="Field settled when readings span less than this. Raise if points stall.",
                                   validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
                             field("temperature_sensor_uids", "MercuryiTC sensor board UID(s)",
                                   DEFAULTS["temperature_sensor_uids"], kind="text",
@@ -1070,17 +1043,7 @@ class DCSpinValveApp(MeasurementApp):
             else "[dim]File:  (choose a sample and device to preview the filename)[/dim]"
         )
 
-        lines: list[str] = []
-        if errors:
-            lines.append("[bold red]Blocking issues[/bold red]")
-            lines += [f"  [red]✗ {e}[/red]" for e in errors]
-        if warnings:
-            lines.append("[bold yellow]Warnings[/bold yellow]")
-            lines += [f"  [yellow]⚠ {w}[/yellow]" for w in warnings]
-        lines.append("[bold]Derived values[/bold]")
-        lines += [f"  [dim]•[/dim] {i}" for i in info if i]
-
-        self.query_one("#summary", Static).update("\n".join(lines))
+        self.query_one("#summary", Static).update(summary_markup(info, warnings, errors))
         self.query_one("#start", Button).disabled = bool(errors)
 
     # ── Start ────────────────────────────────────────────────────────────────

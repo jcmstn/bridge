@@ -81,8 +81,7 @@ def _load_page_settings(source: str) -> dict:
 # extrefs/N/automode options — see ExtRefConfig.automode's docstring in
 # mfli_dual_harmonic_6221.py for the full rationale.
 AUTOMODE_OPTIONS = {2: "2 — low bandwidth", 3: "3 — high bandwidth", 4: "4 — dynamic (auto)"}
-AUTOMODE_HINT = ("2=most forgiving acquisition (marginal/noisy signal), "
-                 "3=fastest tracking once locked, 4=auto-adapts (default).")
+AUTOMODE_HINT = "2 = most forgiving, 3 = fastest tracking, 4 = auto (default)."
 
 
 def page(source: str = "") -> None:
@@ -128,7 +127,7 @@ def page(source: str = "") -> None:
                         "text-xs text-grey-6 -mt-2 mb-2")
                     inputs["frequency_Hz"] = num_field(
                         "Excitation frequency (Hz)", float(d("frequency_Hz")),
-                        hint="Avoid exact multiples of 50/60 Hz (mains pickup).")
+                        hint="Avoid multiples of 50/60 Hz.")
 
                 def only_for(card, source: str) -> None:
                     card.bind_visibility_from(ac_select, "value", backward=lambda v: v == source)
@@ -144,9 +143,7 @@ def page(source: str = "") -> None:
                 with param_card("Keithley 6221 AC current") as ac6221_card:
                     inputs["amplitude_values"] = text_field(
                         "Excitation current (A, peak)", d("amplitude_values"),
-                        hint="Ideal current source — no series resistor. Single value, or "
-                             "comma-separated list — one complete sweep runs per value "
-                             "(own 6221 re-arm), each saved to its own file.")
+                        hint="No series R. Comma-separate for one sweep + file per value.")
                     inputs["ac_compliance_V"] = num_field(
                         "6221 voltage compliance (V)", float(d("ac_compliance_V")))
                 only_for(ac6221_card, "6221")
@@ -156,10 +153,7 @@ def page(source: str = "") -> None:
                         "R_xx mode — follower reads R_xx's 1f instead of R_xy's 2f",
                         d("measure_rxx"))
                     ui.label(
-                        "Only two physical MFLIs, so this trades 2f for R_xx — move the "
-                        "follower's Signal Input cable by hand to match. The '2f lock-in "
-                        "filter'/'2f input range' fields below configure the follower "
-                        "either way."
+                        "Trades 2f for R_xx: move the follower's Signal Input by hand. The 2f filter/range fields set the follower."
                     ).classes("text-xs text-grey-6")
                 only_for(quantities_card, "6221")
 
@@ -168,7 +162,7 @@ def page(source: str = "") -> None:
                     inputs["sweep_rows"] = textarea_field(
                         "Sweep rows: start, stop, points (one per line)",
                         d("sweep_rows"),
-                        hint="Adjacent rows sharing a boundary value are merged, not duplicated.")
+                        hint="Shared boundary points are merged.")
 
                 with param_card("Temperature logging"):
                     switches["enable_temperature"] = bool_switch(
@@ -179,25 +173,23 @@ def page(source: str = "") -> None:
                         "Auto-null 1f phase before run (leader demod phaseshift)", d("enable_phase_cal"))
                     optional_inputs["phase_cal_current_A"] = optional_num_field(
                         "Calibration magnet current (A)", opt("phase_cal_current_A"),
-                        hint="Blank = null at the present field (no ramp). Otherwise pick a point "
-                             "near saturation — e.g. matching i_max. Only used if the field sweep "
-                             "above is enabled.")
+                        hint="Blank = present field. Else near saturation; needs the field sweep on.")
 
                 with param_card("Sample geometry & field direction (optional)"):
                     optional_inputs["hall_bar_length_um"] = optional_num_field(
                         "Hall bar length (µm)", opt("hall_bar_length_um"),
-                        hint="Current-path length between voltage probes. Leave blank if unknown.")
+                        hint="Between voltage probes. Optional.")
                     optional_inputs["hall_bar_width_um"] = optional_num_field(
                         "Hall bar width (µm)", opt("hall_bar_width_um"))
                     optional_inputs["hall_bar_thickness_nm"] = optional_num_field(
                         "Film/channel thickness (nm)", opt("hall_bar_thickness_nm"))
                     optional_inputs["field_theta_deg"] = optional_num_field(
                         "θ — tilt from out-of-plane (°)", opt("field_theta_deg"),
-                        hint="0° = fully out-of-plane (film normal), 90° = in-plane.",
+                        hint="0° = out-of-plane, 90° = in-plane.",
                         min=0, max=180)
                     optional_inputs["field_phi_deg"] = optional_num_field(
                         "φ — azimuth from current axis (°)", opt("field_phi_deg"),
-                        hint="Meaningless when θ=0°.", min=0, max=360)
+                        hint="Ignored when θ=0°.", min=0, max=360)
                     with ui.row().classes("gap-2 mb-1"):
                         ui.button("xy", on_click=lambda: (optional_inputs["field_theta_deg"].set_value(90),
                                                             refresh_summary.refresh())).props("dense outline")
@@ -214,31 +206,30 @@ def page(source: str = "") -> None:
                     with param_card("1f lock-in filter"):
                         inputs["time_constant_1f_s"] = num_field(
                             "Filter time constant (s)", float(d("time_constant_1f_s")),
-                            hint="Bigger = quieter but slower & longer settling.")
+                            hint="Bigger = quieter but slower.")
                         order_select_1f = ui.select(list(range(1, 9)), value=int(d("order_1f")), label="Filter order").classes("w-full")
                         switches["sinc_filter_1f"] = bool_switch("Sinc filter (extra harmonic rejection)", d("sinc_filter_1f"))
 
                     with param_card("2f lock-in filter"):
                         inputs["time_constant_2f_s"] = num_field(
                             "Filter time constant (s)", float(d("time_constant_2f_s")),
-                            hint="1f bleed-through into the 2f channel is the usual reason "
-                                 "this needs a longer TC / higher order than 1f.")
+                            hint="Usually longer TC / higher order than 1f (1f bleed-through).")
                         order_select_2f = ui.select(list(range(1, 9)), value=int(d("order_2f")), label="Filter order").classes("w-full")
                         switches["sinc_filter_2f"] = bool_switch("Sinc filter (extra harmonic rejection)", d("sinc_filter_2f"))
 
                     with param_card("Input channels"):
                         inputs["input_range_1f_V"] = num_field(
                             "1f input range (V)", float(d("input_range_1f_V")),
-                            hint="Match expected 1f signal size — avoid clipping/poor resolution.")
+                            hint="Match expected 1f signal size.")
                         inputs["input_range_2f_V"] = num_field(
                             "2f input range (V)", float(d("input_range_2f_V")),
-                            hint="2f is usually much smaller than 1f — set separately.")
+                            hint="2f is usually much smaller than 1f.")
                         inputs["sample_rate_Hz"] = num_field("Demodulator sample rate (Sa/s)", float(d("sample_rate_Hz")))
 
                     with param_card("Acquisition timing"):
                         inputs["settling_time_s"] = num_field(
                             "Settling time per point (s)", float(d("settling_time_s")),
-                            hint="Rule of thumb: ≥ 5 × time constant.")
+                            hint="≥ 5 × TC.")
                         inputs["n_averages"] = num_field("Samples to average per point", float(d("n_averages")), integer=True)
 
             # ── Tier 3: instrument wiring & safety — collapsed ──────────────
@@ -256,7 +247,7 @@ def page(source: str = "") -> None:
                         inputs["ac_visa_resource"] = text_field("6221 VISA resource", d("ac_visa_resource"))
                         inputs["phasemarker_line"] = num_field(
                             "6221 Trigger Link phase-marker pin", float(d("phasemarker_line")), integer=True,
-                            hint="Confirm your unit's factory default before assuming.")
+                            hint="Check your unit's factory default.")
                         inputs["extref_lock_timeout_s"] = num_field(
                             "ExtRef PLL lock timeout (s)", float(d("extref_lock_timeout_s")))
                         inputs["leader_extref_index"] = num_field(
@@ -268,9 +259,7 @@ def page(source: str = "") -> None:
                         inputs["leader_pll_demod_index"] = num_field(
                             "Leader PLL phase-detector demod index", float(d("leader_pll_demod_index")),
                             integer=True,
-                            hint="Must differ from demod 0 (used for the real 1f signal) — "
-                                 "extrefs/N/adcselect is read-only on real firmware, this demod's "
-                                 "OWN adcselect is what actually selects Aux In.")
+                            hint="Not 0 (1f signal demod). Its adcselect picks the Aux In.")
                         leader_automode_select = ui.select(
                             AUTOMODE_OPTIONS, value=int(d("leader_automode")),
                             label="Leader PLL bandwidth adaptation").classes("w-full")
@@ -284,7 +273,7 @@ def page(source: str = "") -> None:
                         inputs["follower_pll_demod_index"] = num_field(
                             "Follower PLL phase-detector demod index", float(d("follower_pll_demod_index")),
                             integer=True,
-                            hint="Must differ from demod 0 (used for the real follower signal).")
+                            hint="Not 0 (follower signal demod).")
                         follower_automode_select = ui.select(
                             AUTOMODE_OPTIONS, value=int(d("follower_automode")),
                             label="Follower PLL bandwidth adaptation").classes("w-full")
@@ -295,21 +284,20 @@ def page(source: str = "") -> None:
                         inputs["visa_resource"] = text_field("Magnet VISA resource", d("visa_resource"))
                         inputs["current_limit_A"] = num_field(
                             "Software current limit (A)", float(d("current_limit_A")),
-                            hint="Hard safety ceiling — independent of the supply's own range.")
+                            hint="Hard safety ceiling.")
                         inputs["voltage_compliance_V"] = num_field("Voltage compliance (V)", float(d("voltage_compliance_V")))
                         inputs["ramp_step_A"] = num_field("Ramp step (A)", float(d("ramp_step_A")))
                         inputs["ramp_delay_s"] = num_field("Ramp delay (s)", float(d("ramp_delay_s")))
                         inputs["gaussmeter_visa_resource"] = text_field(
                             "Gaussmeter VISA resource", d("gaussmeter_visa_resource"),
-                            hint="Lake Shore 475 — measures the actual field at each point.")
+                            hint="Lake Shore 475.")
                         inputs["gaussmeter_n_averages"] = num_field(
                             "Field readings averaged per point", float(d("gaussmeter_n_averages")), integer=True)
                         inputs["gaussmeter_read_delay_s"] = num_field(
                             "Delay between readings (s)", float(d("gaussmeter_read_delay_s")))
                         inputs["field_settle_tolerance_mT"] = num_field(
                             "Field-settle tolerance (mT)", float(d("field_settle_tolerance_mT")),
-                            hint="Advanced: after each magnet step, wait until a short window of "
-                                 "gaussmeter readings spans less than this before the settling time.")
+                            hint="Field settled when readings span less than this. Raise if points stall.")
 
                     with stable_card("Temperature controller"):
                         inputs["temperature_visa_resource"] = text_field("MercuryiTC VISA resource", d("temperature_visa_resource"))
@@ -319,10 +307,7 @@ def page(source: str = "") -> None:
                         inputs["phase_cal_n_averages"] = num_field("Averages per phase read", float(d("phase_cal_n_averages")), integer=True)
                         inputs["phase_cal_max_iterations"] = num_field("Max null iterations", float(d("phase_cal_max_iterations")), integer=True)
                         ui.label(
-                            "Nulls the leader's 1f Y quadrature by adjusting its demod phaseshift node "
-                            "(the same thing LabOne's \"Auto\" phase button does). X and Y at 2f are both "
-                            "already recorded per point in the CSV — check which one actually tracks field "
-                            "there before trusting it."
+                            "Nulls leader 1f Y via demod phase (like LabOne Auto). X2f and Y2f are both recorded."
                         ).classes("text-xs text-grey-6")
 
         with regions.summary:

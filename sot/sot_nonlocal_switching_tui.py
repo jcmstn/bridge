@@ -82,6 +82,7 @@ from instruments.run_time import (
     GPIB_TXN_S, PER_FILE_S, PER_RUN_S, POINT_OVERHEAD_S, TEMP_READ_S,
     RunCost,
 )
+from instruments.summary_lines import summary_markup
 from instruments.tui_common import (
     MeasurementApp,
     MeasurementRunScreen,
@@ -105,19 +106,9 @@ SETTINGS_PATH = _DEFAULT_DATA_DIR / "sot_nonlocal_switching_tui_settings.json"
 MEASUREMENT_TYPE = "NLSW"
 
 NLSW_DESCRIPTION = (
-    "Nonlocal spin-current switching, Keithley 6221 + 2182A only, modelled on the "
-    "Kimura/Otani experiments with a DC read. Optionally initialize the magnet with an "
-    "external field first (Kepco; one run per initial-state current). Then, per amplitude, "
-    "the 6221 fires ONE hardware-timed pulse through the injector (WAVE square, one cycle: "
-    "0 → +I → 0 or 0 → −I → 0 — a single lobe of either sign, never a ± pair), waits, and "
-    "reads the nonlocal resistance across detector magnet / reference electrode with a small "
-    "DC I_sense on the 2182A — current-reversal averaged by default, or (switch off) one fixed "
-    "polarity so the read's own spin current never alternates. A step in R_NL that stays is a "
-    "switching event (V_even tracks Joule heating / thermal EMF). Sweep one polarity upward "
-    "from a field-initialized state — then only one initial state can switch, so run the "
-    "opposite one as the control — or sweep −I → +I → −I for a hysteresis loop. "
-    "Wiring: 6221 HI → injector, OUTPUT LOW (floating) → return electrode away from the "
-    "detector, 2182A ch1 → detector magnet / reference electrode past it."
+    "6221 single-lobe WAVE pulse into the injector · 2182A DC nonlocal read (±I "
+    "reversal, can be off). Optional Kepco field initialization, one run per init "
+    "current."
 )
 
 # Wiring schematic — shown on this program's card in bridge_tui.py.
@@ -405,22 +396,19 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
             back = ", then back — same polarity, so no reset: R_NL must stay put"
         else:
             back = ", and back (hysteresis loop)"
-        info.append(f"Pulse sweep: {len(amps)} single-lobe pulses "
-                    f"{format_si(state['pulse_current_start_A'], 'A')} → "
-                    f"{format_si(state['pulse_current_stop_A'], 'A')} step "
-                    f"{format_si(state['pulse_current_step_A'], 'A')}{back}")
+        info.append(f"Pulse sweep: {format_si(state['pulse_current_start_A'], 'A')} → "
+                    f"{format_si(state['pulse_current_stop_A'], 'A')} — step "
+                    f"{format_si(state['pulse_current_step_A'], 'A')}, {len(amps)} single-lobe "
+                    f"pulses{back}")
         n_zero = sum(abs(a) <= 1e-9 for a in amps)
         if n_zero:
-            info.append(f"{n_zero} of the amplitudes is 0 A — a read-only point, no pulse fired.")
+            info.append(f"Zero amplitudes: {n_zero} — read-only point(s), no pulse fired")
     if state["pulse_width_s"] <= 0:
         errors.append("Pulse width must be > 0 s.")
     if state["pulse_compliance_V"] <= 0:
         errors.append("Pulse compliance must be > 0 V.")
-    info.append("Hardware-timed write pulse (WAVE square, one cycle, 0 → ±I → 0: one lobe, never a "
-                "± pair; a negative one arrives one pulse width late) — the true floor "
-                "is range/load-dependent. Joule heating scales as I²R·t: start well below the "
-                "expected switching current, and keep compliance above I_max × R_injector or the "
-                "6221 clips silently.")
+    info.append("Write pulse: 6221 WAVE, 0 → ±I → 0 — Joule heating ∝ I²R·t: start well below the "
+                "switching current; compliance > I_max × R_injector or the 6221 clips silently")
 
     # nonlocal read
     sense = abs(state["sense_current_A"])
@@ -467,11 +455,11 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     elif r_p is not None and r_p == r_ap:
         errors.append("R_P and R_AP must differ.")
     elif r_p is not None:
-        info.append(f"Reference levels: R_P={r_p:g} Ω, R_AP={r_ap:g} Ω → state_AP_fraction per row; "
-                    "'switched' also needs ≥ half the swing.")
+        info.append(f"Reference levels: R_P={r_p:g} Ω, R_AP={r_ap:g} Ω — state_AP_fraction per "
+                    "row; 'switched' also needs ≥ half the swing")
     else:
-        info.append("No reference levels — run dc_spin_valve first and enter R_P / R_AP to turn "
-                    "R_NL into a state fraction.")
+        info.append("Reference levels: none — enter R_P / R_AP (from dc_spin_valve) for a "
+                    "state fraction")
 
     # field initialization
     inits = state.get("init_currents_A", [None])
@@ -492,29 +480,27 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
                             "it). Initialize it externally first, or enter init current(s).")
         else:
             cur_str = ", ".join(f"{i:g}" for i in real)
-            info.append(f"Initialization: {len(real)} initial state(s) via magnet current "
-                        f"{cur_str} A, then {state['sweep_magnet_current_A']:g} A held for the "
-                        "sweep (field measured by the 475). Each gets its own complete sweep "
-                        "and file.")
+            info.append(f"Init magnet current: {cur_str} A — then "
+                        f"{state['sweep_magnet_current_A']:g} A held; one sweep + file each")
             if len(real) == 1 and amps and (all(a >= 0 for a in amps) or all(a <= 0 for a in amps)):
-                info.append("With one pulse polarity only one initial state can switch — add the "
-                            "opposite sign (e.g. '5, -5') for the control run.")
+                info.append("One polarity, one init state — only one state can switch; add the "
+                            "opposite sign (e.g. '5, -5') for the control run")
 
     # size / time
     n = max(1, len(amps))
     n_files = max(1, len(real))
-    info.append(f"{n} pulses + a baseline read"
-                + (f", × {n_files} files = {(n + 1) * n_files} total points" if n_files > 1 else ""))
-    info.extend(run_costs(state).lines("Estimated run time"))
-    info.append("Wiring: 6221 HI → injector; OUTPUT LOW (set floating) → return electrode away from "
-                "the detector; 2182A ch1 → detector magnet / reference electrode past it.")
+    info.append(f"Points: {(n + 1) * n_files} — {n} pulses + baseline read"
+                + (f", × {n_files} files" if n_files > 1 else ""))
+    info.extend(run_costs(state).lines())
+    info.append("Wiring: 6221 HI → injector — LOW (floating) → return electrode away from the "
+                "detector; 2182A ch1 → detector / reference electrode")
 
     if state["enable_temperature"]:
         uids = parse_sensor_uids(state["temperature_sensor_uids"])
-        info.append(f"Temperature logged via MercuryiTC ({', '.join(uids) or 'no UID set'})."
-                    if uids else "Temperature on but no sensor UID — columns stay empty.")
+        info.append(f"Temperature: MercuryiTC {', '.join(uids)}" if uids
+                    else "Temperature: no sensor UID — columns stay empty")
     else:
-        info.append("Temperature logging off.")
+        info.append("Temperature: off")
 
     return info, warnings, errors
 
@@ -879,10 +865,10 @@ class NonlocalSwitchingApp(MeasurementApp):
     .stable-card .field-label { color: $text-muted; text-style: none; }
     .card-title { text-style: bold underline; margin-bottom: 1; }
     .field { margin-bottom: 1; }
-    .field-label { text-style: bold; }
-    .hint { text-style: italic; color: $text-muted; }
-    .switch-row { height: 3; }
-    .switch-row Label { margin-left: 1; content-align: left middle; height: 3; }
+    .field-label { text-style: bold; width: 100%; }
+    .hint { text-style: italic; color: $text-muted; width: 100%; }
+    .switch-row { height: auto; }
+    .switch-row Label { padding-left: 1; content-align: left middle; width: 1fr; height: auto; min-height: 3; }
     .sidebar-title { text-style: bold underline; margin-bottom: 1; }
     .card-desc { color: $text-muted; margin-bottom: 1; }
     #actionbar { height: 3; align: center middle; }
@@ -907,15 +893,13 @@ class NonlocalSwitchingApp(MeasurementApp):
                         field("pulse_current_step_A", "Pulse current step (A)",
                               DEFAULTS["pulse_current_step_A"],
                               validators=[Number(minimum=1e-12, failure_description="must be > 0")],
-                              hint="One pulse per step. A sweep through 0 gets one read-only "
-                                   "0 A point."),
+                              hint="One pulse per step; 0 A = read only."),
                         switch_field("amplitude_bidirectional",
                                      "Then sweep back (loop / no-reset control)",
                                      DEFAULTS["amplitude_bidirectional"]),
                         field("pulse_width_s", "Requested pulse width (s)",
                               DEFAULTS["pulse_width_s"],
-                              hint="Kimura/Otani: ~1 ms. Actual width is measured and logged as "
-                                   "pulse_width_measured_s."),
+                              hint="~1 ms typical. Measured width is logged."),
                         field("pulse_compliance_V", "Pulse voltage compliance (V)",
                               DEFAULTS["pulse_compliance_V"],
                               hint="Above I_max × R_injector, or the pulse clips silently."),
@@ -927,14 +911,11 @@ class NonlocalSwitchingApp(MeasurementApp):
                               validators=[Number(minimum=0.0, failure_description="must be ≥ 0")],
                               hint="Wait between pulse end and the read."),
                         field("sense_current_A", "Sense current (A)", DEFAULTS["sense_current_A"],
-                              hint="Kimura/Otani: 100 µA. Keep well below the switching current. "
-                                   "Signed: with reversal off the sign is the fixed read polarity."),
+                              hint="Well below switching. Sign = read polarity if reversal off."),
                         field("compliance_V", "Read compliance (V)", DEFAULTS["compliance_V"]),
                         switch_field("reversal_enabled", "Reverse the sense current each read (+I/−I)",
                                      DEFAULTS["reversal_enabled"]),
-                        Label("Off = one fixed polarity, plain average: the read's own spin current "
-                              "never alternates in sign. Thermal-EMF offsets are then NOT cancelled "
-                              "and V_even is not recorded.", classes="hint"),
+                        Label("Off: fixed polarity — no EMF cancel, no V_even.", classes="hint"),
                         field("n_averages", "Averages per read",
                               DEFAULTS["n_averages"], kind="integer",
                               hint="± pairs with reversal, plain samples without.",
@@ -950,13 +931,10 @@ class NonlocalSwitchingApp(MeasurementApp):
                         "Field initialization (Kepco magnet)",
                         field("init_magnet_currents", "Init magnet current(s) (A)",
                               DEFAULTS["init_magnet_currents"], kind="text",
-                              hint="Blank = magnet untouched (initialize externally). One value, or "
-                                   "comma-separated — each is its own initial state, sweep and "
-                                   "file. With one pulse polarity use both signs, e.g. 5, -5."),
+                              hint="Blank = magnet untouched. Comma-separate: one run per init state."),
                         field("sweep_magnet_current_A", "Magnet current during the sweep (A)",
                               DEFAULTS["sweep_magnet_current_A"],
-                              hint="0 = field off after initializing; the sweep starts from the "
-                                   "remanent state."),
+                              hint="0 = field off (remanent state)."),
                         field("field_settle_tolerance_mT", "Field settle tolerance (mT)",
                               DEFAULTS["field_settle_tolerance_mT"]),
                     )
@@ -964,11 +942,10 @@ class NonlocalSwitchingApp(MeasurementApp):
                         "Reference levels (optional)",
                         field("R_P_ohm", "R_NL at the P level (Ω)", DEFAULTS["R_P_ohm"],
                               valid_empty=True,
-                              hint="From a dc_spin_valve field sweep of the same nonlocal signal."),
+                              hint="From a dc_spin_valve sweep of this signal."),
                         field("R_AP_ohm", "R_NL at the AP level (Ω)", DEFAULTS["R_AP_ohm"],
                               valid_empty=True,
-                              hint="Gives state_AP_fraction per row; 'switched' then also needs "
-                                   "≥ half the swing."),
+                              hint="Enables state_AP_fraction."),
                     )
                     yield card(
                         "Temperature logging",
@@ -1039,16 +1016,7 @@ class NonlocalSwitchingApp(MeasurementApp):
             f"File:  [bold]{preview}[/bold]" if preview
             else "[dim]File:  (choose a sample and device to preview)[/dim]")
 
-        lines: list[str] = []
-        if errors:
-            lines.append("[bold red]Blocking issues[/bold red]")
-            lines += [f"  [red]✗ {e}[/red]" for e in errors]
-        if warnings:
-            lines.append("[bold yellow]Warnings[/bold yellow]")
-            lines += [f"  [yellow]⚠ {w}[/yellow]" for w in warnings]
-        lines.append("[bold]Derived values[/bold]")
-        lines += [f"  [dim]•[/dim] {i}" for i in info if i]
-        self.query_one("#summary", Static).update("\n".join(lines))
+        self.query_one("#summary", Static).update(summary_markup(info, warnings, errors))
         self.query_one("#start", Button).disabled = bool(errors)
 
     def _build_plan(self, state: dict) -> MeasurementPlan:

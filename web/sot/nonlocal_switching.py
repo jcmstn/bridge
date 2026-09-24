@@ -96,13 +96,12 @@ def page() -> None:
                         "Pulse current stop (A)", float(d("pulse_current_stop_A")))
                     inputs["pulse_current_step_A"] = num_field(
                         "Pulse current step (A)", float(d("pulse_current_step_A")),
-                        hint="One pulse per step. A sweep through 0 gets one read-only 0 A point.")
+                        hint="One pulse per step; 0 A = read only.")
                     switches["amplitude_bidirectional"] = bool_switch(
                         "Then sweep back (loop / no-reset control)", d("amplitude_bidirectional"))
                     inputs["pulse_width_s"] = num_field(
                         "Requested pulse width (s)", float(d("pulse_width_s")),
-                        hint="Kimura/Otani: ~1 ms. Actual width is measured and logged as "
-                             "pulse_width_measured_s.")
+                        hint="~1 ms typical. Measured width is logged.")
                     inputs["pulse_compliance_V"] = num_field(
                         "Pulse voltage compliance (V)", float(d("pulse_compliance_V")),
                         hint="Above I_max × R_injector, or the pulse clips silently.")
@@ -113,15 +112,12 @@ def page() -> None:
                         hint="Wait between pulse end and the read.")
                     inputs["sense_current_A"] = num_field(
                         "Sense current (A)", float(d("sense_current_A")),
-                        hint="Kimura/Otani: 100 µA. Keep well below the switching current. "
-                             "Signed: with reversal off the sign is the fixed read polarity.")
+                        hint="Well below switching. Sign = read polarity if reversal off.")
                     inputs["compliance_V"] = num_field("Read compliance (V)", float(d("compliance_V")))
                     switches["reversal_enabled"] = bool_switch(
                         "Reverse the sense current each read (+I/−I)", d("reversal_enabled"))
                     ui.label(
-                        "Off = one fixed polarity, plain average: the read's own spin current never "
-                        "alternates in sign. Thermal-EMF offsets are then NOT cancelled and V_even "
-                        "is not recorded."
+                        "Off: fixed polarity — no EMF cancel, no V_even."
                     ).classes("text-xs text-grey-6 -mt-1 mb-1")
                     inputs["n_averages"] = num_field(
                         "Averages per read", float(d("n_averages")), integer=True,
@@ -136,22 +132,18 @@ def page() -> None:
                 with param_card("Field initialization (Kepco magnet)"):
                     inputs["init_magnet_currents"] = text_field(
                         "Init magnet current(s) (A)", d("init_magnet_currents"),
-                        hint="Blank = magnet untouched (initialize externally). One value, or "
-                             "comma-separated — each is its own initial state, sweep and file. "
-                             "With one pulse polarity use both signs, e.g. 5, -5.")
+                        hint="Blank = magnet untouched. Comma-separate: one run per init state.")
                     inputs["sweep_magnet_current_A"] = num_field(
                         "Magnet current during the sweep (A)", float(d("sweep_magnet_current_A")),
-                        hint="0 = field off after initializing; the sweep starts from the "
-                             "remanent state.")
+                        hint="0 = field off (remanent state).")
 
                 with param_card("Reference levels (optional)"):
                     inputs["R_P_ohm"] = optional_num_field(
                         "R_NL at the P level (Ω)", _optional_float(d("R_P_ohm")),
-                        hint="From a dc_spin_valve field sweep of the same nonlocal signal.")
+                        hint="From a dc_spin_valve sweep of this signal.")
                     inputs["R_AP_ohm"] = optional_num_field(
                         "R_NL at the AP level (Ω)", _optional_float(d("R_AP_ohm")),
-                        hint="Gives state_AP_fraction per row; 'switched' then also needs ≥ half "
-                             "the swing.")
+                        hint="Enables state_AP_fraction.")
 
                 with param_card("Temperature logging"):
                     switches["enable_temperature"] = bool_switch(
@@ -171,14 +163,14 @@ def page() -> None:
                             "Magnet VISA resource", d("magnet_visa_resource"))
                         inputs["current_limit_A"] = num_field(
                             "Software current limit (A)", float(d("current_limit_A")),
-                            hint="Hard safety ceiling — independent of the supply's own range.")
+                            hint="Hard safety ceiling.")
                         inputs["magnet_voltage_compliance_V"] = num_field(
                             "Voltage compliance (V)", float(d("magnet_voltage_compliance_V")))
                         inputs["ramp_step_A"] = num_field("Ramp step (A)", float(d("ramp_step_A")))
                         inputs["ramp_delay_s"] = num_field("Ramp delay (s)", float(d("ramp_delay_s")))
                         inputs["gaussmeter_visa_resource"] = text_field(
                             "Gaussmeter VISA resource", d("gaussmeter_visa_resource"),
-                            hint="Lake Shore 475 — measures the field at initialization.")
+                            hint="Lake Shore 475.")
                         inputs["gaussmeter_n_averages"] = num_field(
                             "Field readings averaged", float(d("gaussmeter_n_averages")), integer=True)
                         inputs["gaussmeter_read_delay_s"] = num_field(

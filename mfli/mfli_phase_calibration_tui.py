@@ -87,6 +87,7 @@ from instruments.data_naming import (
     record_run,
     preview_raw_filename,
 )
+from instruments.summary_lines import summary_markup
 from instruments.tui_common import (
     MeasurementApp,
     MeasurementRunScreen,
@@ -119,13 +120,8 @@ MEASUREMENT_TYPE = "PHCAL"
 # One-paragraph blurb + wiring schematic — shown on this program's card in
 # bridge_tui.py, and the description also on its web page.
 MFLI_PHASE_CALIBRATION_DESCRIPTION = (
-    "Calibrates the leader's 1f reference phase against the sample's own resistive "
-    "Hall response (rather than a separate standard resistor), then verifies the "
-    "result before you trust it: checks the null holds across a full field sweep, "
-    "and empirically identifies which of X2f/Y2f carries the real signal. Optional "
-    "current-amplitude and frequency scaling checks help separate a genuine "
-    "resistive/SOT signal from Joule-heating/anomalous-Nernst contamination. Run "
-    "this before Dual-Harmonic Measurement, using the same wiring."
+    "Nulls the leader's 1f phase on the sample's own Hall signal, checks it over a "
+    "field sweep, and identifies X2f vs Y2f. Run before Dual-Harmonic, same wiring."
 )
 
 MFLI_PHASE_CALIBRATION_SCHEMATIC = """\
@@ -397,7 +393,7 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
 
     if state["series_R_ohm"] > 0:
         I = state["amplitude_V"] / state["series_R_ohm"]
-        info.append(f"Excitation current I ≈ {format_si(I, 'A')}")
+        info.append(f"Excitation current: ≈ {format_si(I, 'A')}")
     else:
         errors.append("Series resistor must be > 0 Ω.")
 
@@ -419,7 +415,7 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
                 f"({recommended_settle:g} s) — filter may not have settled."
             )
         else:
-            info.append(f"Settling ≥ 5×TC ({recommended_settle:g} s) ✓")
+            info.append(f"Settling: ✓ — ≥ 5×TC ({recommended_settle:g} s)")
     else:
         errors.append("Time constant must be > 0 s.")
     if state["sample_rate_Hz"] <= 0:
@@ -456,18 +452,17 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         n_raw = sum(n for _, _, n in rows)
         n_merged = 2 * n_raw - total_points
         merged_note = f", {n_merged} shared boundary point(s) merged" if n_merged else ""
-        info.append(f"Sweep: {len(rows)} row(s), {total_points} points (bidirectional)"
+        info.append(f"Field sweep: {total_points} points — {len(rows)} row(s), bidirectional"
                      f"{merged_note}")
-        info.append("Field measured live at each point via Lake Shore 475 Gaussmeter "
-                     f"({state['gaussmeter_visa_resource']})")
+        info.append(f"Field read: Lake Shore 475 — {state['gaussmeter_visa_resource']}")
         if state["sample_rate_Hz"] > 0:        # the model divides by it
-            info.extend(run_costs(state).lines("Estimated run time"))
+            info.extend(run_costs(state).lines())
 
     if state["enable_amplitude_check"]:
         if len(state["amplitudes_V"]) < 2:
             errors.append("Amplitude check needs at least 2 amplitudes (comma-separated).")
         else:
-            info.append(f"Amplitude check: {len(state['amplitudes_V'])} amplitude(s)")
+            info.append(f"Amplitude check: {len(state['amplitudes_V'])} amplitudes")
 
     if state["enable_frequency_check"]:
         if len(state["frequencies_Hz"]) < 2:
@@ -481,10 +476,9 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
             warnings.append("Temperature logging is on but no sensor UID is set — "
                              "temperature columns will be empty.")
         else:
-            info.append(f"Temperature logged via MercuryiTC ({', '.join(uids)}) — "
-                         "if unreachable, columns are simply left empty.")
+            info.append(f"Temperature: MercuryiTC {', '.join(uids)} — empty if unreachable")
     else:
-        info.append("Temperature logging off.")
+        info.append("Temperature: off")
 
     return info, warnings, errors
 
@@ -866,11 +860,11 @@ class MFLIPhaseCalibrationApp(MeasurementApp):
     #body { height: 1fr; }
     #form { width: 1fr; padding: 1 2; }
     #sidebar { width: 48; border-left: solid $primary; padding: 1 2; overflow-y: auto; }
-    .field-label { text-style: bold; }
-    .hint { text-style: italic; color: $text-muted; }
+    .field-label { text-style: bold; width: 100%; }
+    .hint { text-style: italic; color: $text-muted; width: 100%; }
     .sweep-rows { height: 5; margin-bottom: 1; }
-    .switch-row { height: 3; }
-    .switch-row Label { margin-left: 1; content-align: left middle; height: 3; }
+    .switch-row { height: auto; }
+    .switch-row Label { padding-left: 1; content-align: left middle; width: 1fr; height: auto; min-height: 3; }
     .sidebar-title { text-style: bold underline; margin-bottom: 1; }
     #actionbar { height: 3; align: center middle; }
 
@@ -902,7 +896,7 @@ class MFLIPhaseCalibrationApp(MeasurementApp):
             with VerticalScroll(id="form"):
                 yield identity_bar(DEFAULTS, _DEFAULT_DATA_DIR, self.data_root,
                                    temperature_label="Temperature setpoint (K, optional)",
-                                   temperature_hint="Drives only the filename's T###K token — the header's ",
+                                   temperature_hint="Filename T###K token only.",
                                    cell_classes=None)
 
                 # ── Tier 1: what defines this calibration — always visible ──
@@ -911,18 +905,14 @@ class MFLIPhaseCalibrationApp(MeasurementApp):
                         "Field sweep & calibration point",
                         field("calibration_current_A", "Calibration magnet current (A)",
                               DEFAULTS["calibration_current_A"],
-                              hint="Where the 1f Y-null is performed — pick a point near "
-                                   "saturation (e.g. matching the sweep max) so the PHE/AHE "
-                                   "1f signal is large and well-behaved."),
+                              hint="Where 1f Y is nulled — pick near saturation."),
                         sweep_rows_field("sweep_rows", DEFAULTS["sweep_rows"]),
                     )
                     yield card(
                         "Excitation",
                         field("frequency_Hz", "Excitation frequency (Hz)",
                               DEFAULTS["frequency_Hz"],
-                              hint="Must match the frequency the harmonic-Hall run uses — "
-                                   "the calibrated phase is frequency-specific. Avoid exact "
-                                   "multiples of 50/60 Hz (mains pickup).",
+                              hint="Same as the harmonic run; avoid multiples of 50/60 Hz.",
                               validators=[Number(minimum=1e-3, failure_description="must be > 0")]),
                         field("amplitude_V", "Output amplitude (V, peak)",
                               DEFAULTS["amplitude_V"],
@@ -939,10 +929,7 @@ class MFLIPhaseCalibrationApp(MeasurementApp):
                                      DEFAULTS["enable_amplitude_check"]),
                         field("amplitudes_V", "Amplitudes to test (V, comma-separated)",
                               DEFAULTS["amplitudes_V"], kind="text",
-                              hint="≥ 2 values. Checks whether the identified 2f signal "
-                                   "channel scales linearly with drive current "
-                                   "(resistive/SOT) rather than growing faster "
-                                   "(Joule-heating/ANE)."),
+                              hint="≥ 2 values. Linear = SOT; faster = heating/ANE."),
                     )
                     yield card(
                         "Frequency check (optional)",
@@ -951,9 +938,7 @@ class MFLIPhaseCalibrationApp(MeasurementApp):
                                      DEFAULTS["enable_frequency_check"]),
                         field("frequencies_Hz", "Frequencies to test (Hz, comma-separated)",
                               DEFAULTS["frequencies_Hz"], kind="text",
-                              hint="≥ 2 values. Checks whether the optimal 1f phase "
-                                   "scales linearly with frequency, consistent with a "
-                                   "fixed cable/electronics delay."),
+                              hint="≥ 2 values. Phase linear in f = fixed delay."),
                     )
                     yield card(
                         "Temperature logging",
@@ -969,7 +954,7 @@ class MFLIPhaseCalibrationApp(MeasurementApp):
                             "Lock-in filter",
                             field("time_constant_s", "Filter time constant (s)",
                                   DEFAULTS["time_constant_s"],
-                                  hint="Bigger = quieter but slower & longer settling.",
+                                  hint="Bigger = quieter but slower.",
                                   validators=[Number(minimum=1e-6, failure_description="must be > 0")]),
                             select_field("order", "Filter order", list(range(1, 9)),
                                          int(DEFAULTS["order"])),
@@ -977,11 +962,11 @@ class MFLIPhaseCalibrationApp(MeasurementApp):
                                          DEFAULTS["sinc_filter"]),
                             field("input_range_1f_V", "1f input range (V)",
                                   DEFAULTS["input_range_1f_V"],
-                                  hint="Match expected 1f signal size — avoid clipping/poor resolution.",
+                                  hint="Match expected 1f signal size.",
                                   validators=[Number(minimum=1e-6, failure_description="must be > 0")]),
                             field("input_range_2f_V", "2f input range (V)",
                                   DEFAULTS["input_range_2f_V"],
-                                  hint="2f is usually much smaller than 1f — set separately.",
+                                  hint="2f is usually much smaller than 1f.",
                                   validators=[Number(minimum=1e-6, failure_description="must be > 0")]),
                             field("sample_rate_Hz", "Demodulator sample rate (Sa/s)",
                                   DEFAULTS["sample_rate_Hz"],
@@ -997,16 +982,13 @@ class MFLIPhaseCalibrationApp(MeasurementApp):
                                   validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
                             field("null_tol_deg", "Convergence tolerance (°)",
                                   DEFAULTS["null_tol_deg"],
-                                  hint="Nulls the leader's 1f Y quadrature by adjusting its demod "
-                                       "phaseshift node — the resistive PHE/AHE response at 1f must "
-                                       "be exactly in phase with the drive current, so any measured "
-                                       "Y there is pure instrumental delay."),
+                                  hint="Nulls leader 1f Y via demod phase (like LabOne Auto)."),
                         )
                         yield card(
                             "Sweep timing & hold check",
                             field("sweep_settling_time_s", "Settling time per sweep point (s)",
                                   DEFAULTS["sweep_settling_time_s"],
-                                  hint="Rule of thumb: ≥ 5 × time constant.",
+                                  hint="≥ 5 × TC.",
                                   validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
                             field("sweep_n_averages", "Samples to average per sweep point",
                                   DEFAULTS["sweep_n_averages"], kind="integer",
@@ -1014,8 +996,7 @@ class MFLIPhaseCalibrationApp(MeasurementApp):
                             field("hold_tol_ratio",
                                   "Max acceptable |Y|/R away from the calibration point",
                                   DEFAULTS["hold_tol_ratio"],
-                                  hint="Flags drift if the null residual exceeds this "
-                                       "anywhere in the sweep."),
+                                  hint="Flags drift if the residual exceeds this."),
                         )
                         yield card(
                             "Scaling-check advanced",
@@ -1053,7 +1034,7 @@ class MFLIPhaseCalibrationApp(MeasurementApp):
                                   DEFAULTS["visa_resource"], kind="text"),
                             field("current_limit_A", "Software current limit (A)",
                                   DEFAULTS["current_limit_A"],
-                                  hint="Hard safety ceiling — independent of the supply's own range."),
+                                  hint="Hard safety ceiling."),
                             field("voltage_compliance_V", "Voltage compliance (V)",
                                   DEFAULTS["voltage_compliance_V"]),
                             field("ramp_step_A", "Ramp step (A)", DEFAULTS["ramp_step_A"]),
@@ -1064,7 +1045,7 @@ class MFLIPhaseCalibrationApp(MeasurementApp):
                             "Gaussmeter",
                             field("gaussmeter_visa_resource", "Gaussmeter VISA resource",
                                   DEFAULTS["gaussmeter_visa_resource"], kind="text",
-                                  hint="Lake Shore 475 — measures the actual field at each point."),
+                                  hint="Lake Shore 475."),
                             field("gaussmeter_n_averages", "Field readings averaged per point",
                                   DEFAULTS["gaussmeter_n_averages"], kind="integer",
                                   validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
@@ -1072,9 +1053,7 @@ class MFLIPhaseCalibrationApp(MeasurementApp):
                                   DEFAULTS["gaussmeter_read_delay_s"]),
                             field("field_settle_tolerance_mT", "Field-settle tolerance (mT)",
                                   DEFAULTS["field_settle_tolerance_mT"],
-                                  hint="Advanced: after each magnet step, wait until a short window "
-                                       "of gaussmeter readings spans less than this before the "
-                                       "settling time.",
+                                  hint="Field settled when readings span less than this. Raise if points stall.",
                                   validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
                             muted=True,
                         )
@@ -1082,12 +1061,10 @@ class MFLIPhaseCalibrationApp(MeasurementApp):
                             "Temperature controller",
                             field("temperature_visa_resource", "MercuryiTC VISA resource",
                                   DEFAULTS["temperature_visa_resource"], kind="text",
-                                  hint="e.g. TCPIP0::<ip>::7020::SOCKET (Ethernet) or an ASRL resource."),
+                                  hint="e.g. TCPIP0::<ip>::7020::SOCKET or ASRL."),
                             field("temperature_sensor_uids", "Sensor board UID(s)",
                                   DEFAULTS["temperature_sensor_uids"], kind="text",
-                                  hint="1 or 2 board UIDs, comma-separated, e.g. 'MB1.T1, DB5.T1'. "
-                                       "Not connected, or only one probe wired up? Fine either way — "
-                                       "missing readings just leave the column empty."),
+                                  hint="1-2 UIDs, e.g. MB1.T1, DB5.T1."),
                             muted=True,
                         )
 
@@ -1116,17 +1093,7 @@ class MFLIPhaseCalibrationApp(MeasurementApp):
             f"File:  [bold]{preview}[/bold]" if preview
             else "[dim]File:  (choose a sample and device to preview the filename)[/dim]"
         )
-        lines: list[str] = []
-        if errors:
-            lines.append("[bold red]Blocking issues[/bold red]")
-            lines += [f"  [red]✗ {e}[/red]" for e in errors]
-        if warnings:
-            lines.append("[bold yellow]Warnings[/bold yellow]")
-            lines += [f"  [yellow]⚠ {w}[/yellow]" for w in warnings]
-        lines.append("[bold]Derived values[/bold]")
-        lines += [f"  [dim]•[/dim] {i}" for i in info]
-
-        self.query_one("#summary", Static).update("\n".join(lines))
+        self.query_one("#summary", Static).update(summary_markup(info, warnings, errors))
         self.query_one("#start", Button).disabled = bool(errors)
 
     # ── Start ────────────────────────────────────────────────────────────────

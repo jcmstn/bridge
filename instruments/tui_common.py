@@ -71,13 +71,13 @@ log = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def format_si(value: float, unit: str) -> str:
-    """Format a value with an SI prefix, e.g. 1.2e-8 -> '12.000 nA'."""
+    """Format a value with an SI prefix, 4 significant digits, e.g. 1.2e-8 -> '12 nA'."""
     av = abs(value)
     if av == 0:
         return f"0 {unit}"
     for scale, prefix in ((1e-12, "p"), (1e-9, "n"), (1e-6, "µ"), (1e-3, "m"), (1.0, "")):
-        if av < scale * 1000:
-            return f"{value / scale:.3f} {prefix}{unit}"
+        if float(f"{av / scale:.4g}") < 1000:      # 1e-6 is '1 µA', not '1000 nA'
+            return f"{value / scale:.4g} {prefix}{unit}"
     return f"{value:.3e} {unit}"
 
 
@@ -135,7 +135,7 @@ def sweep_rows_field(field_id: str, default: str) -> list:
     """One row per line, "start, stop, points" -- see parse_sweep_rows()."""
     label = Label("Sweep rows: start, stop, points (one per line)", classes="field-label")
     area = TextArea(default, id=field_id, classes="sweep-rows")
-    hint = Label("Adjacent rows sharing a boundary value are merged, not duplicated.",
+    hint = Label("Shared boundary points are merged.",
                  classes="hint")
     return [label, area, hint]
 

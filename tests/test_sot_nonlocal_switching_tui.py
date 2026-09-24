@@ -118,7 +118,7 @@ def test_sense_current_is_signed_but_never_zero_and_its_size_is_still_guarded(tm
 def test_plain_read_is_estimated_faster_than_the_reversal_read(tmp_path):
     def eta(**kw):
         info, _, _ = tui.build_summary(_state(tmp_path, **kw))
-        return next(i for i in info if i.startswith("Estimated run time"))
+        return next(i for i in info if i.startswith("Run time"))
     assert eta(reversal_enabled=False) != eta(reversal_enabled=True)
 
 

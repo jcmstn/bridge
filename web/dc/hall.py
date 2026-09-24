@@ -106,9 +106,7 @@ def page() -> None:
                 with param_card("Sense current (Keithley 6221)"):
                     inputs["sense_current_values"] = text_field(
                         "Sense current (A)", d("sense_current_values"),
-                        hint="Reversed +I/-I each rep to cancel thermal-EMF offsets. "
-                             "Single value, or comma-separated list — one complete "
-                             "measurement runs per value, each saved to its own file.")
+                        hint="±I reversed each rep. Comma-separate for one run + file per value.")
 
                 with param_card("Quantities (Keithley 2182)"):
                     switches["measure_rxy"] = bool_switch(
@@ -122,7 +120,7 @@ def page() -> None:
                     inputs["sweep_rows"] = textarea_field(
                         "Sweep rows: start, stop, points (one per line)",
                         d("sweep_rows"),
-                        hint="Adjacent rows sharing a boundary value are merged, not duplicated.")
+                        hint="Shared boundary points are merged.")
                     switches["bidirectional_sweep"] = bool_switch(
                         "Bidirectional (retrace the merged rows)", d("bidirectional_sweep"))
 
@@ -134,13 +132,12 @@ def page() -> None:
                     inputs["field_theta_deg"] = optional_num_field(
                         "θ — tilt from out-of-plane (°)",
                         float(_theta_default) if str(_theta_default).strip() not in ("", "None") else None,
-                        hint="0° = fully out-of-plane (film normal), 90° = in-plane.",
+                        hint="0° = out-of-plane, 90° = in-plane.",
                         min=0, max=180)
                     inputs["field_phi_deg"] = optional_num_field(
                         "φ — azimuth from current axis (°)",
                         float(_phi_default) if str(_phi_default).strip() not in ("", "None") else None,
-                        hint="0° = along sense current, 90° = transverse in-plane. "
-                             "Meaningless when θ=0°.",
+                        hint="0° = along current. Ignored when θ=0°.",
                         min=0, max=360)
                     with ui.row().classes("gap-2 mb-1"):
                         ui.button("xy", on_click=lambda: (inputs["field_theta_deg"].set_value(90),
@@ -162,21 +159,19 @@ def page() -> None:
                             "Compliance voltage (V)", float(d("compliance_V")))
                         inputs["nplc"] = num_field(
                             "NPLC (integration time)", float(d("nplc")),
-                            hint="Bigger = quieter but slower. 1 line cycle = 1/50 or 1/60 s.")
+                            hint="Bigger = quieter but slower.")
                         switches["auto_range"] = bool_switch("Auto-range", d("auto_range"))
 
                     with param_card("Acquisition timing"):
                         inputs["settling_time_s"] = num_field(
                             "Settling time per point (s)", float(d("settling_time_s")),
-                            hint="Dead-time after a field change, before acquiring.")
+                            hint="Wait after a field change.")
                         inputs["n_reversals"] = num_field(
                             "+I/-I reversal pairs averaged per point", float(d("n_reversals")), integer=True,
-                            hint="Splits each point into (V(+I)-V(-I))/2 [reported R] and "
-                                 "(V(+I)+V(-I))/2 [recorded, not discarded].")
+                            hint="(V(+I)-V(-I))/2 is the reported R.")
                         inputs["channel_settle_s"] = num_field(
                             "2182 channel-mux settle (s)", float(d("channel_settle_s")),
-                            hint="Only used when both R_xy and R_xx are on — dead time after "
-                                 "switching the 2182's active channel, before reading.")
+                            hint="Wait after a 2182 channel switch (R_xy + R_xx only).")
 
             # ── Tier 3: instrument wiring & safety — collapsed ──────────────
             with advanced_section("Instrument configuration & addresses", icon="settings"):
@@ -190,20 +185,18 @@ def page() -> None:
                             "Magnet VISA resource", d("magnet_visa_resource"))
                         inputs["gaussmeter_visa_resource"] = text_field(
                             "Gaussmeter VISA resource", d("gaussmeter_visa_resource"),
-                            hint="Lake Shore 475 — measures the actual field at each point.")
+                            hint="Lake Shore 475.")
                         inputs["temperature_visa_resource"] = text_field(
                             "MercuryiTC VISA resource", d("temperature_visa_resource"),
-                            hint="e.g. TCPIP0::<ip>::7020::SOCKET, or an ASRL resource.")
+                            hint="e.g. TCPIP0::<ip>::7020::SOCKET or ASRL.")
 
                     with stable_card("Source & ramp safety"):
                         inputs["source_delay_s"] = num_field(
                             "6221 source delay (s)", float(d("source_delay_s")),
-                            hint="Also the settle time between a current reversal and reading "
-                                 "the voltmeter, so the reversal has actually finished before "
-                                 "the 2182 integrates.")
+                            hint="Also the settle after each ±I reversal.")
                         inputs["current_limit_A"] = num_field(
                             "Software current limit (A)", float(d("current_limit_A")),
-                            hint="Hard safety ceiling — independent of the supply's own range.")
+                            hint="Hard safety ceiling.")
                         inputs["voltage_compliance_V"] = num_field(
                             "Voltage compliance (V)", float(d("voltage_compliance_V")))
                         inputs["ramp_step_A"] = num_field("Ramp step (A)", float(d("ramp_step_A")))
@@ -216,12 +209,10 @@ def page() -> None:
                             "Delay between readings (s)", float(d("gaussmeter_read_delay_s")))
                         inputs["field_settle_tolerance_mT"] = num_field(
                             "Field-settle tolerance (mT)", float(d("field_settle_tolerance_mT")),
-                            hint="Advanced: after each magnet step, the field counts as settled "
-                                 "once a short window of gaussmeter readings spans less than this. "
-                                 "Raise it if points stall; lower for tighter field control.")
+                            hint="Field settled when readings span less than this. Raise if points stall.")
                         inputs["temperature_sensor_uids"] = text_field(
                             "Sensor board UID(s)", d("temperature_sensor_uids"),
-                            hint="1 or 2 board UIDs, comma-separated, e.g. 'MB1.T1, DB5.T1'.")
+                            hint="1-2 UIDs, e.g. MB1.T1, DB5.T1.")
 
         with regions.summary:
             summary_box = ui.column().classes("w-full")

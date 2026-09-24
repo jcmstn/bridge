@@ -36,6 +36,7 @@ from typing import Any, Callable, Iterator, Optional
 from nicegui import background_tasks, ui
 
 from instruments.run_time import RunCost, eta_s, format_duration
+from instruments.summary_lines import split_info
 from dc.dc_sweep_utils import finite
 from instruments import run_index
 from instruments.data_naming import RunContext, finish_last_run, proc_path
@@ -209,9 +210,18 @@ def render_summary(info: list[str], warnings: list[str], errors: list[str]) -> N
         ui.label("Warnings").classes("text-bold text-warning mt-2")
         for w in warnings:
             ui.label(f"⚠ {w}").classes("text-warning text-sm")
-    ui.label("Derived values").classes("text-bold mt-2")
-    for i in info:
-        ui.label(f"• {i}").classes("text-sm text-grey-7")
+    # "Key: value — note" lines: muted key column, bold value, small muted note.
+    with ui.grid(columns="auto 1fr").classes("w-full gap-x-3 gap-y-1 items-baseline mt-2"):
+        for line in filter(None, info):
+            key, value, note = split_info(line)
+            if not key:
+                ui.label(note).classes("col-span-2 text-xs text-grey-6")
+                continue
+            ui.label(key).classes("text-sm text-grey-7")
+            with ui.column().classes("gap-0"):
+                ui.label(value).classes("text-sm font-bold text-primary")
+                if note:
+                    ui.label(note).classes("text-xs text-grey-6")
 
 
 def busy_banner() -> None:

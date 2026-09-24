@@ -48,6 +48,7 @@ from textual.widgets import (
 
 from dc.dc_sweep_utils import try_parse
 from mfli.mfli_dual_harmonic_6221 import _AC_CURRENT_CEILING_A, _AC_COMPLIANCE_CEILING_V, extref_lock_s
+from instruments.summary_lines import summary_markup
 from instruments.tui_common import (
     LogRelay, MeasurementApp, MeasurementRunScreen, card, field, format_si, identity_bar,
     switch_field,
@@ -91,12 +92,8 @@ MEASUREMENT_TYPE = "NOISE"
 # One-paragraph blurb + wiring schematic — shown on this program's card in
 # bridge_tui.py.
 MFLI_NOISE_SPECTRUM_DESCRIPTION = (
-    "A quick nV/√Hz noise-floor estimate for the 6221-sourced dual-harmonic "
-    "program — plug the sample in exactly as for a real measurement, run "
-    "this, and read the white-noise floor off the plot to size a lock-in "
-    "filter's time constant/order. Records an Excitation-ON pass (the real "
-    "operating-point floor) and, optionally, an Excitation-OFF baseline — "
-    "no manual rewiring. Not a full noise-metrology characterization."
+    "2 MFLI + 6221, wired as for the 6221 dual-harmonic run. Excitation-ON floor + "
+    "optional OFF baseline, no rewiring."
 )
 
 MFLI_NOISE_SPECTRUM_SCHEMATIC = """\
@@ -149,8 +146,7 @@ DEFAULTS: dict = {
     "cooldown": "",
 }
 
-AUTOMODE_HINT = ("2=low bandwidth (most forgiving acquisition), 3=high bandwidth "
-                  "(fastest tracking once locked), 4=dynamic/auto (default).")
+AUTOMODE_HINT = "2 = low bandwidth, 3 = high bandwidth, 4 = auto (default)."
 
 NUMERIC_FIELDS: dict = {
     "daq_port": int,
@@ -278,11 +274,11 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
                 f"(0, {format_si(_AC_CURRENT_CEILING_A, 'A')}] — check for a mistyped exponent."
             )
         elif len(amp_list) > 1:
-            info.append(f"Excitation currents {amp_list} A peak — {len(amp_list)} complete "
-                        "noise-floor sessions, one file set each.")
+            info.append(f"Excitation currents: {', '.join(format_si(i, 'A') for i in amp_list)} "
+                        f"peak — {len(amp_list)} sessions, one file set each")
         elif amp_list:
-            info.append(f"Excitation current I = {format_si(amp_list[0], 'A')} peak — match "
-                         "your real HARM6 operating point for this estimate to be meaningful.")
+            info.append(f"Excitation current: {format_si(amp_list[0], 'A')} peak — "
+                        "match the real HARM6 operating point")
     if not 0 < state["ac_compliance_V"] <= _AC_COMPLIANCE_CEILING_V:
         errors.append(
             f"6221 compliance must be in (0, {_AC_COMPLIANCE_CEILING_V:g}] V; "
@@ -308,20 +304,19 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
 
     if state["thermal_R_ohm"] is not None:
         thermal = thermal_noise_asd(state["thermal_R_ohm"], state["thermal_T_K"])
-        info.append(f"Johnson-noise reference @ {state['thermal_R_ohm']:g} Ω, "
-                     f"{state['thermal_T_K']:g} K: {thermal:.3g} V/√Hz")
+        info.append(f"Johnson reference: {thermal:.3g} V/√Hz — "
+                    f"{state['thermal_R_ohm']:g} Ω at {state['thermal_T_K']:g} K")
     else:
-        info.append("No reference resistance set — plot will show the measured "
-                     "floor with no Johnson-noise comparison line.")
+        info.append("Johnson reference: none — no R set")
 
     n_passes = 2 if state["also_measure_off"] else 1
     n_amps = max(1, len(state.get("amplitude_list", [])))
     amp_note = f" × {n_amps} excitation current(s)" if n_amps > 1 else ""
-    info.append(f"{n_passes} pass(es) × {_N_CHANNELS} channels{amp_note}")
+    info.append(f"Passes: {n_passes} × {_N_CHANNELS} channels{amp_note}")
     if state["duration_s"] <= 0:
         errors.append("Recording duration must be > 0 s.")
         return info, warnings, errors
-    info.extend(run_costs(state).lines("Estimated total run time"))
+    info.extend(run_costs(state).lines())
     if state["duration_s"] < 10:
         warnings.append(f"Duration {state['duration_s']:g} s is short — the lowest "
                          f"resolvable frequency is ~1/duration ≈ {1/state['duration_s']:.2g} Hz.")
@@ -544,10 +539,10 @@ class MFLINoiseSpectrumApp(MeasurementApp):
     #body { height: 1fr; }
     #form { width: 1fr; padding: 1 2; }
     #sidebar { width: 48; border-left: solid $primary; padding: 1 2; overflow-y: auto; }
-    .field-label { text-style: bold; }
-    .hint { text-style: italic; color: $text-muted; }
-    .switch-row { height: 3; }
-    .switch-row Label { margin-left: 1; content-align: left middle; height: 3; }
+    .field-label { text-style: bold; width: 100%; }
+    .hint { text-style: italic; color: $text-muted; width: 100%; }
+    .switch-row { height: auto; }
+    .switch-row Label { padding-left: 1; content-align: left middle; width: 1fr; height: auto; min-height: 3; }
     .sidebar-title { text-style: bold underline; margin-bottom: 1; }
     #actionbar { height: 3; align: center middle; }
 
@@ -587,20 +582,18 @@ class MFLINoiseSpectrumApp(MeasurementApp):
                               validators=[Number(minimum=1e-3, failure_description="must be > 0")]),
                         field("amplitude_values", "Excitation current (A, peak)",
                               DEFAULTS["amplitude_values"], kind="text",
-                              hint="Single value, or comma-separated list — one complete "
-                                   "noise-floor session runs per value, each saved to its "
-                                   "own file(s)."),
+                              hint="Comma-separate for one session + file set per value."),
                     )
                     yield card(
                         "Reference & duration",
                         field("thermal_R_ohm", "DUT resistance (Ω, optional — Johnson-noise line)",
                               DEFAULTS["thermal_R_ohm"], kind="number", valid_empty=True,
-                              hint="No physical resistor swap needed — just the DUT's approximate R."),
+                              hint="DUT's approximate R, for the Johnson line."),
                         field("thermal_T_K", "Temperature for that comparison (K)",
                               DEFAULTS["thermal_T_K"]),
                         field("duration_s", "Recording duration per pass (s)",
                               DEFAULTS["duration_s"],
-                              hint="Sets the lowest resolvable frequency (~1/duration).",
+                              hint="Lowest frequency ≈ 1/duration.",
                               validators=[Number(minimum=1.0, failure_description="must be ≥ 1")]),
                         switch_field("also_measure_off", "Also record Excitation-OFF baseline",
                                      DEFAULTS["also_measure_off"]),
@@ -612,8 +605,7 @@ class MFLINoiseSpectrumApp(MeasurementApp):
                             "Filter (deliberately wide-open)",
                             field("time_constant_s", "Time constant (s)",
                                   DEFAULTS["time_constant_s"],
-                                  hint="Short TC = wide bandwidth for the noise survey — "
-                                       "unrelated to the production filter setting.",
+                                  hint="Short = wide survey bandwidth.",
                                   validators=[Number(minimum=1e-9, failure_description="must be > 0")]),
                             field("sample_rate_Hz", "Demodulator sample rate (Sa/s)",
                                   DEFAULTS["sample_rate_Hz"],
@@ -667,7 +659,7 @@ class MFLINoiseSpectrumApp(MeasurementApp):
                                   DEFAULTS["leader_osc_index"], kind="integer"),
                             field("leader_pll_demod_index", "PLL phase-detector demod index",
                                   DEFAULTS["leader_pll_demod_index"], kind="integer",
-                                  hint="Must differ from 0 (the noise-survey signal demod)."),
+                                  hint="Not 0 (survey signal demod)."),
                             _automode_select("leader_automode"),
                             muted=True,
                         )
@@ -681,7 +673,7 @@ class MFLINoiseSpectrumApp(MeasurementApp):
                                   DEFAULTS["follower_osc_index"], kind="integer"),
                             field("follower_pll_demod_index", "PLL phase-detector demod index",
                                   DEFAULTS["follower_pll_demod_index"], kind="integer",
-                                  hint="Must differ from 0 (the noise-survey signal demod)."),
+                                  hint="Not 0 (survey signal demod)."),
                             _automode_select("follower_automode"),
                             muted=True,
                         )
@@ -714,17 +706,7 @@ class MFLINoiseSpectrumApp(MeasurementApp):
             f"File:  [bold]{preview}[/bold]" if preview
             else "[dim]File:  (choose a sample and device to preview the filename)[/dim]"
         )
-        lines: list[str] = []
-        if errors:
-            lines.append("[bold red]Blocking issues[/bold red]")
-            lines += [f"  [red]✗ {e}[/red]" for e in errors]
-        if warnings:
-            lines.append("[bold yellow]Warnings[/bold yellow]")
-            lines += [f"  [yellow]⚠ {w}[/yellow]" for w in warnings]
-        lines.append("[bold]Derived values[/bold]")
-        lines += [f"  [dim]•[/dim] {i}" for i in info]
-
-        self.query_one("#summary", Static).update("\n".join(lines))
+        self.query_one("#summary", Static).update(summary_markup(info, warnings, errors))
         self.query_one("#start", Button).disabled = bool(errors)
 
     # ── Start ────────────────────────────────────────────────────────────────

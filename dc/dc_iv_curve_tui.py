@@ -82,6 +82,7 @@ from instruments.run_time import (
     GATE_RAMP_S, GPIB_TXN_S, POINT_OVERHEAD_S, PER_FILE_S, PER_RUN_S, TEMP_READ_S,
     RunCost,
 )
+from instruments.summary_lines import summary_markup
 from instruments.tui_common import (
     MeasurementApp,
     MeasurementRunScreen,
@@ -108,15 +109,8 @@ SETTINGS_PATH = _DEFAULT_DATA_DIR / "dc_iv_curve_tui_settings.json"
 MEASUREMENT_TYPE = "IV"
 
 DC_IV_DESCRIPTION = (
-    "Sweeps a DC current with a Keithley 6221 and records the DC voltage "
-    "response with a Keithley 2182 at each point — a direct I-V curve, "
-    "swept bidirectionally so hysteresis is visible. Far more informative "
-    "than a single-point resistance for anything nonlinear (contacts, "
-    "tunnel junctions, diodes, gated 2D systems). No magnet is involved; "
-    "the current sweep is the whole measurement. An optional Keithley 2400 "
-    "gate voltage (off by default) can be held fixed, or swept through a "
-    "list of values — one complete I-V sweep per gate value, plotted "
-    "together in different colors."
+    "6221 current sweep · 2182 voltage. No magnet. Optional 2400 gate: fixed, or a "
+    "list → one sweep per value."
 )
 
 # Wiring schematic — shown on this program's card in bridge_tui.py.
@@ -315,11 +309,8 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     elif state["current_min_A"] == state["current_max_A"]:
         warnings.append("current_min equals current_max — sweep will repeat a single point.")
 
-    info.append(f"Current range: {format_si(state['current_min_A'], 'A')} → "
-                f"{format_si(state['current_max_A'], 'A')}")
-
     read_s = read_time_s(state["nplc"])
-    info.append(f"Estimated 2182 reading time ≈ {read_s * 1000:.0f} ms (NPLC={state['nplc']:g})")
+    info.append(f"2182 read: ≈ {read_s * 1000:.0f} ms — NPLC {state['nplc']:g}")
 
     n_sweep_points = 0
     if state["step_A"] <= 0:
@@ -330,10 +321,10 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
                                                state["step_A"], state["bidirectional_sweep"])
         except ValueError as exc:
             errors.append(str(exc))
-    direction = (f"{state['current_min_A']:g} A → {state['current_max_A']:g} A → {state['current_min_A']:g} A"
-                 if state["bidirectional_sweep"]
-                 else f"{state['current_min_A']:g} A → {state['current_max_A']:g} A")
-    info.append(f"Sweep: {direction}, step={state['step_A']:g} A, {n_sweep_points} points")
+    lo, hi = format_si(state["current_min_A"], "A"), format_si(state["current_max_A"], "A")
+    direction = f"{lo} → {hi} → {lo}" if state["bidirectional_sweep"] else f"{lo} → {hi}"
+    info.append(f"Current sweep: {direction} — step {format_si(state['step_A'], 'A')}, "
+                f"{n_sweep_points} points")
 
     if state["enable_gate"]:
         if state["gate_visa_resource"] in (state["source_visa_resource"], state["voltmeter_visa_resource"]):
@@ -352,13 +343,13 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
                 )
             n_series = len(gate_list)
             if n_series > 1:
-                info.append(f"Gate: {n_series} values {gate_list} — {n_series} complete sweeps, "
-                            f"one file each, plotted together")
+                info.append(f"Gate: {', '.join(format_si(v, 'V') for v in gate_list)} — "
+                            f"{n_series} sweeps, one file each")
             else:
-                info.append(f"Gate held fixed at {format_si(gate_list[0], 'V')}" if gate_list else "")
-            info.extend(run_costs(n_sweep_points, state).lines("Estimated total run time"))
+                info.append(f"Gate: {format_si(gate_list[0], 'V')} — fixed" if gate_list else "")
+            info.extend(run_costs(n_sweep_points, state).lines())
     else:
-        info.extend(run_costs(n_sweep_points, state).lines("Estimated total run time"))
+        info.extend(run_costs(n_sweep_points, state).lines())
 
     if state["enable_temperature"]:
         uids = parse_sensor_uids(state["temperature_sensor_uids"])
@@ -366,10 +357,9 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
             warnings.append("Temperature logging is on but no sensor UID is set — "
                              "temperature columns will be empty.")
         else:
-            info.append(f"Temperature logged via MercuryiTC ({', '.join(uids)}) — "
-                         "if unreachable, columns are simply left empty.")
+            info.append(f"Temperature: MercuryiTC {', '.join(uids)} — empty if unreachable")
     else:
-        info.append("Temperature logging off.")
+        info.append("Temperature: off")
 
     return info, warnings, errors
 
@@ -730,10 +720,10 @@ class DCIVCurveApp(MeasurementApp):
 
     .card-title { text-style: bold underline; margin-bottom: 1; }
     .field { margin-bottom: 1; }
-    .field-label { text-style: bold; }
-    .hint { text-style: italic; color: $text-muted; }
-    .switch-row { height: 3; }
-    .switch-row Label { margin-left: 1; content-align: left middle; height: 3; }
+    .field-label { text-style: bold; width: 100%; }
+    .hint { text-style: italic; color: $text-muted; width: 100%; }
+    .switch-row { height: auto; }
+    .switch-row Label { padding-left: 1; content-align: left middle; width: 1fr; height: auto; min-height: 3; }
     .sidebar-title { text-style: bold underline; margin-bottom: 1; }
     .card-desc { color: $text-muted; margin-bottom: 1; }
     #actionbar { height: 3; align: center middle; }
@@ -762,8 +752,7 @@ class DCIVCurveApp(MeasurementApp):
                         switch_field("enable_gate", "Enable gate", DEFAULTS["enable_gate"]),
                         field("gate_voltage_values", "Gate voltage (V)",
                               DEFAULTS["gate_voltage_values"], kind="text",
-                              hint="Single value, or comma-separated list — one complete "
-                                   "sweep runs per value, plotted together."),
+                              hint="Comma-separate for one sweep + file per value."),
                     )
                     yield card(
                         "Temperature logging",
@@ -777,8 +766,7 @@ class DCIVCurveApp(MeasurementApp):
                         yield card(
                             "Source & voltmeter",
                             field("compliance_V", "Compliance voltage (V)", DEFAULTS["compliance_V"],
-                                  hint="Set high enough to reach the expected voltage at "
-                                       "current_max_A, or the sweep clips against compliance.",
+                                  hint="Must exceed V at current_max_A, or the sweep clips.",
                                   validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
                             field("nplc", "NPLC (integration time)", DEFAULTS["nplc"],
                                   hint="Bigger = quieter but slower.",
@@ -856,17 +844,7 @@ class DCIVCurveApp(MeasurementApp):
             else "[dim]File:  (choose a sample and device to preview the filename)[/dim]"
         )
 
-        lines: list[str] = []
-        if errors:
-            lines.append("[bold red]Blocking issues[/bold red]")
-            lines += [f"  [red]✗ {e}[/red]" for e in errors]
-        if warnings:
-            lines.append("[bold yellow]Warnings[/bold yellow]")
-            lines += [f"  [yellow]⚠ {w}[/yellow]" for w in warnings]
-        lines.append("[bold]Derived values[/bold]")
-        lines += [f"  [dim]•[/dim] {i}" for i in info if i]
-
-        self.query_one("#summary", Static).update("\n".join(lines))
+        self.query_one("#summary", Static).update(summary_markup(info, warnings, errors))
         self.query_one("#start", Button).disabled = bool(errors)
 
     # ── Start ────────────────────────────────────────────────────────────────

@@ -85,8 +85,8 @@ def test_pulsed_magnet_parking_guard_matches_the_loop():
 def test_summary_line_is_the_run_costs_total(tmp_path):
     state = pulsed_state(data_dir=str(tmp_path))
     info, _, _ = pulsed.build_summary(state)
-    line = next(i for i in info if i.startswith("Estimated run time"))
-    assert line.startswith(f"Estimated run time ≈ {rt.format_duration(pulsed.run_costs(state).total_s)}")
+    line = next(i for i in info if i.startswith("Run time"))
+    assert line.startswith(f"Run time: ≈ {rt.format_duration(pulsed.run_costs(state).total_s)}")
 
 
 # ── sot_pulsed_switching_2h ─────────────────────────────────────────────────

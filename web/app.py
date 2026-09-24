@@ -161,7 +161,7 @@ def _recent_runs_table() -> None:
     def _table() -> None:
         runs = run_index.recent_runs(limit=20)
         if not runs:
-            ui.label("No runs recorded yet — this fills in as you run measurements.") \
+            ui.label("No runs recorded yet.") \
                 .classes("text-grey-6")
             return
         rows = [{
@@ -182,11 +182,7 @@ def _recent_runs_table() -> None:
 def landing() -> None:
     ui.page_title(APP_TITLE)
     busy_banner()
-    ui.label(APP_TITLE).classes("text-3xl font-bold")
-    ui.label(
-        "Web front end for the DC, MFLI and SOT measurement programs — runs alongside "
-        "the Textual TUI (bridge_tui.py), not instead of it."
-    ).classes("text-grey-7 mb-4")
+    ui.label(APP_TITLE).classes("text-3xl font-bold mb-4")
 
     with ui.row().classes("w-full gap-4 items-start"):
         with ui.column().classes("flex-1 gap-3"):

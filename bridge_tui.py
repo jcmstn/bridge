@@ -156,7 +156,7 @@ class LauncherApp(App):
                     for program in programs:
                         yield _card(program)
         yield Static("Recent runs", id="runs_title")
-        yield Static("No runs recorded yet — this fills in as you run measurements.", id="runs_empty")
+        yield Static("No runs recorded yet.", id="runs_empty")
         yield DataTable(id="recent_runs", zebra_stripes=True, cursor_type="row")
         yield Footer()
 

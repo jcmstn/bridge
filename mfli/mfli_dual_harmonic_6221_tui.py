@@ -183,8 +183,7 @@ AUTOMODE_OPTIONS: list[tuple[str, int]] = [
     ("3 — high bandwidth", 3),
     ("4 — dynamic (auto)", 4),
 ]
-AUTOMODE_HINT = ("2=most forgiving acquisition (marginal/noisy signal), "
-                 "3=fastest tracking once locked, 4=auto-adapts (default).")
+AUTOMODE_HINT = "2 = most forgiving, 3 = fastest tracking, 4 = auto (default)."
 
 # id -> caster, for every free-text numeric field (Select/Switch handled separately)
 NUMERIC_FIELDS: dict = {
@@ -418,12 +417,8 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
 
     follower_prefix, follower_display = follower_naming(state["measure_rxx"])
     if state["measure_rxx"]:
-        info.append(
-            "R_xx mode: the follower reads R_xx's 1f instead of R_xy's 2f — "
-            "move its Signal Input cable by hand to the R_xx probe pair "
-            "before this run. 2f is unavailable in this mode (only two "
-            "physical MFLIs); use this program with R_xx off for 1f/2f."
-        )
+        info.append("R_xx mode: on — follower reads R_xx 1f (no 2f); move its Signal Input "
+                    "to the R_xx probes by hand")
 
     if state.get("amplitude_parse_error"):
         errors.append(f"Excitation current list: {state['amplitude_parse_error']}")
@@ -436,11 +431,10 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
                 f"(0, {format_si(_AC_CURRENT_CEILING_A, 'A')}] — check for a mistyped exponent."
             )
         elif len(amp_list) > 1:
-            info.append(f"Excitation currents {amp_list} A peak — {len(amp_list)} complete "
-                        "sweeps (one 6221 re-arm each), one file set each.")
+            info.append(f"Excitation currents: {', '.join(format_si(i, 'A') for i in amp_list)} "
+                        f"peak — {len(amp_list)} sweeps, one file set each")
         elif amp_list:
-            info.append(f"Excitation current I = {format_si(amp_list[0], 'A')} peak "
-                         "(ideal 6221 current source)")
+            info.append(f"Excitation current: {format_si(amp_list[0], 'A')} peak")
     if not 0 < state["ac_compliance_V"] <= _AC_COMPLIANCE_CEILING_V:
         errors.append(
             f"6221 compliance must be in (0, {_AC_COMPLIANCE_CEILING_V:g}] V; "
@@ -458,15 +452,9 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
                     f"harmonic ({nearest} Hz) — mains pickup risk."
                 )
 
-    info.append(
-        "Wiring requirement: the 6221's Trigger Link phase marker "
-        f"(line {state['phasemarker_line']}) must reach Aux In "
-        f"{state['leader_aux_input_ch'] + 1} on BOTH the leader AND the "
-        "follower (BNC T / power divider, equal cable lengths) — a "
-        "follower fed only via MDS will silently collapse the 2f signal "
-        "toward zero once the two clocks drift apart. See the module "
-        "docstring."
-    )
+    info.append(f"Phase marker: Trigger Link {state['phasemarker_line']} → Aux In "
+                f"{state['leader_aux_input_ch'] + 1} on BOTH MFLIs — equal cables; an MDS-only "
+                "follower silently loses 2f")
 
     # The real 1f/2f signal demod is fixed at index 0 (see _build_plan below)
     # — the PLL detector must be a different demod (extrefs/N/adcselect is
@@ -494,11 +482,11 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
                     f"({recommended_settle:g} s, order {order}) — filter may not have settled."
                 )
             else:
-                info.append(f"{label} settling ≥ {settle_multiple}×TC ({recommended_settle:g} s) ✓")
+                info.append(f"{label} settling: ✓ — ≥ {settle_multiple}×TC ({recommended_settle:g} s)")
 
             bw = 1.0 / (2 * math.pi * tc)
             min_rate = 4 * bw
-            info.append(f"{label} filter noise bandwidth ≈ {bw:.3g} Hz")
+            info.append(f"{label} noise bandwidth: ≈ {bw:.3g} Hz")
             if state["sample_rate_Hz"] < min_rate:
                 warnings.append(
                     f"Sample rate {state['sample_rate_Hz']:g} Sa/s may be low for {label} TC "
@@ -541,10 +529,9 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
             n_raw = sum(n for _, _, n in rows)
             n_merged = 2 * n_raw - total_points
             merged_note = f", {n_merged} shared boundary point(s) merged" if n_merged else ""
-            info.append(f"Sweep: {len(rows)} row(s), {total_points} points (bidirectional)"
+            info.append(f"Field sweep: {total_points} points — {len(rows)} row(s), bidirectional"
                          f"{merged_note}")
-        info.append("Field measured live at each point via Lake Shore 475 Gaussmeter "
-                     f"({state['gaussmeter_visa_resource']})")
+        info.append(f"Field read: Lake Shore 475 — {state['gaussmeter_visa_resource']}")
         tol_mT = state["field_settle_tolerance_mT"]
         if tol_mT <= 0:
             warnings.append("Field-settle tolerance is 0 — every magnet step will wait the "
@@ -553,10 +540,10 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
             warnings.append(f"Field-settle tolerance {tol_mT:g} mT is below the 475's typical "
                              "reading noise — points may stall until the settle timeout.")
         if resolved is not None:
-            info.extend(run_costs(state, resolved).lines("Estimated total run time"))
+            info.extend(run_costs(state, resolved).lines())
     else:
-        info.append("Single point — no field sweep, magnet untouched.")
-        info.extend(run_costs(state).lines("Estimated run time"))
+        info.append("Field: none — single point, magnet untouched")
+        info.extend(run_costs(state).lines())
 
     if state["enable_temperature"]:
         uids = parse_sensor_uids(state["temperature_sensor_uids"])
@@ -564,10 +551,9 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
             warnings.append("Temperature logging is on but no sensor UID is set — "
                              "temperature columns will be empty.")
         else:
-            info.append(f"Temperature logged via MercuryiTC ({', '.join(uids)}) — "
-                         "if unreachable, columns are simply left empty.")
+            info.append(f"Temperature: MercuryiTC {', '.join(uids)} — empty if unreachable")
     else:
-        info.append("Temperature logging off.")
+        info.append("Temperature: off")
 
     if state["enable_phase_cal"]:
         if state["measure_rxx"]:
@@ -598,12 +584,9 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
                         f"than the sweep extremes (±{max_abs_I:g} A) — pick a point near "
                         "saturation for a clean, well-behaved PHE/AHE null."
                     )
-                info.append(
-                    f"Phase cal: ramp to {state['phase_cal_current_A']:g} A, null 1f Y "
-                    "(leader demod phaseshift), then run the sweep."
-                )
+                info.append(f"Phase cal: at {state['phase_cal_current_A']:g} A — null 1f Y, then sweep")
         else:
-            info.append("Phase cal: null 1f Y at the present field (no magnet ramp).")
+            info.append("Phase cal: at present field — null 1f Y")
 
     geom_fields = {
         "Hall bar length": state["hall_bar_length_um"],

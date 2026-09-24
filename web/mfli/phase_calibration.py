@@ -91,17 +91,16 @@ def page() -> None:
                 with param_card("Field sweep & calibration point"):
                     inputs["calibration_current_A"] = num_field(
                         "Calibration magnet current (A)", float(d("calibration_current_A")),
-                        hint="Where the 1f Y-null is performed — pick a point near saturation "
-                             "(e.g. matching the sweep max).")
+                        hint="Where 1f Y is nulled — pick near saturation.")
                     inputs["sweep_rows"] = textarea_field(
                         "Sweep rows: start, stop, points (one per line)",
                         d("sweep_rows"),
-                        hint="Adjacent rows sharing a boundary value are merged, not duplicated.")
+                        hint="Shared boundary points are merged.")
 
                 with param_card("Excitation"):
                     inputs["frequency_Hz"] = num_field(
                         "Excitation frequency (Hz)", float(d("frequency_Hz")),
-                        hint="Avoid exact multiples of 50/60 Hz (mains pickup).")
+                        hint="Avoid multiples of 50/60 Hz.")
                     inputs["amplitude_V"] = num_field("Output amplitude (V, peak)", float(d("amplitude_V")))
                     inputs["series_R_ohm"] = num_field(
                         "Series resistor (Ω)", float(d("series_R_ohm")), hint="Sets excitation current: I ≈ V / R.")
@@ -110,13 +109,13 @@ def page() -> None:
                     switches["enable_amplitude_check"] = bool_switch("Run current-amplitude scaling check", d("enable_amplitude_check"))
                     inputs["amplitudes_V"] = text_field(
                         "Amplitudes to test (V, comma-separated)", d("amplitudes_V"),
-                        hint="≥ 2 values. Checks whether the 2f signal scales linearly with drive current.")
+                        hint="≥ 2 values. Linear = SOT; faster = heating/ANE.")
 
                 with param_card("Frequency check (optional)"):
                     switches["enable_frequency_check"] = bool_switch("Run frequency scaling check", d("enable_frequency_check"))
                     inputs["frequencies_Hz"] = text_field(
                         "Frequencies to test (Hz, comma-separated)", d("frequencies_Hz"),
-                        hint="≥ 2 values. Checks whether the optimal 1f phase scales linearly with frequency.")
+                        hint="≥ 2 values. Phase linear in f = fixed delay.")
 
                 with param_card("Temperature logging"):
                     switches["enable_temperature"] = bool_switch(
@@ -128,7 +127,7 @@ def page() -> None:
                     with param_card("Lock-in filter"):
                         inputs["time_constant_s"] = num_field(
                             "Filter time constant (s)", float(d("time_constant_s")),
-                            hint="Bigger = quieter but slower & longer settling.")
+                            hint="Bigger = quieter but slower.")
                         order_select = ui.select(list(range(1, 9)), value=int(d("order")), label="Filter order").classes("w-full")
                         switches["sinc_filter"] = bool_switch("Sinc filter (extra harmonic rejection)", d("sinc_filter"))
                         inputs["input_range_1f_V"] = num_field("1f input range (V)", float(d("input_range_1f_V")))
@@ -143,15 +142,14 @@ def page() -> None:
                     with param_card("Sweep timing & hold check"):
                         inputs["sweep_settling_time_s"] = num_field(
                             "Settling time per sweep point (s)", float(d("sweep_settling_time_s")),
-                            hint="Rule of thumb: ≥ 5 × time constant.")
+                            hint="≥ 5 × TC.")
                         inputs["sweep_n_averages"] = num_field(
                             "Samples to average per sweep point", float(d("sweep_n_averages")), integer=True)
                         inputs["hold_tol_ratio"] = num_field(
                             "Max acceptable |Y|/R away from the calibration point", float(d("hold_tol_ratio")),
-                            hint="Flags drift if the null residual exceeds this anywhere in the sweep.")
+                            hint="Flags drift if the residual exceeds this.")
                         ui.label(
-                            "Nulls the leader's 1f Y quadrature by adjusting its demod phaseshift node "
-                            "(the same thing LabOne's \"Auto\" phase button does)."
+                            "Nulls leader 1f Y via demod phase (like LabOne Auto)."
                         ).classes("text-xs text-grey-6")
 
                     with param_card("Scaling-check advanced"):
@@ -173,7 +171,7 @@ def page() -> None:
                         inputs["visa_resource"] = text_field("Magnet VISA resource", d("visa_resource"))
                         inputs["current_limit_A"] = num_field(
                             "Software current limit (A)", float(d("current_limit_A")),
-                            hint="Hard safety ceiling — independent of the supply's own range.")
+                            hint="Hard safety ceiling.")
                         inputs["voltage_compliance_V"] = num_field("Voltage compliance (V)", float(d("voltage_compliance_V")))
                         inputs["ramp_step_A"] = num_field("Ramp step (A)", float(d("ramp_step_A")))
                         inputs["ramp_delay_s"] = num_field("Ramp delay (s)", float(d("ramp_delay_s")))
@@ -181,15 +179,14 @@ def page() -> None:
                     with stable_card("Gaussmeter"):
                         inputs["gaussmeter_visa_resource"] = text_field(
                             "Gaussmeter VISA resource", d("gaussmeter_visa_resource"),
-                            hint="Lake Shore 475 — measures the actual field at each point.")
+                            hint="Lake Shore 475.")
                         inputs["gaussmeter_n_averages"] = num_field(
                             "Field readings averaged per point", float(d("gaussmeter_n_averages")), integer=True)
                         inputs["gaussmeter_read_delay_s"] = num_field(
                             "Delay between readings (s)", float(d("gaussmeter_read_delay_s")))
                         inputs["field_settle_tolerance_mT"] = num_field(
                             "Field-settle tolerance (mT)", float(d("field_settle_tolerance_mT")),
-                            hint="Advanced: after each magnet step, wait until a short window of "
-                                 "gaussmeter readings spans less than this before the settling time.")
+                            hint="Field settled when readings span less than this. Raise if points stall.")
 
                     with stable_card("Temperature controller"):
                         inputs["temperature_visa_resource"] = text_field("MercuryiTC VISA resource", d("temperature_visa_resource"))

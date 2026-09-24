@@ -99,6 +99,7 @@ from instruments.run_time import (
     GPIB_TXN_S, MDS_SYNC_S, PER_RUN_S, POINT_OVERHEAD_S, TEMP_READ_S,
     RunCost,
 )
+from instruments.summary_lines import summary_markup
 from instruments.tui_common import (
     MeasurementApp,
     MeasurementRunScreen,
@@ -132,15 +133,9 @@ MEASUREMENT_TYPE = "HARM"
 # One-paragraph blurb + wiring schematic — shown on this program's card in
 # bridge_tui.py, and the description also on its web page.
 MFLI_DUAL_HARMONIC_DESCRIPTION = (
-    "Drives an AC current through the sample and reads the 1st-harmonic response "
-    "on the leader while the follower reads the 2nd-harmonic response — the "
-    "standard setup for e.g. a nonlinear/planar Hall measurement. The current "
-    "comes from the leader MFLI's Signal Output through a series resistor, or "
-    "— 'AC current source' toggle — from a Keithley 6221 ideal current source "
-    "whose phase marker both MFLIs lock to (a list of currents and an R_xx mode "
-    "too). Optionally sweeps a Kepco electromagnet's field (bidirectionally, for "
-    "hysteresis) with the field measured live via a Lake Shore 475 Gaussmeter at "
-    "every point."
+    "Leader MFLI 1f · follower MFLI 2f. AC source: leader Signal Output via series "
+    "R, or 6221 (phase marker to both MFLIs). Optional Kepco field sweep, read by "
+    "Lake Shore 475."
 )
 
 MFLI_DUAL_HARMONIC_SCHEMATIC = """\
@@ -414,7 +409,7 @@ def _build_summary_mfli(state: dict) -> tuple[list[str], list[str], list[str]]:
 
     if state["series_R_ohm"] > 0:
         I = state["amplitude_V"] / state["series_R_ohm"]
-        info.append(f"Excitation current I ≈ {format_si(I, 'A')}")
+        info.append(f"Excitation current: ≈ {format_si(I, 'A')}")
     else:
         errors.append("Series resistor must be > 0 Ω.")
 
@@ -444,11 +439,11 @@ def _build_summary_mfli(state: dict) -> tuple[list[str], list[str], list[str]]:
                     f"({recommended_settle:g} s, order {order}) — filter may not have settled."
                 )
             else:
-                info.append(f"{label} settling ≥ {settle_multiple}×TC ({recommended_settle:g} s) ✓")
+                info.append(f"{label} settling: ✓ — ≥ {settle_multiple}×TC ({recommended_settle:g} s)")
 
             bw = 1.0 / (2 * math.pi * tc)
             min_rate = 4 * bw
-            info.append(f"{label} filter noise bandwidth ≈ {bw:.3g} Hz")
+            info.append(f"{label} noise bandwidth: ≈ {bw:.3g} Hz")
             if state["sample_rate_Hz"] < min_rate:
                 warnings.append(
                     f"Sample rate {state['sample_rate_Hz']:g} Sa/s may be low for {label} TC "
@@ -496,10 +491,9 @@ def _build_summary_mfli(state: dict) -> tuple[list[str], list[str], list[str]]:
             n_raw = sum(n for _, _, n in rows)
             n_merged = 2 * n_raw - total_points
             merged_note = f", {n_merged} shared boundary point(s) merged" if n_merged else ""
-            info.append(f"Sweep: {len(rows)} row(s), {total_points} points (bidirectional)"
+            info.append(f"Field sweep: {total_points} points — {len(rows)} row(s), bidirectional"
                          f"{merged_note}")
-        info.append("Field measured live at each point via Lake Shore 475 Gaussmeter "
-                     f"({state['gaussmeter_visa_resource']})")
+        info.append(f"Field read: Lake Shore 475 — {state['gaussmeter_visa_resource']}")
         tol_mT = state["field_settle_tolerance_mT"]
         if tol_mT <= 0:
             warnings.append("Field-settle tolerance is 0 — every magnet step will wait the "
@@ -508,10 +502,10 @@ def _build_summary_mfli(state: dict) -> tuple[list[str], list[str], list[str]]:
             warnings.append(f"Field-settle tolerance {tol_mT:g} mT is below the 475's typical "
                              "reading noise — points may stall until the settle timeout.")
         if resolved is not None:
-            info.extend(run_costs(state, resolved).lines("Estimated total run time"))
+            info.extend(run_costs(state, resolved).lines())
     else:
-        info.append("Single point — no field sweep, magnet untouched.")
-        info.extend(run_costs(state).lines("Estimated run time"))
+        info.append("Field: none — single point, magnet untouched")
+        info.extend(run_costs(state).lines())
 
     if state["enable_temperature"]:
         uids = parse_sensor_uids(state["temperature_sensor_uids"])
@@ -519,10 +513,9 @@ def _build_summary_mfli(state: dict) -> tuple[list[str], list[str], list[str]]:
             warnings.append("Temperature logging is on but no sensor UID is set — "
                              "temperature columns will be empty.")
         else:
-            info.append(f"Temperature logged via MercuryiTC ({', '.join(uids)}) — "
-                         "if unreachable, columns are simply left empty.")
+            info.append(f"Temperature: MercuryiTC {', '.join(uids)} — empty if unreachable")
     else:
-        info.append("Temperature logging off.")
+        info.append("Temperature: off")
 
     if state["enable_phase_cal"]:
         if state["phase_cal_current_A"] is not None:
@@ -545,12 +538,9 @@ def _build_summary_mfli(state: dict) -> tuple[list[str], list[str], list[str]]:
                         f"than the sweep extremes (±{max_abs_I:g} A) — pick a point near "
                         "saturation for a clean, well-behaved PHE/AHE null."
                     )
-                info.append(
-                    f"Phase cal: ramp to {state['phase_cal_current_A']:g} A, null 1f Y "
-                    "(leader demod phaseshift), then run the sweep."
-                )
+                info.append(f"Phase cal: at {state['phase_cal_current_A']:g} A — null 1f Y, then sweep")
         else:
-            info.append("Phase cal: null 1f Y at the present field (no magnet ramp).")
+            info.append("Phase cal: at present field — null 1f Y")
 
     geom_fields = {
         "Hall bar length": state["hall_bar_length_um"],
@@ -1086,11 +1076,11 @@ class MFLIDualHarmonicApp(MeasurementApp):
     #body { height: 1fr; }
     #form { width: 1fr; padding: 1 2; }
     #sidebar { width: 48; border-left: solid $primary; padding: 1 2; overflow-y: auto; }
-    .field-label { text-style: bold; }
-    .hint { text-style: italic; color: $text-muted; }
+    .field-label { text-style: bold; width: 100%; }
+    .hint { text-style: italic; color: $text-muted; width: 100%; }
     .sweep-rows { height: 5; margin-bottom: 1; }
-    .switch-row { height: 3; }
-    .switch-row Label { margin-left: 1; content-align: left middle; height: 3; }
+    .switch-row { height: auto; }
+    .switch-row Label { padding-left: 1; content-align: left middle; width: 1fr; height: auto; min-height: 3; }
     .plane-btn-row { height: 3; margin-bottom: 1; }
     .plane-btn-row Button { min-width: 5; margin-right: 1; }
     .field-diagram { color: $text-muted; margin-top: 1; }
@@ -1135,8 +1125,7 @@ class MFLIDualHarmonicApp(MeasurementApp):
                                      hint="MFLI → saved as HARM · 6221 → HARM6"),
                         field("frequency_Hz", "Excitation frequency (Hz)",
                               DEFAULTS["frequency_Hz"],
-                              hint="Recommended ~300-1000 Hz — avoid exact multiples of 50/60 Hz "
-                                   "(mains pickup).",
+                              hint="~300-1000 Hz; avoid multiples of 50/60 Hz.",
                               validators=[Number(minimum=1e-3, failure_description="must be > 0")]),
                     )
                     yield card(
@@ -1154,9 +1143,7 @@ class MFLIDualHarmonicApp(MeasurementApp):
                         "Keithley 6221 AC current",
                         field("amplitude_values", "Excitation current (A, peak)",
                               DEFAULTS["amplitude_values"], kind="text",
-                              hint="Ideal current source — no series resistor. Single value, "
-                                   "or comma-separated list — one complete sweep runs per "
-                                   "value (own 6221 re-arm), each saved to its own file."),
+                              hint="No series R. Comma-separate for one sweep + file per value."),
                         field("ac_compliance_V", "6221 voltage compliance (V)",
                               DEFAULTS["ac_compliance_V"],
                               validators=[Number(minimum=0.1, failure_description="must be > 0")]),
@@ -1200,17 +1187,14 @@ class MFLIDualHarmonicApp(MeasurementApp):
                         field(
                             "phase_cal_current_A", "Calibration magnet current (A)",
                             DEFAULTS["phase_cal_current_A"], kind="text", valid_empty=True,
-                            hint="Blank = null at the present field. Otherwise pick a point near "
-                                 "saturation (e.g. matching i_max). Only used if the field sweep "
-                                 "above is enabled.",
+                            hint="Blank = present field. Else near saturation; needs the field sweep on.",
                         ),
                     )
                     yield card(
                         "Sample geometry & field direction (optional)",
                         field("hall_bar_length_um", "Hall bar length (µm)",
                               DEFAULTS["hall_bar_length_um"], kind="text", valid_empty=True,
-                              hint="Current-path length between voltage probes. Leave blank if "
-                                   "unknown — doesn't block the run."),
+                              hint="Between voltage probes. Optional."),
                         field("hall_bar_width_um", "Hall bar width (µm)",
                               DEFAULTS["hall_bar_width_um"], kind="text", valid_empty=True),
                         field("hall_bar_thickness_nm", "Film/channel thickness (nm)",
@@ -1218,11 +1202,11 @@ class MFLIDualHarmonicApp(MeasurementApp):
                         field("field_theta_deg", "θ — tilt from out-of-plane (°)",
                               DEFAULTS["field_theta_deg"], kind="number", valid_empty=True,
                               validators=[Number(0, 180, failure_description="0-180°")],
-                              hint="0° = fully out-of-plane (film normal), 90° = in-plane."),
+                              hint="0° = out-of-plane, 90° = in-plane."),
                         field("field_phi_deg", "φ — azimuth from current axis (°)",
                               DEFAULTS["field_phi_deg"], kind="number", valid_empty=True,
                               validators=[Number(0, 360, failure_description="0-360°")],
-                              hint="Meaningless when θ=0°."),
+                              hint="Ignored when θ=0°."),
                         Horizontal(
                             Button("xy", id="plane_xy", classes="plane-btn"),
                             Button("zx", id="plane_zx", classes="plane-btn"),
@@ -1240,7 +1224,7 @@ class MFLIDualHarmonicApp(MeasurementApp):
                             "1f lock-in filter",
                             field("time_constant_1f_s", "Filter time constant (s)",
                                   DEFAULTS["time_constant_1f_s"],
-                                  hint="Bigger = quieter but slower & longer settling.",
+                                  hint="Bigger = quieter but slower.",
                                   validators=[Number(minimum=1e-6, failure_description="must be > 0")]),
                             select_field("order_1f", "Filter order", list(range(1, 9)),
                                          int(DEFAULTS["order_1f"])),
@@ -1251,8 +1235,7 @@ class MFLIDualHarmonicApp(MeasurementApp):
                             "2f lock-in filter",
                             field("time_constant_2f_s", "Filter time constant (s)",
                                   DEFAULTS["time_constant_2f_s"],
-                                  hint="2f bleed-through from 1f is the usual reason "
-                                       "this needs a longer TC / higher order than 1f.",
+                                  hint="Usually longer TC / higher order than 1f (1f bleed-through).",
                                   validators=[Number(minimum=1e-6, failure_description="must be > 0")]),
                             select_field("order_2f", "Filter order", list(range(1, 9)),
                                          int(DEFAULTS["order_2f"])),
@@ -1281,7 +1264,7 @@ class MFLIDualHarmonicApp(MeasurementApp):
                             "Acquisition timing",
                             field("settling_time_s", "Settling time per point (s)",
                                   DEFAULTS["settling_time_s"],
-                                  hint="Rule of thumb: ≥ 5×TC (order 1), ≥ 10×TC (order 3-4, default).",
+                                  hint="≥ 5×TC (order 1), ≥ 10×TC (order 3-4).",
                                   validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
                             field("n_averages", "Samples to average per point",
                                   DEFAULTS["n_averages"], kind="integer",
@@ -1309,7 +1292,7 @@ class MFLIDualHarmonicApp(MeasurementApp):
                                   DEFAULTS["ac_visa_resource"], kind="text"),
                             field("phasemarker_line", "6221 Trigger Link phase-marker pin",
                                   DEFAULTS["phasemarker_line"], kind="integer",
-                                  hint="Confirm your unit's factory default before assuming.",
+                                  hint="Check your unit's factory default.",
                                   validators=[Number(minimum=1, maximum=6,
                                                      failure_description="must be 1-6")]),
                             field("extref_lock_timeout_s", "ExtRef PLL lock timeout (s)",
@@ -1322,9 +1305,7 @@ class MFLIDualHarmonicApp(MeasurementApp):
                                   DEFAULTS["leader_osc_index"], kind="integer"),
                             field("leader_pll_demod_index", "Leader PLL phase-detector demod index",
                                   DEFAULTS["leader_pll_demod_index"], kind="integer",
-                                  hint="Must differ from demod 0 (used for the real 1f signal) — "
-                                       "extrefs/N/adcselect is read-only on real firmware, this "
-                                       "demod's OWN adcselect is what actually selects Aux In.",
+                                  hint="Not 0 (1f signal demod). Its adcselect picks the Aux In.",
                                   validators=[Number(minimum=0, failure_description="must be ≥ 0")]),
                             select_field("leader_automode", "Leader PLL bandwidth adaptation",
                                          six.AUTOMODE_OPTIONS, int(DEFAULTS["leader_automode"]),
@@ -1337,7 +1318,7 @@ class MFLIDualHarmonicApp(MeasurementApp):
                                   DEFAULTS["follower_osc_index"], kind="integer"),
                             field("follower_pll_demod_index", "Follower PLL phase-detector demod index",
                                   DEFAULTS["follower_pll_demod_index"], kind="integer",
-                                  hint="Must differ from demod 0 (used for the real 2f signal).",
+                                  hint="Not 0 (2f signal demod).",
                                   validators=[Number(minimum=0, failure_description="must be ≥ 0")]),
                             select_field("follower_automode", "Follower PLL bandwidth adaptation",
                                          six.AUTOMODE_OPTIONS, int(DEFAULTS["follower_automode"]),
@@ -1350,14 +1331,14 @@ class MFLIDualHarmonicApp(MeasurementApp):
                                   DEFAULTS["visa_resource"], kind="text"),
                             field("current_limit_A", "Software current limit (A)",
                                   DEFAULTS["current_limit_A"],
-                                  hint="Hard safety ceiling — independent of the supply's own range."),
+                                  hint="Hard safety ceiling."),
                             field("voltage_compliance_V", "Voltage compliance (V)",
                                   DEFAULTS["voltage_compliance_V"]),
                             field("ramp_step_A", "Ramp step (A)", DEFAULTS["ramp_step_A"]),
                             field("ramp_delay_s", "Ramp delay (s)", DEFAULTS["ramp_delay_s"]),
                             field("gaussmeter_visa_resource", "Gaussmeter VISA resource",
                                   DEFAULTS["gaussmeter_visa_resource"], kind="text",
-                                  hint="Lake Shore 475 — measures the actual field at each point."),
+                                  hint="Lake Shore 475."),
                             field("gaussmeter_n_averages", "Field readings averaged per point",
                                   DEFAULTS["gaussmeter_n_averages"], kind="integer",
                                   validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
@@ -1365,9 +1346,7 @@ class MFLIDualHarmonicApp(MeasurementApp):
                                   DEFAULTS["gaussmeter_read_delay_s"]),
                             field("field_settle_tolerance_mT", "Field-settle tolerance (mT)",
                                   DEFAULTS["field_settle_tolerance_mT"],
-                                  hint="Advanced: after each magnet step, wait until a short "
-                                       "window of gaussmeter readings spans less than this before "
-                                       "the settling time above. Raise if points stall.",
+                                  hint="Field settled when readings span less than this. Raise if points stall.",
                                   validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
                             muted=True,
                         )
@@ -1375,11 +1354,10 @@ class MFLIDualHarmonicApp(MeasurementApp):
                             "Temperature controller",
                             field("temperature_visa_resource", "MercuryiTC VISA resource",
                                   DEFAULTS["temperature_visa_resource"], kind="text",
-                                  hint="e.g. TCPIP0::<ip>::7020::SOCKET (Ethernet) or an ASRL resource."),
+                                  hint="e.g. TCPIP0::<ip>::7020::SOCKET or ASRL."),
                             field("temperature_sensor_uids", "Sensor board UID(s)",
                                   DEFAULTS["temperature_sensor_uids"], kind="text",
-                                  hint="1 or 2 board UIDs, comma-separated, e.g. 'MB1.T1, DB5.T1'. "
-                                       "Missing readings just leave the column empty."),
+                                  hint="1-2 UIDs, e.g. MB1.T1, DB5.T1."),
                             muted=True,
                         )
                         yield card(
@@ -1428,17 +1406,7 @@ class MFLIDualHarmonicApp(MeasurementApp):
             f"File:  [bold]{preview}[/bold]" if preview
             else "[dim]File:  (choose a sample and device to preview the filename)[/dim]"
         )
-        lines: list[str] = []
-        if errors:
-            lines.append("[bold red]Blocking issues[/bold red]")
-            lines += [f"  [red]✗ {e}[/red]" for e in errors]
-        if warnings:
-            lines.append("[bold yellow]Warnings[/bold yellow]")
-            lines += [f"  [yellow]⚠ {w}[/yellow]" for w in warnings]
-        lines.append("[bold]Derived values[/bold]")
-        lines += [f"  [dim]•[/dim] {i}" for i in info]
-
-        self.query_one("#summary", Static).update("\n".join(lines))
+        self.query_one("#summary", Static).update(summary_markup(info, warnings, errors))
         self.query_one("#start", Button).disabled = bool(errors)
 
         theta = None if parse_errors else state.get("field_theta_deg")

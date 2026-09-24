@@ -189,8 +189,7 @@ AUTOMODE_OPTIONS: list[tuple[str, int]] = [
     ("3 — high bandwidth", 3),
     ("4 — dynamic (auto)", 4),
 ]
-AUTOMODE_HINT = ("2=most forgiving acquisition (marginal/noisy signal), "
-                 "3=fastest tracking once locked, 4=auto-adapts (default).")
+AUTOMODE_HINT = "2 = most forgiving, 3 = fastest tracking, 4 = auto (default)."
 
 NUMERIC_FIELDS: dict = {
     "pmu_channel": int,
@@ -493,10 +492,10 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         if over_range:
             errors.append(f"Pulse amplitude(s) {over_range} V exceed the "
                           f"{state['pmu_v_range_V']:g} V PMU range.")
-        loop = " loop" if state["amplitude_bidirectional"] else ""
-        info.append(f"Amplitude sweep: {len(amps)} pulses "
-                    f"{state['amplitude_start_V']:g} → {state['amplitude_stop_V']:g} V "
-                    f"step {state['amplitude_step_V']:g}{loop}" if amps else "")
+        loop = ", up and back" if state["amplitude_bidirectional"] else ""
+        info.append(f"Amplitude sweep: {state['amplitude_start_V']:g} → "
+                    f"{state['amplitude_stop_V']:g} V — step {state['amplitude_step_V']:g} V, "
+                    f"{len(amps)} pulses{loop}" if amps else "")
         if not state["amplitude_bidirectional"]:
             warnings.append("One-way sweep — turn on 'Sweep up then back down' for a "
                             "hysteresis loop; the sweep is what sets each pulse's starting "
@@ -558,17 +557,15 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     n_currents = max(1, len(currents))
     n_sense = max(1, len(sense_currents))
     n_files = n_currents * n_sense
-    info.append(f"{n} amplitudes, one pulse each"
-                + (f", × {n_files} files ({n_currents} assist current(s) x {n_sense} sense "
-                   f"current(s)) = {n * n_files} total points"
-                   if n_files > 1 else ""))
-    info.extend(run_costs(state).lines("Estimated run time"))
-    info.append(f"For P(V) / I50 statistics, re-run this sweep several times.")
+    info.append(f"Points: {n * n_files} — one pulse each"
+                + (f"; {n} amplitudes × {n_files} files ({n_currents} assist × {n_sense} "
+                   "sense current(s))" if n_files > 1 else ""))
+    info.extend(run_costs(state).lines())
     info.append(f"PMU module: {state['pmu_library']}/{state['pmu_module'] or '<unset>'} "
-                f"({state['pmu_id']} ch {state['pmu_channel']})")
+                f"— {state['pmu_id']} ch {state['pmu_channel']}")
     if sense_currents:
         info.append(f"AC excitation: {format_si(sense_currents[0], 'A')} peak @ "
-                    f"{state['frequency_Hz']:g} Hz, phase marker on Trigger Link pin "
+                    f"{state['frequency_Hz']:g} Hz — phase marker Trigger Link "
                     f"{state['phasemarker_line']} → MFLI Aux In {state['aux_input_ch'] + 1}")
 
     demod_indices = {
@@ -591,8 +588,8 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     r_ch = state.get("pmu_dut_res_ohm", 0.0)
     if r_ch > 0 and amps:
         i_lo, i_hi = min(amps) / r_ch, max(amps) / r_ch
-        info.append(f"At DUT R ≈ {r_ch:g} Ω: pulses ≈ "
-                    f"{format_si(i_lo, 'A')}…{format_si(i_hi, 'A')}")
+        info.append(f"Pulse current: ≈ {format_si(i_lo, 'A')}…{format_si(i_hi, 'A')} — at "
+                    f"R ≈ {r_ch:g} Ω")
         if (state["pmu_v_range_V"] == 10.0
                 and max(abs(i_lo), abs(i_hi)) > _RPM_10V_IMEAS_MAX_A
                 and state["pmu_i_range_A"] <= _RPM_10V_IMEAS_MAX_A):
@@ -604,21 +601,17 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
 
     if len(currents) > 1:
         cur_str = ", ".join(f"{i:g}" for i in currents)
-        info.append(f"Assist field: {len(currents)} magnet currents ({cur_str} A) — each gets "
-                    "its own complete amplitude sweep and its own file (measured live by the "
-                    "475). Include a negative value for the ±H_z control.")
+        info.append(f"Magnet currents: {cur_str} A — one sweep + file each, field read by 475")
     elif currents:
-        info.append(f"Static field via magnet current {currents[0]:g} A "
-                    "(measured live by the 475). Comma-separate more values to scan the "
-                    "assist field, or add the opposite sign for the ±H_z control.")
+        info.append(f"Magnet current: {currents[0]:g} A — static, field read by 475")
     info.append(field_direction_summary_line(state["field_theta_deg"], state.get("field_phi_deg")))
 
     if state["enable_temperature"]:
         uids = parse_sensor_uids(state["temperature_sensor_uids"])
-        info.append(f"Temperature logged via MercuryiTC ({', '.join(uids) or 'no UID set'})."
-                    if uids else "Temperature on but no sensor UID — columns stay empty.")
+        info.append(f"Temperature: MercuryiTC {', '.join(uids)}" if uids
+                    else "Temperature: no sensor UID — columns stay empty")
     else:
-        info.append("Temperature logging off.")
+        info.append("Temperature: off")
 
     return info, warnings, errors
 

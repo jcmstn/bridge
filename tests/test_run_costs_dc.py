@@ -103,7 +103,7 @@ def test_spin_valve_default_covers_the_audit_floor_not_just_settle_plus_reads():
     assert rc.points[0] > rc.points[1] + 10.0
     assert rc.tail_s > 10.0                                  # 20 A magnet ramp-down at shutdown
     assert rc.worst_extra_s > 30 * 41 * 0.5                  # a settle timeout is ~30 s per point
-    assert any("worst case" in line for line in rc.lines())
+    assert any("Worst case" in line for line in rc.lines())
 
 
 def test_spin_valve_unidirectional_series_pay_the_return_ramp():
@@ -127,9 +127,9 @@ def test_spin_valve_summary_line_is_the_cost_model():
                                        "gate_visa_resource": "c", "compliance_V": 2.0,
                                        "gate_voltage_limit_V": 20.0, "field_settle_tolerance_mT": 0.02,
                                        "gaussmeter_visa_resource": "g"})
-    line = next(i for i in info if i.startswith("Estimated total run time"))
+    line = next(i for i in info if i.startswith("Run time"))
     rc = sv_tui.run_costs(_currents(_sv_state()), _sv_state())
-    assert line == rc.lines("Estimated total run time")[0]
+    assert line == rc.lines()[0]
 
 
 # ── modelled total >= every sleep the real loop + real Kepco code performs ───

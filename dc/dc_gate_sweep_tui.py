@@ -88,6 +88,7 @@ from instruments.run_time import (
     GATE_RAMP_S, GPIB_TXN_S, PER_FILE_S, PER_RUN_S, POINT_OVERHEAD_S, TEMP_READ_S,
     RunCost,
 )
+from instruments.summary_lines import summary_markup
 from instruments.tui_common import (
     MeasurementApp,
     MeasurementRunScreen,
@@ -114,15 +115,8 @@ SETTINGS_PATH = _DEFAULT_DATA_DIR / "dc_gate_sweep_tui_settings.json"
 MEASUREMENT_TYPE = "GSWP"
 
 DC_GATE_SWEEP_DESCRIPTION = (
-    "Sources a fixed DC sense current with a Keithley 6221 and sweeps the "
-    "gate voltage with a Keithley 2400 (bidirectionally, for hysteresis), "
-    "reading the DUT voltage with a Keithley 2182 at each gate step — the "
-    "standard transfer-curve measurement for a gated device. An optional "
-    "magnet current (single value or a comma-separated list) parks the "
-    "field for the whole sweep; the Lake Shore 475 measures the actual "
-    "field live and logs it on every row. A list runs one complete gate "
-    "sweep per value, each saved to its own file and plotted together in "
-    "different colors."
+    "6221 fixed current · 2400 gate sweep · 2182 voltage. Optional Kepco field "
+    "parked per value, read by Lake Shore 475."
 )
 
 # Wiring schematic — shown on this program's card in bridge_tui.py.
@@ -376,16 +370,16 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         if zero:
             errors.append("Sense current must be nonzero (resistance divides by it).")
         elif len(sense_list) > 1:
-            info.append(f"Sense currents: {sense_list} A — {len(sense_list)} complete gate "
-                        f"sweeps per field value, one file each")
+            info.append(f"Sense currents: {', '.join(format_si(i, 'A') for i in sense_list)} — "
+                        f"{len(sense_list)} sweeps per field value, one file each")
         elif sense_list:
-            info.append(f"Sense current I = {format_si(sense_list[0], 'A')}")
+            info.append(f"Sense current: {format_si(sense_list[0], 'A')}")
 
     if state["compliance_V"] <= 0:
         errors.append("Compliance voltage must be > 0 V.")
 
     read_s = read_time_s(state["nplc"])
-    info.append(f"Estimated 2182 reading time ≈ {read_s * 1000:.0f} ms (NPLC={state['nplc']:g})")
+    info.append(f"2182 read: ≈ {read_s * 1000:.0f} ms — NPLC {state['nplc']:g}")
 
     max_abs_Vg = max(abs(state["gate_min_V"]), abs(state["gate_max_V"]))
     if max_abs_Vg > state["gate_voltage_limit_V"]:
@@ -405,10 +399,10 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
                                                state["step_V"], state["bidirectional_sweep"])
         except ValueError as exc:
             errors.append(str(exc))
-    direction = (f"{state['gate_min_V']:g} V → {state['gate_max_V']:g} V → {state['gate_min_V']:g} V"
-                 if state["bidirectional_sweep"]
-                 else f"{state['gate_min_V']:g} V → {state['gate_max_V']:g} V")
-    info.append(f"Gate sweep: {direction}, step={state['step_V']:g} V, {n_sweep_points} points")
+    lo, hi = format_si(state["gate_min_V"], "V"), format_si(state["gate_max_V"], "V")
+    direction = f"{lo} → {hi} → {lo}" if state["bidirectional_sweep"] else f"{lo} → {hi}"
+    info.append(f"Gate sweep: {direction} — step {format_si(state['step_V'], 'V')}, "
+                f"{n_sweep_points} points")
 
     if state["enable_field"]:
         if state.get("field_parse_error"):
@@ -426,14 +420,13 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         n_sense = max(1, len(sense_list))
         n_files = max(1, n_series) * n_sense
         if n_series > 1:
-            info.append(f"Field: {n_series} magnet currents {field_list} A — {n_series} complete gate "
-                        f"sweeps, one file each, plotted together")
+            info.append(f"Magnet currents: {', '.join(f'{i:g}' for i in field_list)} A — "
+                        f"{n_series} gate sweeps, one file each")
         elif n_series == 1:
-            info.append(f"Field parked at I_magnet={field_list[0]:g} A "
-                         "(actual field measured live via Lake Shore 475)")
+            info.append(f"Magnet current: {field_list[0]:g} A — parked, field read by 475")
         if n_files > max(1, n_series):
-            info.append(f"{n_files} files total ({n_sense} sense current(s) x "
-                        f"{max(1, n_series)} field value(s))")
+            info.append(f"Files: {n_files} — {n_sense} sense current(s) × "
+                        f"{max(1, n_series)} field value(s)")
         tol_mT = state["field_settle_tolerance_mT"]
         if tol_mT <= 0:
             warnings.append("Field-settle tolerance is 0 — parking the magnet will wait the "
@@ -441,15 +434,13 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         elif tol_mT < 0.01:
             warnings.append(f"Field-settle tolerance {tol_mT:g} mT is below the 475's typical "
                              "reading noise — parking may stall until the settle timeout.")
-        info.extend(run_costs(n_sweep_points, state).lines("Estimated total run time"))
+        info.extend(run_costs(n_sweep_points, state).lines())
     else:
         n_sense = max(1, len(sense_list))
+        info.append("Field: none — magnet untouched")
         if n_sense > 1:
-            info.append(f"Magnet untouched — no field parked. {n_sense} sense currents → "
-                        f"{n_sense} files.")
-        else:
-            info.append("Magnet untouched — no field parked.")
-        info.extend(run_costs(n_sweep_points, state).lines("Estimated total run time"))
+            info.append(f"Files: {n_sense} — one per sense current")
+        info.extend(run_costs(n_sweep_points, state).lines())
 
     if state["enable_temperature"]:
         uids = parse_sensor_uids(state["temperature_sensor_uids"])
@@ -457,10 +448,9 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
             warnings.append("Temperature logging is on but no sensor UID is set — "
                              "temperature columns will be empty.")
         else:
-            info.append(f"Temperature logged via MercuryiTC ({', '.join(uids)}) — "
-                         "if unreachable, columns are simply left empty.")
+            info.append(f"Temperature: MercuryiTC {', '.join(uids)} — empty if unreachable")
     else:
-        info.append("Temperature logging off.")
+        info.append("Temperature: off")
 
     return info, warnings, errors
 
@@ -854,10 +844,10 @@ class DCGateSweepApp(MeasurementApp):
 
     .card-title { text-style: bold underline; margin-bottom: 1; }
     .field { margin-bottom: 1; }
-    .field-label { text-style: bold; }
-    .hint { text-style: italic; color: $text-muted; }
-    .switch-row { height: 3; }
-    .switch-row Label { margin-left: 1; content-align: left middle; height: 3; }
+    .field-label { text-style: bold; width: 100%; }
+    .hint { text-style: italic; color: $text-muted; width: 100%; }
+    .switch-row { height: auto; }
+    .switch-row Label { padding-left: 1; content-align: left middle; width: 1fr; height: auto; min-height: 3; }
     .sidebar-title { text-style: bold underline; margin-bottom: 1; }
     .card-desc { color: $text-muted; margin-bottom: 1; }
     #actionbar { height: 3; align: center middle; }
@@ -885,9 +875,7 @@ class DCGateSweepApp(MeasurementApp):
                         "Sense current (Keithley 6221)",
                         field("sense_current_values", "Sense current (A)",
                               DEFAULTS["sense_current_values"], kind="text",
-                              hint="Single value, or comma-separated list — one complete "
-                                   "gate sweep runs per value, each saved to its own file "
-                                   "and plotted together."),
+                              hint="Comma-separate for one sweep + file per value."),
                     )
                     yield card(
                         "Field (Kepco magnet, optional)",
@@ -895,9 +883,7 @@ class DCGateSweepApp(MeasurementApp):
                                      DEFAULTS["enable_field"]),
                         field("field_current_values", "Magnet current (A)",
                               DEFAULTS["field_current_values"], kind="text",
-                              hint="Single value, or comma-separated list — one complete "
-                                   "gate sweep runs per value, each saved to its own file "
-                                   "and plotted together."),
+                              hint="Comma-separate for one sweep + file per value."),
                     )
                     yield card(
                         "Temperature logging",
@@ -953,7 +939,7 @@ class DCGateSweepApp(MeasurementApp):
                             field("source_delay_s", "6221 source delay (s)", DEFAULTS["source_delay_s"]),
                             field("gate_voltage_limit_V", "Gate voltage software limit (V)",
                                   DEFAULTS["gate_voltage_limit_V"],
-                                  hint="Hard safety ceiling — independent of the sweep range."),
+                                  hint="Hard safety ceiling."),
                             field("gate_compliance_current_A", "Gate leakage compliance (A)",
                                   DEFAULTS["gate_compliance_current_A"]),
                             muted=True,
@@ -962,7 +948,7 @@ class DCGateSweepApp(MeasurementApp):
                             "Magnet ramp safety",
                             field("current_limit_A", "Software current limit (A)",
                                   DEFAULTS["current_limit_A"],
-                                  hint="Hard safety ceiling — independent of the supply's own range."),
+                                  hint="Hard safety ceiling."),
                             field("voltage_compliance_V", "Voltage compliance (V)",
                                   DEFAULTS["voltage_compliance_V"]),
                             field("ramp_step_A", "Ramp step (A)", DEFAULTS["ramp_step_A"]),
@@ -971,10 +957,7 @@ class DCGateSweepApp(MeasurementApp):
                                   DEFAULTS["field_settle_s"]),
                             field("field_settle_tolerance_mT", "Field-settle tolerance (mT)",
                                   DEFAULTS["field_settle_tolerance_mT"],
-                                  hint="Advanced: after parking the magnet, wait until a short "
-                                       "window of gaussmeter readings spans less than this before "
-                                       "the dwell above. Raise it if parking stalls; lower for "
-                                       "tighter field control.",
+                                  hint="Field settled when readings span less than this. Raise if parking stalls.",
                                   validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
                             muted=True,
                         )
@@ -1019,17 +1002,7 @@ class DCGateSweepApp(MeasurementApp):
             else "[dim]File:  (choose a sample and device to preview the filename)[/dim]"
         )
 
-        lines: list[str] = []
-        if errors:
-            lines.append("[bold red]Blocking issues[/bold red]")
-            lines += [f"  [red]✗ {e}[/red]" for e in errors]
-        if warnings:
-            lines.append("[bold yellow]Warnings[/bold yellow]")
-            lines += [f"  [yellow]⚠ {w}[/yellow]" for w in warnings]
-        lines.append("[bold]Derived values[/bold]")
-        lines += [f"  [dim]•[/dim] {i}" for i in info if i]
-
-        self.query_one("#summary", Static).update("\n".join(lines))
+        self.query_one("#summary", Static).update(summary_markup(info, warnings, errors))
         self.query_one("#start", Button).disabled = bool(errors)
 
     # ── Start ────────────────────────────────────────────────────────────────

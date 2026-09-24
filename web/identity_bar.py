@@ -60,7 +60,7 @@ def identity_bar(*, default_data_dir: str, default_sample: str,
             cooldown_input = text_field("Cooldown (optional)", default_cooldown)
             temperature_input = optional_num_field(
                 "Temp. setpoint (K, optional)", default_temperature_K,
-                hint="Filename's T###K token only.")
+                hint="Filename T###K token only.")
     data_dir_input.on_value_change(lambda: refresh_sample_options())
 
     return IdentityBar(

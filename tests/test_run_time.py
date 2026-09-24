@@ -30,14 +30,14 @@ def test_runcost_each_and_at_and_lines():
     assert rc.total_s == 28.0                                   # points 24 + teardown tail 4
     assert rc.parts == {"settle": 8.0, "ramps": 20.0}
     (line,) = rc.lines()
-    assert line.startswith("Estimated run time ≈ 28s") and "ramps 20s" in line and "settle 8s" in line
+    assert line.startswith("Run time: ≈ 28s") and "ramps 20s" in line and "settle 8s" in line
 
 
 def test_runcost_worst_case_line_only_when_material():
     rc = rt.RunCost(2)
     rc.each("magnet", 3.0, worst_extra=20.0)
     lines = rc.lines()
-    assert len(lines) == 2 and "worst case ≈ 46s" in lines[1]
+    assert len(lines) == 2 and "Worst case: ≈ 46s" in lines[1]
     assert len(rt.RunCost(2).lines()) == 1
 
 

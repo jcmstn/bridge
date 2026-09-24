@@ -104,8 +104,7 @@ def page() -> None:
                     switches["enable_gate"] = bool_switch("Enable gate (Keithley 2400)", d("enable_gate"))
                     inputs["gate_voltage_values"] = text_field(
                         "Gate voltage (V)", d("gate_voltage_values"),
-                        hint="Single value, or comma-separated list — one complete current sweep "
-                             "runs per value, each saved to its own file and plotted together.")
+                        hint="Comma-separate for one sweep + file per value.")
 
                 with param_card("Temperature logging"):
                     switches["enable_temperature"] = bool_switch(
@@ -117,7 +116,7 @@ def page() -> None:
                     with param_card("Source & voltmeter"):
                         inputs["compliance_V"] = num_field(
                             "Compliance voltage (V)", float(d("compliance_V")),
-                            hint="Set high enough to reach the expected voltage at current_max_A.")
+                            hint="Must exceed V at current_max_A, or the sweep clips.")
                         inputs["nplc"] = num_field("NPLC (integration time)", float(d("nplc")))
                         switches["auto_range"] = bool_switch("Auto-range", d("auto_range"))
 

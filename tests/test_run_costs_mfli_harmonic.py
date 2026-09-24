@@ -148,9 +148,9 @@ def test_harmonic_phase_cal_adds_a_block_and_a_magnet_move() -> None:
 def test_harmonic_summary_and_bad_inputs_do_not_crash(tmp_path) -> None:
     ensure_sample(tmp_path, "A", create=True)
     info, _, errors = tharm.build_summary(_hstate(data_dir=str(tmp_path)))
-    assert not errors and any(i.startswith("Estimated run time ≈") for i in info)
+    assert not errors and any(i.startswith("Run time: ≈ ") for i in info)
     info, _, _ = tharm.build_summary(_hstate(data_dir=str(tmp_path), enable_sweep=True))
-    assert any(i.startswith("Estimated total run time ≈") for i in info)
+    assert any(i.startswith("Run time: ≈ ") for i in info)
     # a half-typed form (0 sample rate, 0 ramp step) must never take the live sidebar down
     tharm.build_summary(_hstate(data_dir=str(tmp_path), sample_rate_Hz=0.0, ramp_step_A=0.0, enable_sweep=True))
 
@@ -196,10 +196,10 @@ def test_6221_sweep_is_repeated_per_amplitude_with_magnet_terms() -> None:
 def test_6221_summary_lines(tmp_path) -> None:
     ensure_sample(tmp_path, "A", create=True)
     info, _, errors = t6221.build_summary(_h6state(data_dir=str(tmp_path)))
-    assert not errors and any(i.startswith("Estimated run time ≈") for i in info)
+    assert not errors and any(i.startswith("Run time: ≈ ") for i in info)
     info, _, _ = t6221.build_summary(_h6state(data_dir=str(tmp_path), enable_sweep=True,
                                               amplitude_list=[1e-7, 2e-7]))
-    assert any(i.startswith("Estimated total run time ≈") for i in info)
+    assert any(i.startswith("Run time: ≈ ") for i in info)
     t6221.build_summary(_h6state(data_dir=str(tmp_path), sample_rate_Hz=0.0, ramp_step_A=0.0, enable_sweep=True))
 
 
@@ -243,4 +243,4 @@ def test_noise_per_amplitude_costs_and_tail() -> None:
 def test_noise_summary_shows_the_estimate(tmp_path) -> None:
     ensure_sample(tmp_path, "A", create=True)
     info, _, errors = tnoise.build_summary(_nstate(data_dir=str(tmp_path)))
-    assert not errors and any(i.startswith("Estimated total run time ≈") for i in info)
+    assert not errors and any(i.startswith("Run time: ≈ ") for i in info)
