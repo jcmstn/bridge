@@ -34,6 +34,7 @@ import json
 import logging
 import math
 import multiprocessing as mp
+import re
 import sys
 import threading
 import time
@@ -82,8 +83,10 @@ def format_si(value: float, unit: str) -> str:
 
 
 def parse_sensor_uids(raw: str) -> tuple:
-    """Parse a comma-separated "MB1.T1, DB5.T1" field into a 1- or 2-tuple of UIDs."""
-    uids = [u.strip() for u in raw.split(",") if u.strip()]
+    """Parse a "MB1.T1, DB5.T1" field into a 1- or 2-tuple of UIDs. Commas,
+    semicolons and whitespace all separate — "MB1.T1 DB5.T1" is two UIDs,
+    not one bogus one the iTC would reject on every read."""
+    uids = [u for u in re.split(r"[,;\s]+", raw) if u]
     return tuple(uids[:2])
 
 

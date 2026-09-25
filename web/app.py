@@ -38,7 +38,7 @@ import os
 
 from nicegui import app, ui
 
-from web.dc import hall, iv_curve, gate_sweep, spin_valve
+from web.dc import hall, iv_curve, gate_sweep, spin_valve, rt_log
 from web.mfli import dual_harmonic, diff_resistance, phase_calibration
 from web.sot import nonlocal_switching, pulsed_switching
 from instruments import run_index
@@ -103,6 +103,11 @@ def _dc_gate_sweep_page() -> None:
 @ui.page("/dc/spin-valve")
 def _dc_spin_valve_page() -> None:
     spin_valve.page()
+
+
+@ui.page("/dc/rt-log")
+def _dc_rt_log_page() -> None:
+    rt_log.page()
 
 
 @ui.page("/mfli/dual-harmonic")
@@ -191,6 +196,7 @@ def landing() -> None:
             _card("DC I-V Curve", iv_curve.DC_IV_DESCRIPTION, "/dc/iv-curve")
             _card("DC Gate Sweep", gate_sweep.DC_GATE_SWEEP_DESCRIPTION, "/dc/gate-sweep")
             _card("DC Spin-Valve / Field Sweep", spin_valve.DC_SPIN_VALVE_DESCRIPTION, "/dc/spin-valve")
+            _card("DC R vs T log", rt_log.DC_RT_LOG_DESCRIPTION, "/dc/rt-log")
         with ui.column().classes("flex-1 gap-3"):
             ui.label("MFLI Suite").classes("text-xl font-bold")
             _card("MFLI Dual-Harmonic Measurement (MFLI or 6221 source)",

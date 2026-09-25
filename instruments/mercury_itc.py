@@ -48,6 +48,9 @@ Usage example (shared controller, used by the DC/MFLI measurement scripts):
         sensor_uids=("MB1.T1", "DB5.T1"),   # 1 or 2 probes — set to your rig
     )
     mitc = connect_temperature_controller(temp_cfg)   # None if unreachable
+    # optional, verbose: logs IDN, board catalog + each sensor's raw reply and
+    # keeps only the UIDs that answer (None if none does -> log without T)
+    temp_cfg = probe_temperature_sensors(mitc, temp_cfg)
 
     ...
     t1_K, t2_K = read_temperature(mitc, temp_cfg)      # (None, None) if no iTC
@@ -66,12 +69,30 @@ Usage example (setpoint control, for a temperature-dependence sweep):
 
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Optional, Tuple
 
 from pymeasure.instruments import Instrument
 
 log = logging.getLogger(__name__)
+
+
+def normalize_uid(uid: str) -> str:
+    """The bare board UID ("MB1.T1") out of what an operator may paste:
+    the catalog (`READ:SYS:CAT`) lists boards as "DEV:MB1.T1:TEMP", and
+    sending that verbatim would build `READ:DEV:DEV:MB1.T1:TEMP:TEMP:...`,
+    which the iTC rejects."""
+    uid = uid.strip()
+    if uid.upper().startswith("DEV:"):
+        uid = uid[4:]
+    if uid.upper().endswith(":TEMP"):
+        uid = uid[:-5]
+    return uid.strip()
+
+
+def temperature_command(uid: str) -> str:
+    """The query that reads sensor `uid`'s temperature."""
+    return f"READ:DEV:{normalize_uid(uid)}:TEMP:SIG:TEMP"
 
 
 class MercuryITC(Instrument):
@@ -133,18 +154,21 @@ class MercuryITC(Instrument):
         error (no probe plugged in, open circuit, etc.) rather than a
         temperature.
         """
-        command = f"READ:DEV:{uid}:TEMP:SIG:TEMP"
-        reply = self.ask(command).strip()
+        uid = normalize_uid(uid)
+        return self.parse_temperature_reply(uid, self.ask(temperature_command(uid)))
 
+    @staticmethod
+    def parse_temperature_reply(uid: str, reply: str) -> float:
+        """Kelvin out of a `STAT:DEV:<uid>:TEMP:SIG:TEMP:<value>K` reply
+        (ValueError, quoting the raw reply, on any other shape)."""
+        reply = reply.strip()
         expected_prefix = f"STAT:DEV:{uid}:TEMP:SIG:TEMP:"
         if not reply.startswith(expected_prefix) or not reply.endswith("K"):
             raise ValueError(
-                f"Unexpected reply to {command!r}: {reply!r} "
+                f"Unexpected reply to {temperature_command(uid)!r}: {reply!r} "
                 f"(expected {expected_prefix}<value>K)"
             )
-
-        value_str = reply[len(expected_prefix):-1]
-        return float(value_str)
+        return float(reply[len(expected_prefix):-1])
 
     def temperature_setpoint(self, uid: str) -> float:
         """
@@ -157,6 +181,7 @@ class MercuryITC(Instrument):
         UNVERIFIED against real hardware; check it the same way that one
         was checked (see module docstring) before trusting it.
         """
+        uid = normalize_uid(uid)
         command = f"READ:DEV:{uid}:TEMP:LOOP:TSET"
         reply = self.ask(command).strip()
 
@@ -187,6 +212,7 @@ class MercuryITC(Instrument):
         out of range for this board) — UNVERIFIED reply shape, see
         `_check_set_reply()`.
         """
+        uid = normalize_uid(uid)
         command = f"SET:DEV:{uid}:TEMP:LOOP:TSET:{setpoint_K:.4f}"
         reply = self.ask(command).strip()
         self._check_set_reply(command, reply)
@@ -206,6 +232,7 @@ class MercuryITC(Instrument):
         Raises RuntimeError if the instrument rejects the command —
         UNVERIFIED reply shape, see `_check_set_reply()`.
         """
+        uid = normalize_uid(uid)
         state = "ON" if enabled else "OFF"
         command = f"SET:DEV:{uid}:TEMP:LOOP:HTR:AUTO:{state}"
         reply = self.ask(command).strip()
@@ -338,6 +365,63 @@ def read_temperature(
             pass  # no warning — see docstring above
 
     return t1, t2
+
+
+def probe_temperature_sensors(
+    mitc: Optional[MercuryITC],
+    cfg: TemperatureControllerConfig,
+) -> Optional[TemperatureControllerConfig]:
+    """
+    Verbose connect-time check of the configured sensors, for tracking down
+    a sensor read that fails. Logs the iTC's identity and raw board catalog
+    (the real UIDs are in there), then, for each configured UID, the exact
+    query sent and the raw reply (or the error).
+
+    Returns a copy of `cfg` holding only the UIDs that answered with a
+    temperature — two sensors configured but only one answering falls back
+    to that one (it becomes temperature_1_K). Returns None (logged) when no
+    sensor answers or `mitc` is None, so the run carries on without
+    temperature logging, as with an unreachable iTC. Never raises.
+    """
+    if mitc is None:
+        log.warning("MercuryiTC: not connected (%s) — no temperature logging.", cfg.visa_resource)
+        return None
+    log.info("MercuryiTC: %s", cfg.visa_resource)
+    for label, command in (("identity", "*IDN?"), ("board catalog", "READ:SYS:CAT")):
+        try:
+            log.info("MercuryiTC %s (%s): %s", label, command, mitc.ask(command).strip())
+        except Exception as exc:
+            log.warning("MercuryiTC %s (%s) failed: %s", label, command, exc)
+
+    working = []
+    for raw_uid in cfg.sensor_uids:
+        uid = normalize_uid(raw_uid)
+        command = temperature_command(uid)
+        shown = f"{raw_uid!r} → {uid!r}" if uid != raw_uid else repr(uid)
+        try:
+            reply = mitc.ask(command)
+        except Exception as exc:
+            log.warning("MercuryiTC sensor %s: %s → no reply (%s: %s)",
+                        shown, command, type(exc).__name__, exc)
+            continue
+        try:
+            value = MercuryITC.parse_temperature_reply(uid, reply)
+        except ValueError:
+            log.warning("MercuryiTC sensor %s: %s → %r — not a temperature reply",
+                        shown, command, reply.strip())
+            continue
+        log.info("MercuryiTC sensor %s: %s → %r = %.4f K", shown, command, reply.strip(), value)
+        working.append(uid)
+
+    if not working:
+        log.warning("MercuryiTC: none of %s answered — no temperature logging. "
+                    "Check the UIDs against the board catalog above.", list(cfg.sensor_uids))
+        return None
+    if len(working) < len(cfg.sensor_uids):
+        log.warning("MercuryiTC: using %s only (of %s configured).", working, list(cfg.sensor_uids))
+    else:
+        log.info("MercuryiTC: using %s.", working)
+    return replace(cfg, sensor_uids=tuple(working))
 
 
 def set_temperature(

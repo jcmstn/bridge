@@ -35,6 +35,7 @@ from textual.widgets import Button, Collapsible, DataTable, Footer, Header, Stat
 from dc.dc_gate_sweep_tui import DC_GATE_SWEEP_DESCRIPTION, DC_GATE_SWEEP_SCHEMATIC, DCGateSweepApp
 from dc.dc_hall_measurement_tui import DC_HALL_DESCRIPTION, DC_HALL_SCHEMATIC, DCHallMeasurementApp
 from dc.dc_iv_curve_tui import DC_IV_DESCRIPTION, DC_IV_SCHEMATIC, DCIVCurveApp
+from dc.dc_rt_log_tui import DC_RT_LOG_DESCRIPTION, DC_RT_LOG_SCHEMATIC, DCRTLogApp
 from dc.dc_spin_valve_tui import DC_SPIN_VALVE_DESCRIPTION, DC_SPIN_VALVE_SCHEMATIC, DCSpinValveApp
 from instruments import run_index
 from mfli.mfli_diff_resistance_tui import (
@@ -70,6 +71,8 @@ PROGRAMS: dict[str, list[Program]] = {
                 DC_GATE_SWEEP_DESCRIPTION, DC_GATE_SWEEP_SCHEMATIC, DCGateSweepApp),
         Program("spin_valve", "Spin-Valve / Field Sweep (fixed gate, field sweep)",
                 DC_SPIN_VALVE_DESCRIPTION, DC_SPIN_VALVE_SCHEMATIC, DCSpinValveApp),
+        Program("rt_log", "R vs T log (fixed ±I, temperature read only)",
+                DC_RT_LOG_DESCRIPTION, DC_RT_LOG_SCHEMATIC, DCRTLogApp),
     ],
     "MFLI Suite": [
         Program("dual", "Dual-Harmonic Measurement (1f / 2f; MFLI or 6221 source)",

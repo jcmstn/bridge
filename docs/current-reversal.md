@@ -2,7 +2,7 @@
 
 Used by `instruments.keithley6221.acquire_reversal_averaged_voltage`, called
 from every DC measurement program (`dc_hall_measurement.py`,
-`dc_gate_sweep.py`, `dc_iv_curve.py`, `dc_spin_valve.py`).
+`dc_gate_sweep.py`, `dc_iv_curve.py`, `dc_spin_valve.py`, `dc_rt_log.py`).
 
 ## The general algorithm
 
