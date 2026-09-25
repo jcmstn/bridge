@@ -118,7 +118,8 @@ def test_web_form_keeps_a_numeric_looking_mode_choice_a_string(tmp_path):
     optional = {k: w(None) for k in harm.OPTIONAL_NUMERIC_FIELDS}
     switches = {k: w(v) for k, v in harm.DEFAULTS.items() if isinstance(v, bool)}
     int_selects = {k: w(int(harm.DEFAULTS[k]))
-                   for k in ("order_1f", "order_2f", "leader_automode", "follower_automode")}
+                   for k in ("order_1f", "order_2f", "leader_automode", "follower_automode",
+                             "leader_harmonic", "follower_harmonic")}
     state, errors = form_state(harm, ident, inputs=inputs, switches=switches, optional_inputs=optional,
                                selects={"ac_source": w("6221"), **int_selects})
     assert not errors and state["ac_source"] == "6221" and state["order_1f"] == int(harm.DEFAULTS["order_1f"])

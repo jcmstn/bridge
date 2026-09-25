@@ -19,6 +19,7 @@ def _state(data_dir: Path, **overrides) -> dict:
         leader_device="dev7885", follower_device="dev7886",
         daq_host="localhost", daq_port=8004,
         frequency_Hz=317.3, amplitude_V=0.1, series_R_ohm=10000.0,
+        leader_harmonic=1, follower_harmonic=2, leader_measure_rxx=False, measure_rxx=False,
         time_constant_1f_s=0.3, order_1f=4, sinc_filter_1f=True,
         time_constant_2f_s=0.3, order_2f=4, sinc_filter_2f=True,
         differential=True, ac_coupling=True,

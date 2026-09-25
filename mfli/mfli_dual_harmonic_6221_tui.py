@@ -123,6 +123,9 @@ DEFAULTS: dict = {
     "amplitude_values": "1e-7",
     "ac_compliance_V": "2.0",
     "phasemarker_line": "1",
+    "leader_harmonic": "1",
+    "leader_measure_rxx": False,
+    "follower_harmonic": "2",
     "measure_rxx": False,
     "time_constant_1f_s": "0.3",
     "order_1f": "4",
@@ -238,12 +241,65 @@ MAGNET_FIELD_IDS = [
 TEMPERATURE_FIELD_IDS = ["temperature_visa_resource", "temperature_sensor_uids"]
 
 
-def follower_naming(measure_rxx: bool) -> tuple:
-    """The follower device's column prefix and display label: today's R_xy
-    2f (default) when off, R_xx's 1f harmonic when on -- see
-    mfli_dual_harmonic_6221.py's module docstring for why only one of the
-    two can be live at a time with just two physical MFLIs."""
-    return ("rxx_1f", "R_xx (1f)") if measure_rxx else ("2f", "2f")
+# The harmonic each MFLI's demod locks to (the "Leader/Follower MFLI lock-in"
+# cards, shared with the MFLI-source form).
+HARMONIC_OPTIONS: list[tuple[str, int]] = [(f"{h}f", h) for h in range(1, 9)]
+
+
+def demod_naming(harmonic: int, rxx: bool) -> tuple[str, str]:
+    """One MFLI demod's column prefix and display label: "<h>f", or
+    "rxx_<h>f" with its R_xx toggle on (a pure naming switch — the harmonic
+    is chosen separately). Leader 1f / follower 2f, and a follower at 1f with
+    R_xx on, give exactly the names these programs always saved (1f_*, 2f_*,
+    rxx_1f_*) — see mfli_dual_harmonic_6221.py's module docstring for why
+    R_xx and R_xy's 2f can't both be live with just two physical MFLIs."""
+    return (f"rxx_{harmonic}f", f"R_xx ({harmonic}f)") if rxx else (f"{harmonic}f", f"{harmonic}f")
+
+
+def state_naming(state: dict) -> tuple[tuple[str, str], tuple[str, str]]:
+    """(leader, follower) demod_naming() of a form state."""
+    return (demod_naming(state["leader_harmonic"], state["leader_measure_rxx"]),
+            demod_naming(state["follower_harmonic"], state["measure_rxx"]))
+
+
+def plan_naming(plan) -> tuple[tuple[str, str], tuple[str, str]]:
+    """(leader, follower) demod_naming() of either source's MeasurementPlan."""
+    return (demod_naming(plan.demod1_cfg.harmonic, plan.leader_measure_rxx),
+            demod_naming(plan.demod2_cfg.harmonic, plan.measure_rxx))
+
+
+def migrate_settings(saved: dict) -> dict:
+    """A form saved before the harmonic selects existed: its R_xx mode meant
+    the follower at 1f — keep that, rather than silently becoming rxx_2f."""
+    if saved.get("measure_rxx") and "follower_harmonic" not in saved:
+        saved["follower_harmonic"] = 1
+    return saved
+
+
+def harmonic_checks(state: dict, warnings: list[str], errors: list[str]) -> None:
+    """Summary checks both AC sources share: the two MFLIs must save to
+    different column prefixes, neither demod frequency may sit on a mains
+    harmonic, and the phase-cal null is only physical with the leader at 1f."""
+    (lead, lead_disp), (fol, fol_disp) = state_naming(state)
+    if lead == fol:
+        errors.append(f"Leader and follower would both save as {lead}_* — pick different "
+                      "harmonics or turn R_xx on for one of them.")
+    f = state["frequency_Hz"]
+    for label, h in ((lead_disp, state["leader_harmonic"]), (fol_disp, state["follower_harmonic"])):
+        check_f = h * f
+        for mains in (50, 60):
+            nearest = round(check_f / mains) * mains
+            if nearest > 0 and abs(check_f - nearest) < 0.5:
+                warnings.append(
+                    f"{label} ({check_f:g} Hz) is within 0.5 Hz of a {mains} Hz "
+                    f"harmonic ({nearest} Hz) — mains pickup risk."
+                )
+    if state["enable_phase_cal"] and state["leader_harmonic"] != 1:
+        warnings.append(
+            f"Phase cal nulls the leader's Y at its own harmonic ({lead_disp}) — "
+            "that is only pure instrumental delay at 1f (resistive PHE/AHE). "
+            "Check it is the calibration you want before trusting the result."
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -313,7 +369,8 @@ class MeasurementPlan:
     follower: str
     ac_cfg: ACSourceConfig
     amplitudes_A: List[float]
-    measure_rxx: bool
+    measure_rxx: bool                     # follower's R_xx naming toggle
+    leader_measure_rxx: bool
     leader_extref_cfg: ExtRefConfig
     follower_extref_cfg: ExtRefConfig
     extref_lock_timeout_s: float
@@ -415,10 +472,8 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     if state["leader_device"] == state["follower_device"]:
         errors.append("Leader and follower device IDs must be different.")
 
-    follower_prefix, follower_display = follower_naming(state["measure_rxx"])
-    if state["measure_rxx"]:
-        info.append("R_xx mode: on — follower reads R_xx 1f (no 2f); move its Signal Input "
-                    "to the R_xx probes by hand")
+    (_, leader_display), (_, follower_display) = state_naming(state)
+    info.append(f"Lock-in: leader {leader_display} · follower {follower_display}")
 
     if state.get("amplitude_parse_error"):
         errors.append(f"Excitation current list: {state['amplitude_parse_error']}")
@@ -441,16 +496,7 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
             f"got {state['ac_compliance_V']:g} V."
         )
 
-    f = state["frequency_Hz"]
-    freq_checks = [("1f", f)] if state["measure_rxx"] else [("1f", f), ("2f", 2 * f)]
-    for label, check_f in freq_checks:
-        for mains in (50, 60):
-            nearest = round(check_f / mains) * mains
-            if nearest > 0 and abs(check_f - nearest) < 0.5:
-                warnings.append(
-                    f"{label} ({check_f:g} Hz) is within 0.5 Hz of a {mains} Hz "
-                    f"harmonic ({nearest} Hz) — mains pickup risk."
-                )
+    harmonic_checks(state, warnings, errors)
 
     info.append(f"Phase marker: Trigger Link {state['phasemarker_line']} → Aux In "
                 f"{state['leader_aux_input_ch'] + 1} on BOTH MFLIs — equal cables; an MDS-only "
@@ -460,15 +506,15 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     # — the PLL detector must be a different demod (extrefs/N/adcselect is
     # read-only on real firmware; see ExtRefConfig's docstring).
     if state["leader_pll_demod_index"] == 0:
-        errors.append("Leader PLL phase-detector demod index must differ from 0 "
-                       "(demod 0 reads the real 1f signal).")
+        errors.append(f"Leader PLL phase-detector demod index must differ from 0 "
+                       f"(demod 0 reads the real {leader_display} signal).")
     if state["follower_pll_demod_index"] == 0:
         errors.append(f"Follower PLL phase-detector demod index must differ from 0 "
                        f"(demod 0 reads the real {follower_display} signal).")
 
     acq_window_s = {"leader": 0.0, "follower": 0.0}
     for key, label, tc_key, order_key in (
-        ("leader", "1f", "time_constant_1f_s", "order_1f"),
+        ("leader", leader_display, "time_constant_1f_s", "order_1f"),
         ("follower", follower_display, "time_constant_2f_s", "order_2f"),
     ):
         tc = state[tc_key]
@@ -559,8 +605,8 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         if state["measure_rxx"]:
             warnings.append(
                 "Phase cal nulls the follower's phase against the leader's 1f "
-                "reference — with R_xx mode on, that follower demod is R_xx's "
-                "1f, not R_xy's 2f. Whether this is still the calibration you "
+                "reference — with R_xx on, that follower demod reads R_xx, "
+                "not R_xy. Whether this is still the calibration you "
                 "want for R_xx is a physics call this form doesn't make for "
                 "you — check before trusting the result."
             )
@@ -584,9 +630,10 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
                         f"than the sweep extremes (±{max_abs_I:g} A) — pick a point near "
                         "saturation for a clean, well-behaved PHE/AHE null."
                     )
-                info.append(f"Phase cal: at {state['phase_cal_current_A']:g} A — null 1f Y, then sweep")
+                info.append(f"Phase cal: at {state['phase_cal_current_A']:g} A — null "
+                            f"{leader_display} Y, then sweep")
         else:
-            info.append("Phase cal: at present field — null 1f Y")
+            info.append(f"Phase cal: at present field — null {leader_display} Y")
 
     geom_fields = {
         "Hall bar length": state["hall_bar_length_um"],
@@ -633,7 +680,7 @@ def compute_filename_preview(state: dict) -> Optional[str]:
 # and Textual's terminal control both want the main thread.
 
 def _live_plot_worker(queue: "mp.Queue", has_field_sweep: bool,
-                       follower_prefix: str = "2f", follower_display: str = "2f",
+                       naming: tuple = (("1f", "1f"), ("2f", "2f")),
                        multi: bool = False) -> None:
     import matplotlib.pyplot as plt
     from matplotlib.animation import FuncAnimation
@@ -643,7 +690,8 @@ def _live_plot_worker(queue: "mp.Queue", has_field_sweep: bool,
         fig.canvas.manager.set_window_title("MFLI live measurement (6221 AC source)")
     except Exception:
         pass
-    ax1.set_ylabel("1f  R (V)")
+    (leader_prefix, leader_display), (follower_prefix, follower_display) = naming
+    ax1.set_ylabel(f"{leader_display}  R (V)")
     ax2.set_ylabel(f"{follower_display}  R (V)")
     ax2.set_xlabel("Magnetic field (mT)" if has_field_sweep else "Point #")
     ax1.set_title("Live measurement")
@@ -667,7 +715,7 @@ def _live_plot_worker(queue: "mp.Queue", has_field_sweep: bool,
             idx = record.get("series_index", 0)
             if idx not in lines1:
                 label = record.get("series_label")
-                # One current: 1f and the follower keep their own colors, as in
+                # One current: leader and follower keep their own colors, as in
                 # a manual run. Several: color by current so the overlaid
                 # runs can be told apart.
                 c1, c2 = (cmap(idx % 10),) * 2 if multi else ("tab:blue", "tab:orange")
@@ -680,7 +728,7 @@ def _live_plot_worker(queue: "mp.Queue", has_field_sweep: bool,
             xs, r1s, r2s = series_data[idx]
             x = record.get("magnet_field_mT") if has_field_sweep else None
             xs.append(x if x is not None else record["point_index"])
-            r1s.append(record["1f_R_V"])
+            r1s.append(record[f"{leader_prefix}_R_V"])
             r2s.append(record[f"{follower_prefix}_R_V"])
             updated.add(idx)
         if updated:
@@ -721,14 +769,15 @@ def _save_measurement_png(records: list[dict], png_path: Path,
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    follower_prefix, follower_display = follower_naming(plan.measure_rxx if plan else False)
+    (leader_prefix, leader_display), (follower_prefix, follower_display) = (
+        plan_naming(plan) if plan else (("1f", "1f"), ("2f", "2f")))
     has_field = any(r.get("magnet_field_mT") is not None for r in records)
     xs = [r["magnet_field_mT"] if has_field else r["point_index"] for r in records]
 
     fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True, figsize=(7, 7))
-    ax1.plot(xs, [r["1f_R_V"] for r in records], "o-", color="tab:blue")
+    ax1.plot(xs, [r[f"{leader_prefix}_R_V"] for r in records], "o-", color="tab:blue")
     ax2.plot(xs, [r[f"{follower_prefix}_R_V"] for r in records], "o-", color="tab:orange")
-    ax1.set_ylabel("1f  R (V)")
+    ax1.set_ylabel(f"{leader_display}  R (V)")
     ax2.set_ylabel(f"{follower_display}  R (V)")
     ax2.set_xlabel("Magnetic field (mT)" if has_field else "Point #")
     ax1.set_title("Measurement result")
@@ -748,7 +797,7 @@ def _save_measurement_png(records: list[dict], png_path: Path,
             lines.append(f"AC excitation: {format_si(amps[0], 'A')} @ {format_si(freq_Hz, 'Hz')}")
         tc1, order1 = plan.demod1_cfg.filter.time_constant_s, plan.demod1_cfg.filter.order
         tc2, order2 = plan.demod2_cfg.filter.time_constant_s, plan.demod2_cfg.filter.order
-        lines.append(f"Filter: 1f TC={tc1:g} s order={order1}, "
+        lines.append(f"Filter: {leader_display} TC={tc1:g} s order={order1}, "
                      f"{follower_display} TC={tc2:g} s order={order2}")
     if comment:
         lines.append(f"Comment: {textwrap.shorten(comment, width=90, placeholder='…')}")
@@ -802,7 +851,7 @@ def build_plan(state: dict, data_root: Path) -> MeasurementPlan:
         sinc_filter=state["sinc_filter_2f"],
     )
     demod1_cfg = DemodConfig(
-        device=state["leader_device"], demod_index=0, harmonic=1,
+        device=state["leader_device"], demod_index=0, harmonic=state["leader_harmonic"],
         osc_index=state["leader_osc_index"],
         differential=state["differential"], ac_coupling=state["ac_coupling"],
         input_range_V=state["input_range_1f_V"],
@@ -810,7 +859,7 @@ def build_plan(state: dict, data_root: Path) -> MeasurementPlan:
     )
     demod2_cfg = DemodConfig(
         device=state["follower_device"], demod_index=0,
-        harmonic=1 if state["measure_rxx"] else 2,
+        harmonic=state["follower_harmonic"],
         osc_index=state["follower_osc_index"],
         differential=state["differential"], ac_coupling=state["ac_coupling"],
         input_range_V=state["input_range_2f_V"],
@@ -881,7 +930,7 @@ def build_plan(state: dict, data_root: Path) -> MeasurementPlan:
         daq_host=state["daq_host"], daq_port=state["daq_port"],
         leader=state["leader_device"], follower=state["follower_device"],
         ac_cfg=ac_cfg, amplitudes_A=state["amplitude_list"],
-        measure_rxx=state["measure_rxx"],
+        measure_rxx=state["measure_rxx"], leader_measure_rxx=state["leader_measure_rxx"],
         leader_extref_cfg=leader_extref_cfg,
         follower_extref_cfg=follower_extref_cfg,
         extref_lock_timeout_s=state["extref_lock_timeout_s"],
@@ -918,7 +967,7 @@ def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
     run_contexts = [] if run_contexts is None else run_contexts
     run_extras = [] if run_extras is None else run_extras
     daq = source = magnet = gaussmeter = temp_ctrl = None
-    follower_prefix, follower_display = follower_naming(plan.measure_rxx)
+    (leader_prefix, leader_display), (follower_prefix, follower_display) = plan_naming(plan)
     try:
         on_status("Connecting to LabOne data server …")
         daq = connect(plan.daq_host, plan.daq_port)
@@ -994,7 +1043,7 @@ def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
 
             demod2_phase_null_1f_deg = None
             if plan.phase_cal_enabled:
-                on_status("Phase calibration: nulling 1f Y (leader demod phaseshift) …")
+                on_status(f"Phase calibration: nulling {leader_display} Y (leader demod phaseshift) …")
                 if magnet is not None and plan.phase_cal_current_A is not None:
                     log.info("Phase calibration: ramping magnet to %.4f A ...",
                              plan.phase_cal_current_A)
@@ -1054,7 +1103,8 @@ def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
                     temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg,
                     geometry_cfg=plan.geometry_cfg,
                     demod2_phase_null_1f_deg=_null, mds=mds,
-                    write_csv=write_csv, demod2_label=follower_prefix),
+                    write_csv=write_csv, demod2_label=follower_prefix,
+                    demod1_label=leader_prefix),
                 stop_event, on_point=on_point,
                 tags={"series_index": series_idx, "series_label": label},
                 on_finished=on_run_finished)
@@ -1085,11 +1135,11 @@ class RunScreen(MeasurementRunScreen):
 
     def __init__(self, plan: MeasurementPlan) -> None:
         super().__init__(plan)
-        self._follower_prefix, self._follower_display = follower_naming(plan.measure_rxx)
+        self._naming = plan_naming(plan)
 
     def table_columns(self) -> tuple:
-        d = self._follower_display
-        return ("#", "I (A)", "B (mT)", "1f R (V)", "1f θ (°)", f"{d} R (V)", f"{d} θ (°)",
+        (_, l), (_, d) = self._naming
+        return ("#", "I (A)", "B (mT)", f"{l} R (V)", f"{l} θ (°)", f"{d} R (V)", f"{d} θ (°)",
                 "T1 (K)", "T2 (K)")
 
     def progress_points(self) -> int:
@@ -1097,20 +1147,20 @@ class RunScreen(MeasurementRunScreen):
 
     def live_plot_args(self):
         return (_live_plot_worker, self.plan.magnet_cfg is not None,
-                self._follower_prefix, self._follower_display, self.plan.total_files > 1)
+                self._naming, self.plan.total_files > 1)
 
     def table_row(self, record: dict) -> tuple:
         I = record.get("magnet_current_A")
         B = record.get("magnet_field_mT")
         T1 = record.get("temperature_1_K")
         T2 = record.get("temperature_2_K")
-        fp = self._follower_prefix
+        (lp, _), (fp, _) = self._naming
         return (
             str(record["point_index"] + 1),
             f"{I:.4f}" if I is not None else "—",
             f"{B:.2f}" if B is not None else "—",
-            f"{record['1f_R_V']:.4e}",
-            f"{record['1f_theta_deg']:.2f}",
+            f"{record[f'{lp}_R_V']:.4e}",
+            f"{record[f'{lp}_theta_deg']:.2f}",
             f"{record[f'{fp}_R_V']:.4e}",
             f"{record[f'{fp}_theta_deg']:.2f}",
             f"{T1:.3f}" if T1 is not None else "—",

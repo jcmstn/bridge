@@ -703,6 +703,8 @@ def run_measurement(
     demod2_phase_null_1f_deg: Optional[float] = None,
     mds=None,
     write_csv: Optional[Callable[[List[dict]], None]] = None,
+    demod1_label: str = "1f",
+    demod2_label: str = "2f",
 ) -> pd.DataFrame:
     """
     Iterate over `points`, acquire 1f and 2f at each, log to CSV.
@@ -753,6 +755,11 @@ def run_measurement(
     run at phase-calibration time), is written to every row as the follower
     2f reference anchor — see that function and build_run_metadata().
 
+    `demod1_label` / `demod2_label` name the leader's / follower's column
+    prefixes — `"1f"` / `"2f"` by default (the classic harmonic-Hall file);
+    a caller that set a different `harmonic` on a demod passes e.g. `"3f"`
+    or `"rxx_1f"` (see mfli_dual_harmonic_6221_tui.demod_naming()).
+
     ── Adding more measurements per point ─────────────────────────────────
     Just extend the `record` dict below with any quantity you want to log:
     e.g. a resistance, or an additional demodulator.
@@ -789,14 +796,14 @@ def run_measurement(
 
         # ── 3. Acquire 1f + 2f together (one poll window, not two) ──────────
         d1, d2 = acquire_averaged_pair(daq, demod1_cfg, demod2_cfg, acq_cfg.n_averages)
-        log.info("   1f  R=%.4e V  θ=%.2f°  SEM_R=%.2e V  (n=%d)",
-                 d1["r_mean"], d1["theta_mean"], d1["r_sem"], d1["n_samples"])
+        log.info("   %s  R=%.4e V  θ=%.2f°  SEM_R=%.2e V  (n=%d)",
+                 demod1_label, d1["r_mean"], d1["theta_mean"], d1["r_sem"], d1["n_samples"])
         if d1["overload"]:
-            log.warning("   1f input is OVERLOADED — this reading is not trustworthy.")
-        log.info("   2f  R=%.4e V  θ=%.2f°  SEM_R=%.2e V  (n=%d)",
-                 d2["r_mean"], d2["theta_mean"], d2["r_sem"], d2["n_samples"])
+            log.warning("   %s input is OVERLOADED — this reading is not trustworthy.", demod1_label)
+        log.info("   %s  R=%.4e V  θ=%.2f°  SEM_R=%.2e V  (n=%d)",
+                 demod2_label, d2["r_mean"], d2["theta_mean"], d2["r_sem"], d2["n_samples"])
         if d2["overload"]:
-            log.warning("   2f input is OVERLOADED — this reading is not trustworthy.")
+            log.warning("   %s input is OVERLOADED — this reading is not trustworthy.", demod2_label)
 
         # ── 4b. Measure field (Lake Shore 475 Gaussmeter) ───────────────────
         field_mT = None
@@ -827,22 +834,22 @@ def run_measurement(
             "temperature_2_K":  temp_2_K,
             # ── Add further external sweep-parameter columns here, e.g.:
             # "gate_V":      pt.gate_V,
-            # ── 1f ─────────────────────────────────────────────────────────
-            "1f_X_V":      d1["x_mean"],
-            "1f_Y_V":      d1["y_mean"],
-            "1f_R_V":      d1["r_mean"],
-            "1f_theta_deg":d1["theta_mean"],
-            "1f_R_sem_V":  d1["r_sem"],
-            "1f_n_samples":d1["n_samples"],
-            "1f_overload": d1["overload"],
-            # ── 2f ─────────────────────────────────────────────────────────
-            "2f_X_V":      d2["x_mean"],
-            "2f_Y_V":      d2["y_mean"],
-            "2f_R_V":      d2["r_mean"],
-            "2f_theta_deg":d2["theta_mean"],
-            "2f_R_sem_V":  d2["r_sem"],
-            "2f_n_samples":d2["n_samples"],
-            "2f_overload": d2["overload"],
+            # ── leader demod (1f by default) ───────────────────────────────
+            f"{demod1_label}_X_V":      d1["x_mean"],
+            f"{demod1_label}_Y_V":      d1["y_mean"],
+            f"{demod1_label}_R_V":      d1["r_mean"],
+            f"{demod1_label}_theta_deg":d1["theta_mean"],
+            f"{demod1_label}_R_sem_V":  d1["r_sem"],
+            f"{demod1_label}_n_samples":d1["n_samples"],
+            f"{demod1_label}_overload": d1["overload"],
+            # ── follower demod (2f by default) ─────────────────────────────
+            f"{demod2_label}_X_V":      d2["x_mean"],
+            f"{demod2_label}_Y_V":      d2["y_mean"],
+            f"{demod2_label}_R_V":      d2["r_mean"],
+            f"{demod2_label}_theta_deg":d2["theta_mean"],
+            f"{demod2_label}_R_sem_V":  d2["r_sem"],
+            f"{demod2_label}_n_samples":d2["n_samples"],
+            f"{demod2_label}_overload": d2["overload"],
             # ── Run metadata (excitation/demod/geometry — see build_run_metadata) ──
             **run_meta,
             # ── Add further quantities here, e.g. from other instruments ───

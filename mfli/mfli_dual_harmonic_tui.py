@@ -150,7 +150,8 @@ MFLI_DUAL_HARMONIC_SCHEMATIC = """\
 
   LEADER MFLI    (1f)  Signal Input 1 (differential) ──▶ demod 1f
   FOLLOWER MFLI  (2f)  Signal Input 1 (differential) ──▶ demod 2f
-                       (or R_xx's 1f in the 6221 source's R_xx mode)
+    Each MFLI's harmonic is selectable (1f…8f); its R_xx switch only renames
+    the columns (rxx_<h>f_*) — move the Signal Input to the R_xx leads by hand
 
   MDS cabling  (both units)
     Leader Ref Out      ───BNC───▶ Follower Ref In
@@ -325,6 +326,8 @@ class MeasurementPlan:
     phase_cal_max_iterations: int
     geometry_cfg: SampleGeometryConfig
     run_ctx: RunContext
+    measure_rxx: bool                     # follower's R_xx naming toggle
+    leader_measure_rxx: bool
     temperature_setpoint_K: Optional[float]
     cooldown: str
     header_extra: dict
@@ -413,19 +416,13 @@ def _build_summary_mfli(state: dict) -> tuple[list[str], list[str], list[str]]:
     else:
         errors.append("Series resistor must be > 0 Ω.")
 
-    f = state["frequency_Hz"]
-    for label, check_f in (("1f", f), ("2f", 2 * f)):
-        for mains in (50, 60):
-            nearest = round(check_f / mains) * mains
-            if nearest > 0 and abs(check_f - nearest) < 0.5:
-                warnings.append(
-                    f"{label} ({check_f:g} Hz) is within 0.5 Hz of a {mains} Hz "
-                    f"harmonic ({nearest} Hz) — mains pickup risk."
-                )
+    (_, leader_display), (_, follower_display) = six.state_naming(state)
+    info.append(f"Lock-in: leader {leader_display} · follower {follower_display}")
+    six.harmonic_checks(state, warnings, errors)
 
-    acq_window_s = {"1f": 0.0, "2f": 0.0}
-    for label, tc_key, order_key in (("1f", "time_constant_1f_s", "order_1f"),
-                                      ("2f", "time_constant_2f_s", "order_2f")):
+    acq_window_s = {leader_display: 0.0, follower_display: 0.0}
+    for label, tc_key, order_key in ((leader_display, "time_constant_1f_s", "order_1f"),
+                                      (follower_display, "time_constant_2f_s", "order_2f")):
         tc = state[tc_key]
         if tc > 0:
             # Rule of thumb: ≥5×TC for a 1st-order filter, ≥10×TC for 3rd/4th
@@ -538,9 +535,10 @@ def _build_summary_mfli(state: dict) -> tuple[list[str], list[str], list[str]]:
                         f"than the sweep extremes (±{max_abs_I:g} A) — pick a point near "
                         "saturation for a clean, well-behaved PHE/AHE null."
                     )
-                info.append(f"Phase cal: at {state['phase_cal_current_A']:g} A — null 1f Y, then sweep")
+                info.append(f"Phase cal: at {state['phase_cal_current_A']:g} A — null "
+                            f"{leader_display} Y, then sweep")
         else:
-            info.append("Phase cal: at present field — null 1f Y")
+            info.append(f"Phase cal: at present field — null {leader_display} Y")
 
     geom_fields = {
         "Hall bar length": state["hall_bar_length_um"],
@@ -589,7 +587,8 @@ def _preview_mfli(state: dict) -> Optional[str]:
 # the TUI process itself (see _save_measurement_png), so it doesn't depend
 # on this window still being open when the run finishes.
 
-def _live_plot_worker(queue: "mp.Queue", has_field_sweep: bool) -> None:
+def _live_plot_worker(queue: "mp.Queue", has_field_sweep: bool,
+                      naming: tuple = (("1f", "1f"), ("2f", "2f"))) -> None:
     import matplotlib.pyplot as plt
     from matplotlib.animation import FuncAnimation
 
@@ -598,10 +597,11 @@ def _live_plot_worker(queue: "mp.Queue", has_field_sweep: bool) -> None:
         fig.canvas.manager.set_window_title("MFLI live measurement")
     except Exception:
         pass
+    (leader_prefix, leader_display), (follower_prefix, follower_display) = naming
     line1, = ax1.plot([], [], "o-", color="tab:blue")
     line2, = ax2.plot([], [], "o-", color="tab:orange")
-    ax1.set_ylabel("1f  R (V)")
-    ax2.set_ylabel("2f  R (V)")
+    ax1.set_ylabel(f"{leader_display}  R (V)")
+    ax2.set_ylabel(f"{follower_display}  R (V)")
     ax2.set_xlabel("Magnetic field (mT)" if has_field_sweep else "Point #")
     ax1.set_title("Live measurement")
     for ax in (ax1, ax2):
@@ -621,8 +621,8 @@ def _live_plot_worker(queue: "mp.Queue", has_field_sweep: bool) -> None:
                 break
             x = record.get("magnet_field_mT") if has_field_sweep else None
             xs.append(x if x is not None else record["point_index"])
-            r1s.append(record["1f_R_V"])
-            r2s.append(record["2f_R_V"])
+            r1s.append(record[f"{leader_prefix}_R_V"])
+            r2s.append(record[f"{follower_prefix}_R_V"])
             updated = True
         if updated:
             line1.set_data(xs, r1s)
@@ -655,16 +655,18 @@ def _save_measurement_png(records: list[dict], png_path: Path,
     matplotlib.use("Agg")  # headless — must not touch the TUI's terminal
     import matplotlib.pyplot as plt
 
+    (leader_prefix, leader_display), (follower_prefix, follower_display) = (
+        six.plan_naming(plan) if plan else (("1f", "1f"), ("2f", "2f")))
     has_field = any(r.get("magnet_field_mT") is not None for r in records)
     xs = [r["magnet_field_mT"] if has_field else r["point_index"] for r in records]
-    r1 = [r["1f_R_V"] for r in records]
-    r2 = [r["2f_R_V"] for r in records]
+    r1 = [r[f"{leader_prefix}_R_V"] for r in records]
+    r2 = [r[f"{follower_prefix}_R_V"] for r in records]
 
     fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True, figsize=(7, 7))
     ax1.plot(xs, r1, "o-", color="tab:blue")
     ax2.plot(xs, r2, "o-", color="tab:orange")
-    ax1.set_ylabel("1f  R (V)")
-    ax2.set_ylabel("2f  R (V)")
+    ax1.set_ylabel(f"{leader_display}  R (V)")
+    ax2.set_ylabel(f"{follower_display}  R (V)")
     ax2.set_xlabel("Magnetic field (mT)" if has_field else "Point #")
     ax1.set_title("Measurement result")
     for ax in (ax1, ax2):
@@ -682,7 +684,8 @@ def _save_measurement_png(records: list[dict], png_path: Path,
             lines.append(f"AC excitation: {format_si(amp_V, 'V')} @ {format_si(freq_Hz, 'Hz')}")
         tc1, order1 = plan.demod1_cfg.filter.time_constant_s, plan.demod1_cfg.filter.order
         tc2, order2 = plan.demod2_cfg.filter.time_constant_s, plan.demod2_cfg.filter.order
-        lines.append(f"Filter: 1f TC={tc1:g} s order={order1}, 2f TC={tc2:g} s order={order2}")
+        lines.append(f"Filter: {leader_display} TC={tc1:g} s order={order1}, "
+                     f"{follower_display} TC={tc2:g} s order={order2}")
     if comment:
         lines.append(f"Comment: {textwrap.shorten(comment, width=90, placeholder='…')}")
     if lines:
@@ -724,13 +727,13 @@ def _build_plan_mfli(state: dict, data_root: Path) -> MeasurementPlan:
         sinc_filter=state["sinc_filter_2f"],
     )
     demod1_cfg = DemodConfig(
-        device=state["leader_device"], demod_index=0, harmonic=1,
+        device=state["leader_device"], demod_index=0, harmonic=state["leader_harmonic"],
         differential=state["differential"], ac_coupling=state["ac_coupling"],
         input_range_V=state["input_range_1f_V"],
         sample_rate_Hz=state["sample_rate_Hz"], filter=filt_1f,
     )
     demod2_cfg = DemodConfig(
-        device=state["follower_device"], demod_index=0, harmonic=2,
+        device=state["follower_device"], demod_index=0, harmonic=state["follower_harmonic"],
         differential=state["differential"], ac_coupling=state["ac_coupling"],
         input_range_V=state["input_range_2f_V"],
         sample_rate_Hz=state["sample_rate_Hz"], filter=filt_2f,
@@ -810,6 +813,7 @@ def _build_plan_mfli(state: dict, data_root: Path) -> MeasurementPlan:
         phase_cal_max_iterations=state["phase_cal_max_iterations"],
         geometry_cfg=geometry_cfg,
         run_ctx=run_ctx, data_root=data_root,
+        measure_rxx=state["measure_rxx"], leader_measure_rxx=state["leader_measure_rxx"],
         temperature_setpoint_K=state["temperature_setpoint_K"],
         cooldown=state["cooldown"], header_extra=header_extra,
         run_cost=run_costs(state, currents_A),
@@ -838,6 +842,7 @@ def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
     run_extras.append(None)
     daq = magnet = gaussmeter = temp_ctrl = None
     recorded: list[dict] = []
+    (leader_prefix, leader_display), (follower_prefix, follower_display) = six.plan_naming(plan)
 
     def measure(point_cb, write_csv) -> None:
         nonlocal daq, magnet, gaussmeter, temp_ctrl
@@ -878,7 +883,7 @@ def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
 
         demod2_phase_null_1f_deg = None
         if plan.phase_cal_enabled:
-            on_status("Phase calibration: nulling 1f Y (leader demod phaseshift) …")
+            on_status(f"Phase calibration: nulling {leader_display} Y (leader demod phaseshift) …")
             if magnet is not None and plan.phase_cal_current_A is not None:
                 log.info("Phase calibration: ramping magnet to %.4f A ...", plan.phase_cal_current_A)
                 set_magnet_current(magnet, plan.magnet_cfg, plan.phase_cal_current_A,
@@ -893,8 +898,8 @@ def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
             if not result.converged:
                 log.warning(
                     "Phase null did not fully converge after %d iteration(s) "
-                    "(|Y|/R=%.2e) — check cabling/contacts before trusting the 2f data.",
-                    result.iterations, result.residual_ratio,
+                    "(|Y|/R=%.2e) — check cabling/contacts before trusting the %s data.",
+                    result.iterations, result.residual_ratio, follower_display,
                 )
             # 2f is measured on a different physical device (the follower) with its
             # own delay chain, so nulling the leader's 1f phase says nothing about
@@ -903,17 +908,17 @@ def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
             # this snapshot just gives an immediate look at the calibration point.
             d2 = acquire_averaged(daq, plan.demod2_cfg, plan.phase_cal_n_averages)
             log.info(
-                "2f snapshot at calibration point: X=%.4e V  Y=%.4e V  R=%.4e V — "
+                "%s snapshot at calibration point: X=%.4e V  Y=%.4e V  R=%.4e V — "
                 "don't assume this matches 1f's X/Y convention (V_2w ~ cos, not sin); "
                 "check which channel carries the structured field dependence in the "
                 "recorded sweep before trusting either one.",
-                d2["x_mean"], d2["y_mean"], d2["r_mean"],
+                follower_display, d2["x_mean"], d2["y_mean"], d2["r_mean"],
             )
             # Anchor the follower's 2f reference to the current: null the
             # follower at 1f against the same (split) V_xy, record the delay
             # angle as demod2_phase_null_1f_deg so analysis can rotate the
             # recorded 2f X/Y into the current frame.
-            on_status("Phase calibration: anchoring follower 2f reference (1f null) …")
+            on_status(f"Phase calibration: anchoring follower {follower_display} reference (1f null) …")
             demod2_phase_null_1f_deg = null_follower_reference_via_1f(
                 daq, plan.demod2_cfg,
                 n_averages=plan.phase_cal_n_averages,
@@ -928,7 +933,7 @@ def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
             temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg,
             geometry_cfg=plan.geometry_cfg,
             demod2_phase_null_1f_deg=demod2_phase_null_1f_deg, mds=mds,
-            write_csv=write_csv,
+            write_csv=write_csv, demod1_label=leader_prefix, demod2_label=follower_prefix,
         )
 
     try:
@@ -1020,25 +1025,34 @@ def engine(plan):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class RunScreen(MeasurementRunScreen):
-    TABLE_COLUMNS = ("#", "I (A)", "B (mT)", "1f R (V)", "1f θ (°)", "2f R (V)", "2f θ (°)", "T1 (K)", "T2 (K)")
     MEASUREMENT_TYPE = MEASUREMENT_TYPE
 
+    def __init__(self, plan: MeasurementPlan) -> None:
+        super().__init__(plan)
+        self._naming = six.plan_naming(plan)
+
+    def table_columns(self) -> tuple:
+        (_, l), (_, d) = self._naming
+        return ("#", "I (A)", "B (mT)", f"{l} R (V)", f"{l} θ (°)", f"{d} R (V)", f"{d} θ (°)",
+                "T1 (K)", "T2 (K)")
+
     def live_plot_args(self):
-        return (_live_plot_worker, self.plan.magnet_cfg is not None)
+        return (_live_plot_worker, self.plan.magnet_cfg is not None, self._naming)
 
     def table_row(self, record: dict) -> tuple:
         I = record.get("magnet_current_A")
         B = record.get("magnet_field_mT")
         T1 = record.get("temperature_1_K")
         T2 = record.get("temperature_2_K")
+        (lp, _), (fp, _) = self._naming
         return (
             str(record["point_index"] + 1),
             f"{I:.4f}" if I is not None else "—",
             f"{B:.2f}" if B is not None else "—",
-            f"{record['1f_R_V']:.4e}",
-            f"{record['1f_theta_deg']:.2f}",
-            f"{record['2f_R_V']:.4e}",
-            f"{record['2f_theta_deg']:.2f}",
+            f"{record[f'{lp}_R_V']:.4e}",
+            f"{record[f'{lp}_theta_deg']:.2f}",
+            f"{record[f'{fp}_R_V']:.4e}",
+            f"{record[f'{fp}_theta_deg']:.2f}",
             f"{T1:.3f}" if T1 is not None else "—",
             f"{T2:.3f}" if T2 is not None else "—",
         )
@@ -1057,7 +1071,7 @@ class MFLIDualHarmonicApp(MeasurementApp):
 
     # widgets shown only for one AC source (see compose)
     SOURCE_WIDGETS = {"mfli": ("mode_mfli_excitation",),
-                      "6221": ("mode_6221_excitation", "mode_6221_quantities", "mode_6221_extref")}
+                      "6221": ("mode_6221_excitation", "mode_6221_extref")}
 
     def __init__(self, ac_source: Optional[str] = None) -> None:
         super().__init__()
@@ -1149,22 +1163,17 @@ class MFLIDualHarmonicApp(MeasurementApp):
                               validators=[Number(minimum=0.1, failure_description="must be > 0")]),
                         id="mode_6221_excitation",
                     )
-                    yield card(
-                        "Quantities",
-                        switch_field(
-                            "measure_rxx", "R_xx mode — follower reads R_xx's 1f "
-                            "instead of R_xy's 2f",
-                            DEFAULTS["measure_rxx"],
-                        ),
-                        Static(
-                            "Only two physical MFLIs, so this trades 2f for R_xx — "
-                            "move the follower's Signal Input cable by hand to match. "
-                            "The '2f lock-in filter'/'2f input range' fields below "
-                            "configure the follower either way.",
-                            classes="hint",
-                        ),
-                        id="mode_6221_quantities",
-                    )
+                    for role, harmonic_id, rxx_id in (("Leader", "leader_harmonic", "leader_measure_rxx"),
+                                                      ("Follower", "follower_harmonic", "measure_rxx")):
+                        yield card(
+                            f"{role} MFLI lock-in",
+                            select_field(harmonic_id, "Harmonic", six.HARMONIC_OPTIONS,
+                                         int(DEFAULTS[harmonic_id]),
+                                         hint="Saved as <h>f_* columns."),
+                            switch_field(rxx_id, "R_xx — save as rxx_<h>f_*", DEFAULTS[rxx_id]),
+                            Static("R_xx only renames the columns — move the Signal Input "
+                                   "cable to the R_xx leads by hand.", classes="hint"),
+                        )
                     yield card(
                         "Magnet & field sweep",
                         switch_field("enable_sweep", "Sweep magnetic field (Kepco magnet)",
@@ -1221,7 +1230,7 @@ class MFLIDualHarmonicApp(MeasurementApp):
                 with Collapsible(title="Acquisition & filter settings", collapsed=True):
                     with Vertical(classes="param-grid"):
                         yield card(
-                            "1f lock-in filter",
+                            "Leader lock-in filter",
                             field("time_constant_1f_s", "Filter time constant (s)",
                                   DEFAULTS["time_constant_1f_s"],
                                   hint="Bigger = quieter but slower.",
@@ -1232,7 +1241,7 @@ class MFLIDualHarmonicApp(MeasurementApp):
                                          DEFAULTS["sinc_filter_1f"]),
                         )
                         yield card(
-                            "2f lock-in filter",
+                            "Follower lock-in filter",
                             field("time_constant_2f_s", "Filter time constant (s)",
                                   DEFAULTS["time_constant_2f_s"],
                                   hint="Usually longer TC / higher order than 1f (1f bleed-through).",
@@ -1248,11 +1257,11 @@ class MFLIDualHarmonicApp(MeasurementApp):
                                          DEFAULTS["differential"]),
                             switch_field("ac_coupling", "AC-couple the input",
                                          DEFAULTS["ac_coupling"]),
-                            field("input_range_1f_V", "1f input range (V)",
+                            field("input_range_1f_V", "Leader input range (V)",
                                   DEFAULTS["input_range_1f_V"],
-                                  hint="Match expected 1f signal size.",
+                                  hint="Match expected leader signal size.",
                                   validators=[Number(minimum=1e-6, failure_description="must be > 0")]),
-                            field("input_range_2f_V", "2f input range (V)",
+                            field("input_range_2f_V", "Follower input range (V)",
                                   DEFAULTS["input_range_2f_V"],
                                   hint="2f is usually much smaller than 1f.",
                                   validators=[Number(minimum=1e-6, failure_description="must be > 0")]),
@@ -1276,9 +1285,9 @@ class MFLIDualHarmonicApp(MeasurementApp):
                     with Vertical(classes="stable-grid"):
                         yield card(
                             "Devices & connection",
-                            field("leader_device", "Leader MFLI (1f; the source in MFLI mode)",
+                            field("leader_device", "Leader MFLI (the source in MFLI mode)",
                                   DEFAULTS["leader_device"], kind="text"),
-                            field("follower_device", "Follower MFLI (2f, or R_xx 1f in R_xx mode)",
+                            field("follower_device", "Follower MFLI",
                                   DEFAULTS["follower_device"], kind="text"),
                             field("daq_host", "LabOne data server host",
                                   DEFAULTS["daq_host"], kind="text"),
@@ -1438,7 +1447,7 @@ class MFLIDualHarmonicApp(MeasurementApp):
             merged["ac_source"] = "6221" if newest == six.SETTINGS_PATH else "mfli"
         if self._forced_source:
             merged["ac_source"] = self._forced_source
-        return merged
+        return six.migrate_settings(merged)
 
     def on_mount(self) -> None:
         super().on_mount()

@@ -32,14 +32,14 @@ Wiring
     to AUX IN 1 on **BOTH** MFLIs.
 
     Leader MFLI  Signal Input 1 (differential) ──▶ demod 1f (R_xy)
-    Follower MFLI  Signal Input 1 (differential) ──▶ demod 2f (R_xy), OR,
-      with `measure_rxx` on, the R_xx voltage leads instead ──▶ demod 1f
-      (R_xx) — R_xx and R_xy's 2f can't be read at once with only two
-      physical MFLIs (each needs its own Signal Input for an independent
-      input range), so `measure_rxx` trades one for the other: move the
-      follower's Signal Input BNC by hand between the R_xy and R_xx probe
-      pairs depending on which mode you're running. The leader always
-      reads R_xy 1f either way.
+    Follower MFLI  Signal Input 1 (differential) ──▶ demod 2f (R_xy)
+      Those are the defaults; each demod's harmonic is the caller's choice
+      (DemodConfig.harmonic), and `demod1_label`/`demod2_label` name the
+      columns to match. E.g. the R_xx mode: follower at 1f on the R_xx
+      voltage leads, labelled "rxx_1f" — R_xx and R_xy's 2f can't be read
+      at once with only two physical MFLIs (each needs its own Signal Input
+      for an independent input range), so move the follower's Signal Input
+      BNC by hand between the R_xy and R_xx probe pairs to match.
 
     MDS cabling (both units, same as mfli_dual_harmonic.py):
       Leader Ref Out       ───BNC───▶ Follower Ref In
@@ -241,9 +241,9 @@ def build_run_metadata(
     frequency, not the 6221's commanded value — matches the convention
     already used by sot_pulsed_switching_6221.py for the same reason).
 
-    `measure_rxx` is recorded verbatim so a downstream analysis script can
-    tell what the follower's columns mean (R_xy 2f vs R_xx 1f) without
-    re-deriving it from which column prefix happens to be present.
+    `measure_rxx` (the follower's R_xx naming toggle) is recorded verbatim
+    so a downstream analysis script can tell what the follower's columns
+    mean without re-deriving it from which column prefix is present.
     """
     geometry_cfg = geometry_cfg or SampleGeometryConfig()
     I_peak_A = ac_cfg.amplitude_A
@@ -301,6 +301,7 @@ def run_measurement(
     mds=None,
     write_csv: Optional[Callable[[List[dict]], None]] = None,
     demod2_label: str = "2f",
+    demod1_label: str = "1f",
 ) -> pd.DataFrame:
     """Same loop shape as mfli_dual_harmonic.run_measurement(): iterate
     `points`, acquire 1f (leader) + demod2 (follower) at each, log to CSV,
@@ -316,15 +317,14 @@ def run_measurement(
     docstring), so it gets the same "log + tag the row, don't abort" policy
     MDS already has.
 
-    `demod2_label` names the follower's column prefix — `"2f"` (default,
-    today's R_xy 2f) or e.g. `"rxx_1f"` when the caller has set
-    `demod2_cfg.harmonic=1` and physically rewired the follower's Signal
-    Input to the R_xx probe pair (see the module docstring). Whether the
-    caller passed a non-"2f" label is what `measure_rxx` in the recorded
-    run metadata reflects.
+    `demod1_label` / `demod2_label` name the leader's / follower's column
+    prefixes — `"1f"` / `"2f"` by default, or whatever matches the harmonic
+    the caller set on each demod, e.g. `"3f"` or `"rxx_1f"` (see
+    mfli_dual_harmonic_6221_tui.demod_naming()). An `rxx_` follower label is
+    what `measure_rxx` in the recorded run metadata reflects.
     """
     _check_ac_safety(ac_cfg)
-    measure_rxx = demod2_label != "2f"
+    measure_rxx = demod2_label.startswith("rxx_")
     records: List[dict] = []
 
     for idx, pt in enumerate(points):
@@ -365,10 +365,10 @@ def run_measurement(
 
         # ── 3. Acquire 1f + demod2 together (one poll window, not two) ──────
         d1, d2 = acquire_averaged_pair(daq, demod1_cfg, demod2_cfg, acq_cfg.n_averages)
-        log.info("   1f  R=%.4e V  θ=%.2f°  SEM_R=%.2e V  (n=%d)",
-                 d1["r_mean"], d1["theta_mean"], d1["r_sem"], d1["n_samples"])
+        log.info("   %s  R=%.4e V  θ=%.2f°  SEM_R=%.2e V  (n=%d)",
+                 demod1_label, d1["r_mean"], d1["theta_mean"], d1["r_sem"], d1["n_samples"])
         if d1["overload"]:
-            log.warning("   1f input is OVERLOADED — this reading is not trustworthy.")
+            log.warning("   %s input is OVERLOADED — this reading is not trustworthy.", demod1_label)
         log.info("   %s  R=%.4e V  θ=%.2f°  SEM_R=%.2e V  (n=%d)",
                  demod2_label, d2["r_mean"], d2["theta_mean"], d2["r_sem"], d2["n_samples"])
         if d2["overload"]:
@@ -402,15 +402,15 @@ def run_measurement(
             # ── Temperature (MercuryiTC) ─────────────────────────────────────
             "temperature_1_K":  temp_1_K,
             "temperature_2_K":  temp_2_K,
-            # ── 1f ─────────────────────────────────────────────────────────
-            "1f_X_V":      d1["x_mean"],
-            "1f_Y_V":      d1["y_mean"],
-            "1f_R_V":      d1["r_mean"],
-            "1f_theta_deg":d1["theta_mean"],
-            "1f_R_sem_V":  d1["r_sem"],
-            "1f_n_samples":d1["n_samples"],
-            "1f_overload": d1["overload"],
-            # ── demod2 (R_xy 2f, or R_xx 1f when measure_rxx is on) ─────────
+            # ── leader demod (1f by default) ───────────────────────────────
+            f"{demod1_label}_X_V":      d1["x_mean"],
+            f"{demod1_label}_Y_V":      d1["y_mean"],
+            f"{demod1_label}_R_V":      d1["r_mean"],
+            f"{demod1_label}_theta_deg":d1["theta_mean"],
+            f"{demod1_label}_R_sem_V":  d1["r_sem"],
+            f"{demod1_label}_n_samples":d1["n_samples"],
+            f"{demod1_label}_overload": d1["overload"],
+            # ── follower demod (2f by default) ─────────────────────────────
             f"{demod2_label}_X_V":      d2["x_mean"],
             f"{demod2_label}_Y_V":      d2["y_mean"],
             f"{demod2_label}_R_V":      d2["r_mean"],

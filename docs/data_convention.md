@@ -87,6 +87,15 @@ Example: `A_0001_HB3_NOISE_T293K_20260811T143022.csv`
 | `SOT1I` | SOT pulsed switching, 6221-only (no 4200A) — software-timed 6221 DC write pulse + delayed 6221 AC / MFLI harmonic read (`sot/sot_pulsed_switching_6221`) |
 | `NLSW` | Nonlocal spin-current switching, 6221 + 2182A only — field-initialized sweep of single-lobe (0 → ±I → 0) WAVE write pulses + DC nonlocal read (current-reversal averaged unless switched off); key axis = the init magnet current (`current_A`) when the run initializes the state (`sot/sot_nonlocal_switching`) |
 
+`HARM` / `HARM6` demod columns: each MFLI's harmonic is chosen on the
+form, and its columns are prefixed `<h>f_` (e.g. `1f_R_V`, `3f_X_V`), or
+`rxx_<h>f_` when that MFLI's R_xx switch is on. The R_xx switch only changes
+the names. The leader's columns come first. Leader 1f with follower 2f saves
+exactly the classic `1f_*` / `2f_*` file. Follower 1f with R_xx on saves the
+former R_xx mode's `1f_*` / `rxx_1f_*` file. `HARM6`'s `measure_rxx` column
+is the follower's R_xx switch. A form whose two prefixes would clash will
+not start.
+
 A genuinely new measurement kind gets a new short all-caps code added
 here and to nowhere else — `type_code` is just a string parameter to
 `allocate_run()`.

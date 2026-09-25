@@ -25,7 +25,7 @@ from plotly.subplots import make_subplots
 from nicegui import ui
 
 import mfli.mfli_dual_harmonic_tui as program
-from mfli.mfli_dual_harmonic_6221_tui import follower_naming
+from mfli.mfli_dual_harmonic_6221_tui import HARMONIC_OPTIONS, migrate_settings, plan_naming
 from mfli.mfli_dual_harmonic_tui import (
     AC_SOURCES, DEFAULTS, MFLI_DUAL_HARMONIC_DESCRIPTION, build_plan, build_summary,
     compute_filename_preview, mode_errors,
@@ -75,7 +75,7 @@ def _load_page_settings(source: str) -> dict:
         merged["ac_source"] = "6221" if newest == _LEGACY_6221_SETTINGS_PATH else "mfli"
     if source in dict((v, k) for k, v in AC_SOURCES):
         merged["ac_source"] = source
-    return merged
+    return migrate_settings(merged)
 
 
 # extrefs/N/automode options — see ExtRefConfig.automode's docstring in
@@ -148,14 +148,18 @@ def page(source: str = "") -> None:
                         "6221 voltage compliance (V)", float(d("ac_compliance_V")))
                 only_for(ac6221_card, "6221")
 
-                with param_card("Quantities") as quantities_card:
-                    switches["measure_rxx"] = bool_switch(
-                        "R_xx mode — follower reads R_xx's 1f instead of R_xy's 2f",
-                        d("measure_rxx"))
-                    ui.label(
-                        "Trades 2f for R_xx: move the follower's Signal Input by hand. The 2f filter/range fields set the follower."
-                    ).classes("text-xs text-grey-6")
-                only_for(quantities_card, "6221")
+                harmonic_selects = {}
+                for role, harmonic_id, rxx_id in (("Leader", "leader_harmonic", "leader_measure_rxx"),
+                                                  ("Follower", "follower_harmonic", "measure_rxx")):
+                    with param_card(f"{role} MFLI lock-in"):
+                        harmonic_selects[harmonic_id] = ui.select(
+                            {h: label for label, h in HARMONIC_OPTIONS}, value=int(d(harmonic_id)),
+                            label="Harmonic").classes("w-full")
+                        ui.label("Saved as <h>f_* columns.").classes("text-xs text-grey-6 -mt-2 mb-2")
+                        switches[rxx_id] = bool_switch("R_xx — save as rxx_<h>f_*", d(rxx_id))
+                        ui.label(
+                            "R_xx only renames the columns — move the Signal Input cable to the R_xx leads by hand."
+                        ).classes("text-xs text-grey-6")
 
                 with param_card("Magnet & field sweep"):
                     switches["enable_sweep"] = bool_switch("Sweep magnetic field (Kepco magnet)", d("enable_sweep"))
@@ -203,14 +207,14 @@ def page(source: str = "") -> None:
             # ── Tier 2: precision / speed knobs — collapsed ─────────────────
             with advanced_section("Acquisition & filter settings"):
                 with stable_grid():
-                    with param_card("1f lock-in filter"):
+                    with param_card("Leader lock-in filter"):
                         inputs["time_constant_1f_s"] = num_field(
                             "Filter time constant (s)", float(d("time_constant_1f_s")),
                             hint="Bigger = quieter but slower.")
                         order_select_1f = ui.select(list(range(1, 9)), value=int(d("order_1f")), label="Filter order").classes("w-full")
                         switches["sinc_filter_1f"] = bool_switch("Sinc filter (extra harmonic rejection)", d("sinc_filter_1f"))
 
-                    with param_card("2f lock-in filter"):
+                    with param_card("Follower lock-in filter"):
                         inputs["time_constant_2f_s"] = num_field(
                             "Filter time constant (s)", float(d("time_constant_2f_s")),
                             hint="Usually longer TC / higher order than 1f (1f bleed-through).")
@@ -219,10 +223,10 @@ def page(source: str = "") -> None:
 
                     with param_card("Input channels"):
                         inputs["input_range_1f_V"] = num_field(
-                            "1f input range (V)", float(d("input_range_1f_V")),
-                            hint="Match expected 1f signal size.")
+                            "Leader input range (V)", float(d("input_range_1f_V")),
+                            hint="Match expected leader signal size.")
                         inputs["input_range_2f_V"] = num_field(
-                            "2f input range (V)", float(d("input_range_2f_V")),
+                            "Follower input range (V)", float(d("input_range_2f_V")),
                             hint="2f is usually much smaller than 1f.")
                         inputs["sample_rate_Hz"] = num_field("Demodulator sample rate (Sa/s)", float(d("sample_rate_Hz")))
 
@@ -237,9 +241,9 @@ def page(source: str = "") -> None:
                 with stable_grid():
                     with stable_card("Devices & connection"):
                         inputs["leader_device"] = text_field(
-                            "Leader MFLI (1f; the source in MFLI mode)", d("leader_device"))
+                            "Leader MFLI (the source in MFLI mode)", d("leader_device"))
                         inputs["follower_device"] = text_field(
-                            "Follower MFLI (2f, or R_xx 1f in R_xx mode)", d("follower_device"))
+                            "Follower MFLI", d("follower_device"))
                         inputs["daq_host"] = text_field("LabOne data server host", d("daq_host"))
                         inputs["daq_port"] = num_field("LabOne data server port", float(d("daq_port")), integer=True)
 
@@ -349,7 +353,7 @@ def page(source: str = "") -> None:
             selects={"ac_source": ac_select,
                      "order_1f": order_select_1f, "order_2f": order_select_2f,
                      "leader_automode": leader_automode_select,
-                     "follower_automode": follower_automode_select})
+                     "follower_automode": follower_automode_select, **harmonic_selects})
         return state, mode_errors(state, errors)     # a hidden source's field never blocks
 
     def collect_raw() -> dict:
@@ -363,6 +367,8 @@ def page(source: str = "") -> None:
         raw["order_2f"] = order_select_2f.value
         raw["leader_automode"] = leader_automode_select.value
         raw["follower_automode"] = follower_automode_select.value
+        for fid, select in harmonic_selects.items():
+            raw[fid] = select.value
         raw["data_dir"] = identity.data_dir_input.value
         raw["device"] = identity.device_input.value
         raw["cooldown"] = identity.cooldown_input.value
@@ -409,6 +415,8 @@ def page(source: str = "") -> None:
     order_select_2f.on_value_change(refresh_summary.refresh)
     leader_automode_select.on_value_change(refresh_summary.refresh)
     follower_automode_select.on_value_change(refresh_summary.refresh)
+    for select in harmonic_selects.values():
+        select.on_value_change(refresh_summary.refresh)
     refresh_summary()
     refresh_on_busy_change(refresh_summary.refresh)
 
@@ -416,17 +424,18 @@ def page(source: str = "") -> None:
 
     series_state: dict = {}
 
-    def init_series(n_series: int, labels: list[Optional[str]], measure_rxx: bool = False) -> None:
-        follower_prefix, follower_display = follower_naming(measure_rxx)
-        series_state["follower_prefix"] = follower_prefix
+    def init_series(n_series: int, labels: list[Optional[str]], naming: tuple) -> None:
+        (leader_prefix, leader_display), (follower_prefix, follower_display) = naming
+        series_state["prefixes"] = (leader_prefix, follower_prefix)
         fig.data = []
+        fig.update_yaxes(title_text=f"{leader_display}  R (V)", row=1, col=1)
         fig.update_yaxes(title_text=f"{follower_display}  R (V)", row=2, col=1)
         table.columns = [
             {"name": "n", "label": "#", "field": "n"},
             {"name": "I", "label": "I (A)", "field": "I"},
             {"name": "B", "label": "B (mT)", "field": "B"},
-            {"name": "R1", "label": "1f R (V)", "field": "R1"},
-            {"name": "th1", "label": "1f θ (°)", "field": "th1"},
+            {"name": "R1", "label": f"{leader_display} R (V)", "field": "R1"},
+            {"name": "th1", "label": f"{leader_display} θ (°)", "field": "th1"},
             {"name": "R2", "label": f"{follower_display} R (V)", "field": "R2"},
             {"name": "th2", "label": f"{follower_display} θ (°)", "field": "th2"},
             {"name": "T1", "label": "T1 (K)", "field": "T1"},
@@ -435,12 +444,12 @@ def page(source: str = "") -> None:
         series_state["traces"] = {}
         cmap = ["#2E3192", "#e34948", "#2ca02c", "#9467bd", "#8c564b", "#17becf", "#ff7f0e", "#7f7f7f"]
         for i in range(n_series):
-            # One current: 1f and the follower keep their own colors, as in a
+            # One current: leader and follower keep their own colors, as in a
             # manual run. Several: color by current, dotted follower.
             c1, c2 = (cmap[i % len(cmap)],) * 2 if n_series > 1 else ("#1f77b4", "#ff7f0e")
             name = labels[i]
             fig.add_trace(go.Scatter(x=[], y=[], mode="lines+markers",
-                                      name=f"1f {name}" if name else "1f R",
+                                      name=f"{leader_display} {name}" if name else f"{leader_display} R",
                                       line=dict(color=c1), legendgroup=f"s{i}"), row=1, col=1)
             fig.add_trace(go.Scatter(x=[], y=[], mode="lines+markers",
                                       name=f"{follower_display} {name}" if name else f"{follower_display} R",
@@ -451,19 +460,19 @@ def page(source: str = "") -> None:
 
     def on_record(record: dict) -> None:
         idx = record.get("series_index", 0)
-        fp = series_state.get("follower_prefix", "2f")
+        lp, fp = series_state["prefixes"]
         t1, t2 = series_state["traces"][idx]
         has_field = record.get("magnet_field_mT") is not None
         x = record["magnet_field_mT"] if has_field else record["point_index"]
         fig.data[t1].x = fig.data[t1].x + (x,)
-        fig.data[t1].y = fig.data[t1].y + (record["1f_R_V"],)
+        fig.data[t1].y = fig.data[t1].y + (record[f"{lp}_R_V"],)
         fig.data[t2].x = fig.data[t2].x + (x,)
         fig.data[t2].y = fig.data[t2].y + (record[f"{fp}_R_V"],)
         table.rows.append({
             "n": record["point_index"] + 1,
             "I": f"{record['magnet_current_A']:.4f}" if record.get("magnet_current_A") is not None else "—",
             "B": f"{record['magnet_field_mT']:.2f}" if record.get("magnet_field_mT") is not None else "—",
-            "R1": f"{record['1f_R_V']:.4e}", "th1": f"{record['1f_theta_deg']:.2f}",
+            "R1": f"{record[f'{lp}_R_V']:.4e}", "th1": f"{record[f'{lp}_theta_deg']:.2f}",
             "R2": f"{record[f'{fp}_R_V']:.4e}", "th2": f"{record[f'{fp}_theta_deg']:.2f}",
             "T1": f"{record['temperature_1_K']:.3f}" if record.get("temperature_1_K") is not None else "—",
             "T2": f"{record['temperature_2_K']:.3f}" if record.get("temperature_2_K") is not None else "—",
@@ -526,7 +535,7 @@ def page(source: str = "") -> None:
             return
         controller["c"] = rc
 
-        init_series(len(amps), labels, measure_rxx=getattr(plan, "measure_rxx", False))
+        init_series(len(amps), labels, plan_naming(plan))
         run_label.set_text(f"Run #{run_ctx.run_str}" if run_ctx else "")
         plot.update()
         table.rows.clear()
