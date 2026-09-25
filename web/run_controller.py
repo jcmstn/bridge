@@ -349,6 +349,7 @@ class RunController:
                  on_finished: Callable[["FinalStatus", Any], None],
                  sample: Optional[str] = None, device: Optional[str] = None,
                  run_number: Optional[int] = None,
+                 run_contexts: Optional[list[RunContext]] = None,
                  run_cost: Optional[RunCost] = None,
                  on_tick: Optional[Callable[[], None]] = None,
                  stop_is_normal_end: bool = False) -> None:
@@ -365,6 +366,7 @@ class RunController:
         self.sample = sample
         self.device = device
         self.run_number = run_number
+        self.run_contexts = run_contexts if run_contexts is not None else []
         self.on_record = on_record
         self.on_status = on_status
         self.on_run_label = on_run_label
@@ -449,6 +451,7 @@ class RunController:
                 self.handle.run_id, status=status, point_count=len(self._worker_records),
                 duration_s=duration_s, error_message=(str(error) if error else None),
                 output_paths=output_paths,
+                run_numbers=[c.run_number for c in self.run_contexts],
             )
             run_manager.release(self.handle)
             self._queue.put_nowait({"kind": "finished", "status": status, "result": result, "error": error})

@@ -308,7 +308,7 @@ def page() -> None:
             on_finished=finished_handler(
                 page_client, controller, status_label, abort_btn, start_btn, refresh_summary.refresh,
                 program, plan, run_contexts, run_extras, done_text="Log finished."),
-            sample=plan.sample, device=plan.device, run_cost=plan.run_cost,
+            sample=plan.sample, device=plan.device, run_cost=plan.run_cost, run_contexts=run_contexts,
             stop_is_normal_end=True,      # Stop ends a log normally -> "completed"
         )
         if not rc.try_start():

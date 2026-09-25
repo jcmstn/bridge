@@ -339,7 +339,7 @@ def page() -> None:
             on_finished=finished_handler(
                 page_client, controller, status_label, abort_btn, start_btn, refresh_summary.refresh,
                 program, plan, run_contexts, run_extras),
-            sample=plan.sample, device=plan.device, run_cost=plan.run_cost,
+            sample=plan.sample, device=plan.device, run_cost=plan.run_cost, run_contexts=run_contexts,
         )
         if not rc.try_start():
             ui.notify("Another measurement is already running — see the banner above.", type="warning")

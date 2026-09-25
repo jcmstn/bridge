@@ -298,7 +298,7 @@ def page() -> None:
             on_record=on_record, on_status=on_status, on_log=on_log,
             on_finished=make_on_finished(plan, run_contexts, run_extras),
             sample=plan.run_ctx.sample, device=plan.run_ctx.device,
-            run_number=plan.run_ctx.run_number, run_cost=plan.run_cost,
+            run_number=plan.run_ctx.run_number, run_cost=plan.run_cost, run_contexts=run_contexts,
         )
         if not rc.try_start():
             ui.notify("Another measurement is already running — see the banner above.", type="warning")

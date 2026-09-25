@@ -126,18 +126,34 @@ def update_point_count(run_id: int, point_count: int) -> None:
         conn.execute("UPDATE runs SET point_count = ? WHERE id = ?", (point_count, run_id))
 
 
+def format_run_numbers(run_numbers: list[int]) -> str:
+    """'7' for one run, '7-9' for a contiguous series, '7, 9' otherwise."""
+    nums = sorted(set(run_numbers))
+    if len(nums) > 1 and nums[-1] - nums[0] == len(nums) - 1:
+        return f"{nums[0]}-{nums[-1]}"
+    return ", ".join(str(n) for n in nums)
+
+
 def finish_run(run_id: int, *, status: str, point_count: int, duration_s: float,
                error_message: Optional[str] = None,
-               output_paths: Optional[list[str]] = None) -> None:
+               output_paths: Optional[list[str]] = None,
+               run_numbers: Optional[list[int]] = None) -> None:
     """
     Called from inside the worker thread's own `finally:` block, right after
     the final PNG save and right before run_manager.release(). `status` is
     one of 'completed' | 'aborted' | 'error', derived the same way do_run()
     already derives its final status string in every *_tui.py.
+
+    `run_numbers` are the data-convention run numbers actually allocated
+    during the session. Multi-value runs allocate one per iteration, after
+    start_run() has already written the row, so this is where they land.
     """
     if run_id < 0:
         return
     with _connect() as conn:
+        if run_numbers:
+            conn.execute("UPDATE runs SET run_number = ? WHERE id = ?",
+                         (format_run_numbers(run_numbers), run_id))
         if output_paths is not None:
             conn.execute(
                 "UPDATE runs SET finished_at = datetime('now'), status = ?, "

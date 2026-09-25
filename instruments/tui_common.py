@@ -471,7 +471,8 @@ class MeasurementRunScreen(Screen):
                 point_count=len(self._records) if point_count is None else point_count,
                 duration_s=time.monotonic() - self._started,
                 error_message=final_status if outcome == "error" else None,
-                output_paths=[str(c.raw_path) for c in self._run_contexts])
+                output_paths=[str(c.raw_path) for c in self._run_contexts],
+                run_numbers=[c.run_number for c in self._run_contexts])
         except Exception:
             log.exception("Could not finish the run-history entry")
 
