@@ -49,6 +49,7 @@ Requirements:
 """
 
 import time
+import math
 import logging
 import threading
 import numpy as np
@@ -124,8 +125,9 @@ class SourceConfig:
 @dataclass
 class AcquisitionConfig:
     """Timing and averaging parameters."""
-    settling_time_s: float = 0.2      # Extra dead-time after a current step [s]
+    settling_time_s: float = 0.05     # Extra dead-time after a current step [s]
     n_averages: int        = 5        # Voltage samples averaged per point
+    save_every_s: float    = 5.0      # raw-file rewrite cadence while running [s]
     output_file: str       = "dc_iv_curve.csv"
 
 
@@ -202,6 +204,14 @@ def run_measurement(
     columns empty — it's never a reason to stop the measurement.
     """
     records: List[dict] = []
+    last_save = -math.inf
+
+    def _save() -> None:
+        if write_csv is not None:
+            write_csv(records)
+        else:
+            Path(acq_cfg.output_file).parent.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame(records).to_csv(acq_cfg.output_file, index=False)
 
     for idx, pt in enumerate(points):
         if stop_event is not None and stop_event.is_set():
@@ -244,13 +254,17 @@ def run_measurement(
         if on_point is not None:
             on_point(record)
 
-        # ── 5. Write incrementally (never lose data on a crash) ────────────
-        if write_csv is not None:
-            write_csv(records)
-        else:
-            Path(acq_cfg.output_file).parent.mkdir(parents=True, exist_ok=True)
-            pd.DataFrame(records).to_csv(acq_cfg.output_file, index=False)
+        # ── 5. Write incrementally, at most every save_every_s ─────────────
+        # A full rewrite per point is O(n²) and was the slowest part of a
+        # fast point. A crash loses at most save_every_s of points.
+        now = time.monotonic()
+        if now - last_save >= acq_cfg.save_every_s:
+            _save()
+            last_save = now
 
+    # write_csv's caller (record_run) writes the final file itself.
+    if write_csv is None and records:
+        _save()
     log.info("Measurement complete. %d points saved to '%s'.", len(records), acq_cfg.output_file)
     return pd.DataFrame(records)
 
@@ -299,7 +313,7 @@ def main() -> None:
 
     volt_cfg = VoltmeterConfig(
         visa_resource = "GPIB0::7::INSTR",
-        nplc          = 5,
+        nplc          = 1,
         auto_range    = True,
     )
     voltmeter = connect_voltmeter(volt_cfg)
@@ -316,7 +330,7 @@ def main() -> None:
 
     # ── Acquisition settings ─────────────────────────────────────────────────
     acq_cfg = AcquisitionConfig(
-        settling_time_s = 0.2,
+        settling_time_s = 0.05,
         n_averages      = 5,
         output_file     = str(_DATA_DIR / f"dc_iv_curve_{datetime.now():%Y%m%d_%H%M%S}.csv"),
     )

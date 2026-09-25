@@ -77,3 +77,22 @@ def test_iv_estimate_multiplies_gate_series_and_plan_carries_cost(tmp_path: Path
     app.data_root = tmp_path
     plan = app._build_plan(state)
     assert plan.run_cost is not None and len(plan.run_cost.points) == plan.total_points
+
+
+def test_raw_file_rewrite_is_throttled(monkeypatch) -> None:
+    """One write per save_every_s, not per point; every point still returned."""
+    import dc.dc_iv_curve as iv
+    from types import SimpleNamespace
+
+    clock = iter(range(0, 1000))      # 1 s per monotonic() call
+    monkeypatch.setattr(iv.time, "monotonic", lambda: float(next(clock)))
+    monkeypatch.setattr(iv.time, "sleep", lambda s: None)
+    source = SimpleNamespace(source_current=0.0)
+    voltmeter = SimpleNamespace(voltage=1e-3)
+    src_cfg = iv.SourceConfig()
+    points = [iv.CurrentPoint(current_A=i * 1e-4) for i in range(10)]
+    writes = []
+    df = iv.run_measurement(source, voltmeter, src_cfg, iv.AcquisitionConfig(save_every_s=5.0),
+                            points, write_csv=lambda recs: writes.append(len(recs)))
+    assert len(df) == 10
+    assert writes == [1, 6]
