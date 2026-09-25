@@ -12,10 +12,11 @@ the MercuryiTC is only read. The sidebar shows the modelled time per sample
 bound (the maximum duration). Stop ends the log normally, and the run is
 saved as "completed".
 
-At connect time the MercuryiTC sensors are probed verbosely
-(mercury_itc.probe_temperature_sensors: identity, board catalog, and each
-sensor's exact query + raw reply in the log). If two sensors are configured
-but only one answers, the log continues with that one.
+At connect time the MercuryiTC sensors are probed verbosely (as in every
+program: connect_temperature_controller -> probe_temperature_sensors logs the
+identity, board catalog, and each sensor's exact query + raw reply). If two
+sensors are configured but only one answers, the log continues with that one,
+and the plots show one R-vs-T panel per sensor that is reading.
 
 Run with:
     python dc_rt_log_tui.py
@@ -40,6 +41,10 @@ from textual.validation import Number
 from textual.widgets import Button, Collapsible, Footer, Header, Static
 
 from dc.dc_rt_log import (
+    MARKER,
+    SENSOR_COLORS,
+    SENSOR_COLUMNS,
+    TIME_COLOR,
     AcquisitionConfig,
     SourceConfig,
     TemperatureControllerConfig,
@@ -48,10 +53,10 @@ from dc.dc_rt_log import (
     connect_temperature_controller,
     connect_voltmeter,
     plot_results,
-    probe_temperature_sensors,
     ramp_current_to_zero,
     run_measurement,
     shutdown_source,
+    sensors_in,
     shutdown_temperature_controller,
 )
 from dc.dc_sweep_utils import check_sweep_size, safe_shutdown
@@ -294,21 +299,35 @@ def compute_filename_preview(state: dict) -> Optional[str]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _live_plot_worker(queue: "mp.Queue") -> None:
+    """Same layout as the PNG (dc_rt_log.plot_results): one R-vs-T panel per
+    sensor that is reading, then R vs time. The panels are built on the first
+    record, since which sensors answered is only known after connect."""
     import matplotlib.pyplot as plt
     from matplotlib.animation import FuncAnimation
 
-    fig, ax = plt.subplots(figsize=(7, 5))
+    fig = plt.figure(figsize=(7, 6))
     try:
         fig.canvas.manager.set_window_title("R vs T live log")
     except Exception:
         pass
-    ax.set_ylabel("R = V_odd / I (Ω)")
-    ax.set_title("Live log — resistance vs. temperature")
-    ax.grid(True, alpha=0.3)
-    (line,) = ax.plot([], [], ".", ms=3, color="tab:blue")
-    xs: list = []
-    ys: list = []
-    use_T: list = [None]      # decided by the first record: sensor 1 if it has one, else time
+    fig.text(0.5, 0.5, "Waiting for the first sample …", ha="center", va="center", color="0.5")
+    panels: list = []          # (axes, line, x column, xs, ys)
+
+    def _build(record: dict) -> None:
+        fig.clear()
+        sensors = sensors_in([record])
+        axes = fig.subplots(len(sensors) + 1, 1, squeeze=False)[:, 0]
+        for ax, k in zip(axes, sensors):
+            (line,) = ax.plot([], [], color=SENSOR_COLORS[k - 1], **MARKER)
+            ax.set_xlabel(f"Temperature, sensor {k} (K)")
+            panels.append((ax, line, SENSOR_COLUMNS[k - 1], [], []))
+        (line,) = axes[-1].plot([], [], color=TIME_COLOR, **MARKER)
+        axes[-1].set_xlabel("Time (min)")
+        panels.append((axes[-1], line, "elapsed_min", [], []))
+        for ax in axes:
+            ax.set_ylabel("R (Ω)")
+            ax.grid(True, alpha=0.3)
+        fig.tight_layout()
 
     def _drain(_frame=None):
         got = False
@@ -317,20 +336,20 @@ def _live_plot_worker(queue: "mp.Queue") -> None:
                 record = queue.get_nowait()
             except Exception:
                 break
-            if use_T[0] is None:
-                use_T[0] = record.get("temperature_1_K") is not None
-                ax.set_xlabel("Temperature, sensor 1 (K)" if use_T[0] else "Time (s)")
-            x = record.get("temperature_1_K") if use_T[0] else record["elapsed_s"]
-            if x is None:
-                continue
-            xs.append(x)
-            ys.append(record["resistance_ohm"])
+            if not panels:
+                _build(record)
+            record = {**record, "elapsed_min": record["elapsed_s"] / 60.0}
+            for _ax, _line, col, xs, ys in panels:
+                if record.get(col) is not None:
+                    xs.append(record[col])
+                    ys.append(record["resistance_ohm"])
             got = True
         if got:
-            line.set_data(xs, ys)
-            ax.relim()
-            ax.autoscale_view()
-        return (line,)
+            for ax, line, _col, xs, ys in panels:
+                line.set_data(xs, ys)
+                ax.relim()
+                ax.autoscale_view()
+        return tuple(p[1] for p in panels)
 
     _ani = FuncAnimation(fig, _drain, interval=500, cache_frame_data=False)
     plt.show()
@@ -418,11 +437,10 @@ def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
         source = connect_source(plan.src_cfg)
         voltmeter = connect_voltmeter(plan.volt_cfg)
 
-        temp_cfg = None
         if plan.temp_cfg is not None:
             on_status("Connecting to MercuryiTC and probing its sensors (see log) …")
-            temp_ctrl = connect_temperature_controller(plan.temp_cfg)
-            temp_cfg = probe_temperature_sensors(temp_ctrl, plan.temp_cfg)
+            temp_ctrl = connect_temperature_controller(plan.temp_cfg)   # narrows sensor_uids
+        temp_cfg = plan.temp_cfg if temp_ctrl is not None else None
 
         ctx = allocate_run(plan.data_root, plan.sample, plan.device, MEASUREMENT_TYPE,
                            temperature_setpoint_K=plan.temperature_setpoint_K)
@@ -441,8 +459,7 @@ def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
                                                         comment="", extra=extra),
             lambda point_cb, write_csv: run_measurement(
                 source, voltmeter, plan.src_cfg, plan.acq_cfg, stop_event=stop_event,
-                on_point=point_cb, temp_ctrl=temp_ctrl if temp_cfg is not None else None,
-                temp_cfg=temp_cfg, write_csv=write_csv),
+                on_point=point_cb, temp_ctrl=temp_ctrl, temp_cfg=temp_cfg, write_csv=write_csv),
             None, on_point=on_point, on_finished=on_run_finished)
     finally:
         if source is not None:

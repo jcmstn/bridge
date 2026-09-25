@@ -16,7 +16,8 @@ import dc.dc_rt_log as rt
 import dc.dc_rt_log_tui as tui
 from instruments import mercury_itc
 from instruments.mercury_itc import (
-    MercuryITC, TemperatureControllerConfig, normalize_uid, probe_temperature_sensors,
+    TemperatureControllerConfig, connect_temperature_controller, normalize_uid,
+    parse_temperature_reply, probe_temperature_sensors,
 )
 from instruments.tui_common import parse_sensor_uids
 
@@ -54,7 +55,10 @@ class FakeITC:
         return f"STAT:DEV:{uid}:TEMP:SIG:TEMP:{self.T:.4f}K"
 
     def temperature(self, uid):
-        return MercuryITC.parse_temperature_reply(normalize_uid(uid), self.ask(mercury_itc.temperature_command(uid)))
+        return parse_temperature_reply(normalize_uid(uid), self.ask(mercury_itc.temperature_command(uid)))
+
+    def close(self):
+        self.closed = True
 
 
 @pytest.fixture(autouse=True)
@@ -155,6 +159,23 @@ def test_probe_returns_none_when_no_sensor_answers():
     assert probe_temperature_sensors(None, TemperatureControllerConfig()) is None
 
 
+def test_connect_probes_and_narrows_the_callers_cfg_in_place(monkeypatch):
+    """Every program routes through connect_temperature_controller(), so the
+    2 → 1 fallback reaches all of them via the cfg they already hold."""
+    itc = FakeITC(uids=("DB5.T1",))
+    monkeypatch.setattr(mercury_itc, "MercuryITC", lambda *a, **k: itc)
+    cfg = TemperatureControllerConfig(sensor_uids=("MB1.T1", "DB5.T1"))
+    assert connect_temperature_controller(cfg) is itc
+    assert cfg.sensor_uids == ("DB5.T1",)
+
+
+def test_connect_returns_none_and_closes_when_no_sensor_answers(monkeypatch):
+    itc = FakeITC(uids=())
+    monkeypatch.setattr(mercury_itc, "MercuryITC", lambda *a, **k: itc)
+    assert connect_temperature_controller(TemperatureControllerConfig()) is None
+    assert getattr(itc, "closed", False)
+
+
 def test_probe_survives_a_query_that_raises():
     itc = SimpleNamespace(ask=lambda cmd: (_ for _ in ()).throw(TimeoutError("VI_ERROR_TMO")))
     assert probe_temperature_sensors(itc, TemperatureControllerConfig()) is None
@@ -186,3 +207,13 @@ def test_build_plan_maps_the_form(tmp_path):
     assert plan.acq_cfg.T_stop_K == 80.0 and plan.acq_cfg.max_duration_s == 240 * 60
     assert plan.temp_cfg.sensor_uids == ("MB1.T1", "DB5.T1")
     assert plan.total_points == len(plan.run_cost.points)
+
+
+def test_one_r_vs_t_panel_per_sensor_that_reads():
+    import pandas as pd
+    import web.dc.rt_log as page
+    two = [{"temperature_1_K": 300.0, "temperature_2_K": 299.0}]
+    one = [{"temperature_1_K": 300.0, "temperature_2_K": None}]
+    assert rt.sensors_in(two) == [1, 2] and rt.sensors_in(one) == [1] and rt.sensors_in([{}]) == []
+    assert rt.sensors_in(pd.DataFrame(one)) == [1]
+    assert len(page.make_figure([1, 2]).data) == 3 and len(page.make_figure([]).data) == 1

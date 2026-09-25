@@ -48,9 +48,9 @@ Usage example (shared controller, used by the DC/MFLI measurement scripts):
         sensor_uids=("MB1.T1", "DB5.T1"),   # 1 or 2 probes — set to your rig
     )
     mitc = connect_temperature_controller(temp_cfg)   # None if unreachable
-    # optional, verbose: logs IDN, board catalog + each sensor's raw reply and
-    # keeps only the UIDs that answer (None if none does -> log without T)
-    temp_cfg = probe_temperature_sensors(mitc, temp_cfg)
+    # (connect also probes the sensors verbosely -- IDN, board catalog, each
+    # sensor's raw reply -- and narrows temp_cfg.sensor_uids to the ones that
+    # answer; None if none does)
 
     ...
     t1_K, t2_K = read_temperature(mitc, temp_cfg)      # (None, None) if no iTC
@@ -93,6 +93,19 @@ def normalize_uid(uid: str) -> str:
 def temperature_command(uid: str) -> str:
     """The query that reads sensor `uid`'s temperature."""
     return f"READ:DEV:{normalize_uid(uid)}:TEMP:SIG:TEMP"
+
+
+def parse_temperature_reply(uid: str, reply: str) -> float:
+    """Kelvin out of a `STAT:DEV:<uid>:TEMP:SIG:TEMP:<value>K` reply
+    (ValueError, quoting the raw reply, on any other shape)."""
+    reply = reply.strip()
+    expected_prefix = f"STAT:DEV:{uid}:TEMP:SIG:TEMP:"
+    if not reply.startswith(expected_prefix) or not reply.endswith("K"):
+        raise ValueError(
+            f"Unexpected reply to {temperature_command(uid)!r}: {reply!r} "
+            f"(expected {expected_prefix}<value>K)"
+        )
+    return float(reply[len(expected_prefix):-1])
 
 
 class MercuryITC(Instrument):
@@ -155,20 +168,7 @@ class MercuryITC(Instrument):
         temperature.
         """
         uid = normalize_uid(uid)
-        return self.parse_temperature_reply(uid, self.ask(temperature_command(uid)))
-
-    @staticmethod
-    def parse_temperature_reply(uid: str, reply: str) -> float:
-        """Kelvin out of a `STAT:DEV:<uid>:TEMP:SIG:TEMP:<value>K` reply
-        (ValueError, quoting the raw reply, on any other shape)."""
-        reply = reply.strip()
-        expected_prefix = f"STAT:DEV:{uid}:TEMP:SIG:TEMP:"
-        if not reply.startswith(expected_prefix) or not reply.endswith("K"):
-            raise ValueError(
-                f"Unexpected reply to {temperature_command(uid)!r}: {reply!r} "
-                f"(expected {expected_prefix}<value>K)"
-            )
-        return float(reply[len(expected_prefix):-1])
+        return parse_temperature_reply(uid, self.ask(temperature_command(uid)))
 
     def temperature_setpoint(self, uid: str) -> float:
         """
@@ -309,6 +309,15 @@ def connect_temperature_controller(
     at connect time — callers that get None back should pass it straight
     through to read_temperature()/shutdown_temperature_controller() (both
     accept None) rather than logging again themselves.
+
+    Once connected, the configured sensors are probed verbosely
+    (probe_temperature_sensors(): identity, board catalog, each sensor's
+    query + raw reply in the log) and `cfg.sensor_uids` is narrowed IN
+    PLACE to the ones that answered — two configured but only one
+    answering falls back to that one, so every caller's later
+    read_temperature(mitc, cfg) reads only working sensors. If none
+    answers, the session is closed and None is returned, as for an
+    unreachable iTC.
     """
     if not (1 <= len(cfg.sensor_uids) <= 2):
         raise ValueError(
@@ -316,14 +325,18 @@ def connect_temperature_controller(
         )
     try:
         mitc = MercuryITC(cfg.visa_resource, timeout=cfg.timeout_ms)
-        log.info("MercuryiTC connected: %s  id=%s", cfg.visa_resource, mitc.identification)
-        return mitc
     except Exception as exc:
         log.warning(
             "MercuryiTC not connected (%s) — continuing without temperature logging.",
             exc,
         )
         return None
+    working = probe_temperature_sensors(mitc, cfg)
+    if working is None:
+        shutdown_temperature_controller(mitc)
+        return None
+    cfg.sensor_uids = working.sensor_uids
+    return mitc
 
 
 def read_temperature(
@@ -405,7 +418,7 @@ def probe_temperature_sensors(
                         shown, command, type(exc).__name__, exc)
             continue
         try:
-            value = MercuryITC.parse_temperature_reply(uid, reply)
+            value = parse_temperature_reply(uid, reply)
         except ValueError:
             log.warning("MercuryiTC sensor %s: %s → %r — not a temperature reply",
                         shown, command, reply.strip())

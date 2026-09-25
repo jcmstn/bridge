@@ -79,7 +79,6 @@ from instruments.mercury_itc import (
     MercuryITC,
     TemperatureControllerConfig,
     connect_temperature_controller,
-    probe_temperature_sensors,
     read_temperature,
     shutdown_temperature_controller,
 )
@@ -238,32 +237,52 @@ def run_measurement(
     return pd.DataFrame(records)
 
 
-def plot_results(df: pd.DataFrame, out_path: Path, note: str = "") -> None:
-    """R vs temperature (sensor 1; vs time when there is no temperature) and
-    R vs time. `note` is printed small at the bottom (the operator comment)."""
-    import matplotlib.pyplot as plt     # only the plot needs it — keeps imports light
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(7, 8))
-    minutes = df["elapsed_s"] / 60.0
-    T = df["temperature_1_K"].astype(float) if "temperature_1_K" in df else None
-    if T is not None and T.notna().any():
-        ax1.plot(T, df["resistance_ohm"], ".", ms=3, color="#2E3192")
-        ax1.set_xlabel("Temperature, sensor 1 (K)")
-    else:
-        ax1.plot(minutes, df["resistance_ohm"], ".", ms=3, color="#2E3192")
-        ax1.set_xlabel("Time (min) — no temperature recorded")
-    ax1.set_ylabel("R = V_odd / I (Ω)")
-    ax1.set_title("Resistance vs. temperature")
-    ax1.grid(alpha=0.4)
+# Plot styling shared by the PNG and both live views: filled, outlined
+# markers so single points stay visible in a dense multi-hour log.
+MARKER = dict(marker="o", ms=4.5, mec="black", mew=0.35, ls="none", alpha=0.9)
+SENSOR_COLUMNS = ("temperature_1_K", "temperature_2_K")
+SENSOR_COLORS = ("#2E3192", "#2ca02c")
+TIME_COLOR = "#e34948"
 
-    ax2.plot(minutes, df["resistance_ohm"], ".", ms=3, color="#e34948")
-    ax2.set_xlabel("Time (min)")
-    ax2.set_ylabel("R (Ω)")
-    ax2.set_title("Resistance vs. time")
-    ax2.grid(alpha=0.4)
+
+def sensors_in(records) -> list[int]:
+    """Which sensors (1-based) carry data: a list of records or a DataFrame.
+    Two answering sensors -> [1, 2]; one -> [1]; none -> []."""
+    if isinstance(records, pd.DataFrame):
+        return [i + 1 for i, c in enumerate(SENSOR_COLUMNS)
+                if c in records and records[c].notna().any()]
+    return [i + 1 for i, c in enumerate(SENSOR_COLUMNS)
+            if any(r.get(c) is not None for r in records)]
+
+
+def plot_results(df: pd.DataFrame, out_path: Path, note: str = "") -> None:
+    """One R-vs-temperature panel per sensor that recorded data (two
+    sensors -> two panels, one -> one), then R vs time. With no temperature
+    at all, only R vs time. `note` is printed small at the bottom (the
+    operator comment)."""
+    import matplotlib.pyplot as plt     # only the plot needs it — keeps imports light
+    sensors = sensors_in(df)
+    n = len(sensors) + 1
+    fig, axes = plt.subplots(n, 1, figsize=(7, 3.6 * n + 0.8), squeeze=False)
+    axes = axes[:, 0]
+    for ax, k in zip(axes, sensors):
+        ax.plot(df[SENSOR_COLUMNS[k - 1]].astype(float), df["resistance_ohm"],
+                color=SENSOR_COLORS[k - 1], **MARKER)
+        ax.set_xlabel(f"Temperature, sensor {k} (K)")
+        ax.set_ylabel("R = V_odd / I (Ω)")
+        ax.set_title(f"Resistance vs. temperature (sensor {k})")
+        ax.grid(alpha=0.4)
+
+    ax = axes[-1]
+    ax.plot(df["elapsed_s"] / 60.0, df["resistance_ohm"], color=TIME_COLOR, **MARKER)
+    ax.set_xlabel("Time (min)" if sensors else "Time (min) — no temperature recorded")
+    ax.set_ylabel("R = V_odd / I (Ω)")
+    ax.set_title("Resistance vs. time")
+    ax.grid(alpha=0.4)
     fig.tight_layout()
     if note:
         fig.text(0.01, 0.01, note, fontsize=7, color="0.4", va="bottom")
-        fig.subplots_adjust(bottom=0.1)
+        fig.subplots_adjust(bottom=0.1 / n * 2)
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
     log.info("Saved plot: %s", out_path)
@@ -290,11 +309,9 @@ def main() -> None:
     try:
         source = connect_source(src_cfg)
         voltmeter = connect_voltmeter(volt_cfg)
-        temp_ctrl = connect_temperature_controller(temp_cfg)
-        temp_cfg = probe_temperature_sensors(temp_ctrl, temp_cfg)
+        temp_ctrl = connect_temperature_controller(temp_cfg)   # probes + narrows sensor_uids
         df = run_measurement(source, voltmeter, src_cfg, acq_cfg,
-                             temp_ctrl=temp_ctrl if temp_cfg is not None else None,
-                             temp_cfg=temp_cfg)
+                             temp_ctrl=temp_ctrl, temp_cfg=temp_cfg if temp_ctrl is not None else None)
         if not df.empty:
             plot_results(df, Path(acq_cfg.output_file).with_suffix(".png"))
     finally:

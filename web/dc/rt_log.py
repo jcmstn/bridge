@@ -9,8 +9,8 @@ Web equivalent of dc_rt_log_tui.py. Reuses that TUI module's pure
 DEFAULTS / *_FIELDS / build_summary() / build_plan() / run_plan(), so
 validation and the run itself stay identical to the TUI.
 
-Live view: R vs sensor-1 temperature (vs time when no temperature is logged)
-and R vs time. The table keeps only the latest rows; the full log is in the
+Live view: one R-vs-temperature panel per sensor that is reading (two
+sensors -> two panels), then R vs time — the same layout as the PNG. The table keeps only the latest rows; the full log is in the
 raw file.
 """
 
@@ -25,6 +25,7 @@ from plotly.subplots import make_subplots
 from nicegui import ui
 
 import dc.dc_rt_log_tui as program
+from dc.dc_rt_log import MARKER, SENSOR_COLORS, SENSOR_COLUMNS, TIME_COLOR, sensors_in
 from dc.dc_rt_log_tui import (
     DC_RT_LOG_DESCRIPTION,
     DEFAULTS,
@@ -53,6 +54,29 @@ SUITE = "DC"
 TABLE_ROWS = 200      # latest rows shown; a multi-hour log would bloat the page otherwise
 
 log = logging.getLogger("web.dc.rt_log")
+
+
+PANEL_PX = 340       # plot height per panel
+_MARKER = dict(size=MARKER["ms"] * 1.5, opacity=MARKER["alpha"],
+               line=dict(width=MARKER["mew"] * 2, color=MARKER["mec"]))
+
+
+def make_figure(sensors: list[int]) -> go.Figure:
+    """Same layout as the PNG (dc_rt_log.plot_results): one R-vs-T panel per
+    sensor in `sensors`, then R vs time."""
+    titles = [f"Resistance vs. temperature (sensor {k})" for k in sensors] + ["Resistance vs. time"]
+    fig = make_subplots(rows=len(titles), cols=1, subplot_titles=titles)
+    for row, k in enumerate(sensors, start=1):
+        fig.add_trace(go.Scattergl(x=[], y=[], mode="markers",
+                                   marker=dict(color=SENSOR_COLORS[k - 1], **_MARKER)), row=row, col=1)
+        fig.update_xaxes(title_text=f"Temperature, sensor {k} (K)", row=row, col=1)
+    row = len(titles)
+    fig.add_trace(go.Scattergl(x=[], y=[], mode="markers",
+                               marker=dict(color=TIME_COLOR, **_MARKER)), row=row, col=1)
+    fig.update_xaxes(title_text="Time (min)", row=row, col=1)
+    fig.update_yaxes(title_text="R = V_odd / I (Ω)")
+    fig.update_layout(margin=dict(l=60, r=20, t=40, b=50), showlegend=False)
+    return fig
 
 
 def _opt(value) -> Optional[float]:
@@ -144,18 +168,10 @@ def page() -> None:
             abort_btn = ui.button("Stop logging", color="negative").props("outline")
             abort_btn.set_visibility(False)
 
-            fig = make_subplots(rows=2, cols=1,
-                                subplot_titles=("Resistance vs. temperature", "Resistance vs. time"))
-            fig.update_yaxes(title_text="R = V_odd / I (Ω)", row=1, col=1)
-            fig.update_xaxes(title_text="Time (min)", row=2, col=1)
-            fig.update_yaxes(title_text="R (Ω)", row=2, col=1)
-            fig.update_layout(margin=dict(l=60, r=20, t=40, b=50), showlegend=False)
-            fig.add_trace(go.Scattergl(x=[], y=[], mode="markers", marker=dict(size=3, color="#2E3192")),
-                          row=1, col=1)
-            fig.add_trace(go.Scattergl(x=[], y=[], mode="markers", marker=dict(size=3, color="#e34948")),
-                          row=2, col=1)
-            with ui.element("div").classes("w-full").style("aspect-ratio: 1 / 2; max-height: 90vh"):
-                plot = ui.plotly(fig).classes("w-full h-full")
+            plot_box = ui.element("div").classes("w-full")
+            with plot_box:
+                plot = ui.plotly(make_figure([1])).classes("w-full h-full")
+            plot_box.style(f"height: {PANEL_PX * 2}px")
 
             columns = [
                 {"name": "n", "label": "#", "field": "n"},
@@ -219,27 +235,35 @@ def page() -> None:
 
     # ── Run wiring ───────────────────────────────────────────────────────
 
-    series: dict = {}
+    # (trace index, record column) per panel; rebuilt on the first record,
+    # once it is known which sensors answered at connect
+    panels: list = []
+    data: dict = {}
 
     def reset_plot() -> None:
-        series.update(x=[], r=[], t_min=[], r_all=[], use_T=None)
-        for trace in fig.data:
-            trace.x, trace.y = (), ()
+        panels.clear()
+        data.clear()
+        plot.update_figure(make_figure([1]))      # placeholder until the first sample
+
+    def build_panels(record: dict) -> None:
+        sensors = sensors_in([record])
+        plot_box.style(f"height: {PANEL_PX * (len(sensors) + 1)}px")
+        plot.update_figure(make_figure(sensors))
+        panels.extend((i, SENSOR_COLUMNS[k - 1]) for i, k in enumerate(sensors))
+        panels.append((len(sensors), "elapsed_min"))
+        for _, col in panels:
+            data[col] = ([], [])
 
     def on_record(record: dict) -> None:
-        if series["use_T"] is None:
-            series["use_T"] = record.get("temperature_1_K") is not None
-            fig.update_xaxes(title_text="Temperature, sensor 1 (K)" if series["use_T"] else "Time (min)",
-                             row=1, col=1)
-        minutes = record["elapsed_s"] / 60.0
-        x = record.get("temperature_1_K") if series["use_T"] else minutes
-        if x is not None:
-            series["x"].append(x)
-            series["r"].append(record["resistance_ohm"])
-            fig.data[0].x, fig.data[0].y = tuple(series["x"]), tuple(series["r"])
-        series["t_min"].append(minutes)
-        series["r_all"].append(record["resistance_ohm"])
-        fig.data[1].x, fig.data[1].y = tuple(series["t_min"]), tuple(series["r_all"])
+        if not panels:
+            build_panels(record)
+        record = {**record, "elapsed_min": record["elapsed_s"] / 60.0}
+        for i, col in panels:
+            if record.get(col) is not None:
+                xs, ys = data[col]
+                xs.append(record[col])
+                ys.append(record["resistance_ohm"])
+                plot.figure.data[i].x, plot.figure.data[i].y = tuple(xs), tuple(ys)
 
         drift = record.get("temperature_1_drift_K")
         table.rows.append({
@@ -292,7 +316,6 @@ def page() -> None:
         controller["c"] = rc
 
         reset_plot()
-        plot.update()
         table.rows.clear()
         table.update()
         log_area.clear()
