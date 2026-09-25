@@ -332,6 +332,9 @@ class MeasurementRunScreen(Screen):
 
     DONE_STATUS = "Measurement complete."
     ABORTED_STATUS = "Measurement aborted."
+    # True for a program whose Stop is the normal way to end (an open-ended
+    # log): the run history then records a stopped run as "completed".
+    STOP_IS_NORMAL_END = False
 
     @work(thread=True, exclusive=True)
     def do_run(self) -> None:
@@ -343,7 +346,8 @@ class MeasurementRunScreen(Screen):
                 on_point=lambda record: self.app.call_from_thread(self._on_point, record),
                 on_run_finished=self._save_run_png,
                 run_contexts=self._run_contexts, run_extras=self._run_extras)
-            final = self.ABORTED_STATUS if self._stop_event.is_set() else self.DONE_STATUS
+            final = self.ABORTED_STATUS if self._stop_event.is_set() and not self.STOP_IS_NORMAL_END \
+                else self.DONE_STATUS
         except Exception as exc:
             log.exception("Measurement failed")
             final = f"ERROR: {exc}"
@@ -418,7 +422,7 @@ class MeasurementRunScreen(Screen):
         self._set_status(final_status)
         self.query_one("#back_btn", Button).disabled = False
         self.query_one("#abort_btn", Button).disabled = True
-        outcome = "aborted" if self._stop_event.is_set() \
+        outcome = "aborted" if self._stop_event.is_set() and not self.STOP_IS_NORMAL_END \
             else ("error" if final_status.startswith("ERROR") else "completed")
         self._history_finish(outcome, final_status)
         if self._run_contexts:

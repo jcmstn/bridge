@@ -332,6 +332,10 @@ class RunController:
     once per drain tick that brought points — put the expensive widget
     pushes (plot.update(), table.update()) there, not in on_record, so a
     fast run re-sends the figure a few times a second instead of per point.
+
+    `stop_is_normal_end=True` is for a program whose Stop is the normal way
+    to end (an open-ended log): a stopped run is then "completed", not
+    "aborted", in the run history and the final status.
     """
 
     def __init__(self, *, suite: str, measurement: str,
@@ -346,7 +350,9 @@ class RunController:
                  sample: Optional[str] = None, device: Optional[str] = None,
                  run_number: Optional[int] = None,
                  run_cost: Optional[RunCost] = None,
-                 on_tick: Optional[Callable[[], None]] = None) -> None:
+                 on_tick: Optional[Callable[[], None]] = None,
+                 stop_is_normal_end: bool = False) -> None:
+        self.stop_is_normal_end = stop_is_normal_end
         self.run_cost = run_cost
         self.on_tick = on_tick
         self.suite = suite
@@ -431,8 +437,8 @@ class RunController:
             log.exception("Measurement failed")
             error = exc
         finally:
-            status = "aborted" if self.handle.stop_event.is_set() else \
-                     ("error" if error is not None else "completed")
+            status = "aborted" if self.handle.stop_event.is_set() and not self.stop_is_normal_end \
+                else ("error" if error is not None else "completed")
             try:
                 output_paths = self.save_artifacts(self._worker_records, result, status)
             except Exception:

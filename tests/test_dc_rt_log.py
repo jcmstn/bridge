@@ -217,3 +217,27 @@ def test_one_r_vs_t_panel_per_sensor_that_reads():
     assert rt.sensors_in(two) == [1, 2] and rt.sensors_in(one) == [1] and rt.sensors_in([{}]) == []
     assert rt.sensors_in(pd.DataFrame(one)) == [1]
     assert len(page.make_figure([1, 2]).data) == 3 and len(page.make_figure([]).data) == 1
+
+
+@pytest.mark.parametrize("stop_is_normal_end,expected", [(False, "aborted"), (True, "completed")])
+def test_web_run_history_records_a_stopped_log_as_completed(stop_is_normal_end, expected):
+    """Stop is how a log ends: with stop_is_normal_end the runs.db row says
+    "completed" (other programs keep "aborted")."""
+    from instruments import run_index
+    from web import run_manager
+    from web.run_controller import RunCallbacks, RunController
+
+    def run_fn(stop_event, cb):
+        stop_event.set()          # the operator pressed Stop
+
+    rc = RunController(suite="DC", measurement="RT test", run_fn=run_fn,
+                       save_artifacts=lambda *a: [], parameters={}, data_dir="", planned_output_paths=[],
+                       on_record=lambda r: None, on_status=lambda t: None, on_log=lambda t, l: None,
+                       on_finished=lambda f, r: None, stop_is_normal_end=stop_is_normal_end)
+    rc.handle = run_manager.try_acquire("DC", "RT test")
+    rc.handle.run_id = run_index.start_run("DC", "RT test", {}, "", [])
+    rc._start_time = 0.0
+    rc._worker(RunCallbacks(on_point=lambda r: None, on_status=lambda t: None,
+                            on_run_label=lambda t: None))
+    assert run_index.recent_runs(1)[0]["status"] == expected
+    assert rc._queue.get_nowait()["status"] == expected

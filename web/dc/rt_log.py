@@ -307,8 +307,9 @@ def page() -> None:
             on_record=on_record, on_status=on_status, on_run_label=on_run_label, on_log=on_log,
             on_finished=finished_handler(
                 page_client, controller, status_label, abort_btn, start_btn, refresh_summary.refresh,
-                program, plan, run_contexts, run_extras),
+                program, plan, run_contexts, run_extras, done_text="Log finished."),
             sample=plan.sample, device=plan.device, run_cost=plan.run_cost,
+            stop_is_normal_end=True,      # Stop ends a log normally -> "completed"
         )
         if not rc.try_start():
             ui.notify("Another measurement is already running — see the banner above.", type="warning")

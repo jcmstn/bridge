@@ -481,7 +481,7 @@ class RunScreen(MeasurementRunScreen):
     ABORT_LABEL = "Stop logging"
     ABORT_STATUS = "Stop requested — finishing the current sample, then ramping current to zero …"
     DONE_STATUS = "Log finished."
-    ABORTED_STATUS = "Log stopped."
+    STOP_IS_NORMAL_END = True      # Stop ends a log normally -> "completed" in the run history
     POINT_STATUS = "Sample {n} (at most {total})."
     TABLE_COLUMNS = ("#", "t (s)", "T1 (K)", "ΔT1 (mK)", "T2 (K)", "R (Ω)", "σR (Ω)")
     MEASUREMENT_TYPE = MEASUREMENT_TYPE
