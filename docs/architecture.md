@@ -207,6 +207,7 @@ raw driver classes.
 | `mercury_itc.py` | Oxford MercuryiTC temperature controller | `MercuryITC` class; `TemperatureControllerConfig`, `connect_temperature_controller`, `read_temperature`, `shutdown_temperature_controller` | **hand-written** (pymeasure has ITC 503 only) |
 | `keithley4200a.py` | Keithley 4200A-SCS — the 4225-PMU behind a 4225-RPM, over KXCI (the SMU cards are not driven; a general SMU wrapper existed until 2026-09-23 and is in git history) | `Keithley4200AConfig`, `connect_4200a`, `shutdown_4200a`, `PMUPulseConfig`, `configure_pmu_pulse`, `pulse_once`, `list_user_libraries` | **hand-written** KXCI line protocol (not SCPI); runs the KULT module in `instruments/kult/` |
 | `mfli_daq.py` | Zurich Instruments MFLI (dual, via MDS) | `connect`, `connect_device`, `setup_mds`, `sync_follower_oscillator`, `acquire_averaged` | wraps `zhinst-core` |
+| `sr830.py` | SRS SR830 lock-in (MFLI alternative; one input + one demod per unit, so two units for 1f/2f or Rxy/Rxx) | `LockinConfig`, `connect`, `acquire_averaged`, `acquire_averaged_pair` (internal data buffer), `wait_for_reference_lock` / `check_reference_locked` (LIAS bit 3), `auto_gain` / `auto_reserve` / `auto_phase`, `settle_time_s`, `acquire_s`, `shutdown` | thin wrapper over pymeasure + raw manual commands |
 
 **Failure policy — deliberate, not accidental:**
 
