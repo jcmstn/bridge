@@ -96,6 +96,15 @@ former R_xx mode's `1f_*` / `rxx_1f_*` file. `HARM6`'s `measure_rxx` column
 is the follower's R_xx switch. A form whose two prefixes would clash will
 not start.
 
+`HARM` / `HARM6` / `SOT2H` / `SOT1I` can be read with SRS SR830s instead
+of the MFLI(s). Same type code and columns; the header gets `lockin: SR830`
+(absent = MFLI) and the applied full-scale sensitivity
+(`sr830_sensitivity_1f_V` / `_2f_V`, SOT: `sr830_sensitivity_V`). Per row:
+`demod_output_convention` names the SR830, the filter order is the slope / 6
+dB/oct, and in `HARM` `mds_synced` is blank while
+`leader_reference_locked` / `follower_reference_locked` (blank / the
+follower's latched unlock flag) are added.
+
 A genuinely new measurement kind gets a new short all-caps code added
 here and to nowhere else — `type_code` is just a string parameter to
 `allocate_run()`.

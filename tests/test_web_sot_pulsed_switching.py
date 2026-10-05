@@ -21,7 +21,7 @@ from test_run_plans import _stub_hardware
 from web import run_manager
 
 _CARDS = ["Write pulse (4200A PMU)", "Write pulse (6221 WAVE, hardware-timed)",
-          "DC R_xy read (6221 ±I + 2182)", "Lock-in read (6221 AC + MFLI)",
+          "DC R_xy read (6221 ±I + 2182)", "Lock-in read (6221 AC + lock-in)",
           "Lock-in harmonic (6221 pulse)", "Keithley 4200A PMU (KXCI)", "Keithley 2182 + DC read",
           "Zurich Instruments MFLI + 6221 marker"]
 MODES = [  # (pulse, read, type code, cards shown)

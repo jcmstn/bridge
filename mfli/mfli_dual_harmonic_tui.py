@@ -75,6 +75,7 @@ from mfli.mfli_dual_harmonic import (
     connect_temperature_controller,
     null_follower_reference_via_1f,
     phase_cal_s,
+    phase_cal_sr830,
     run_measurement,
     set_magnet_current,
     setup_mds,
@@ -84,6 +85,7 @@ from mfli.mfli_dual_harmonic import (
     shutdown_temperature_controller,
     sync_follower_oscillator,
 )
+from instruments import sr830
 from instruments.data_dir import validate_directory
 from instruments.field_geometry import field_direction_summary_line, render_ascii_field_diagram
 from instruments.data_naming import (
@@ -133,9 +135,9 @@ MEASUREMENT_TYPE = "HARM"
 # One-paragraph blurb + wiring schematic — shown on this program's card in
 # bridge_tui.py, and the description also on its web page.
 MFLI_DUAL_HARMONIC_DESCRIPTION = (
-    "Leader MFLI 1f · follower MFLI 2f. AC source: leader Signal Output via series "
-    "R, or 6221 (phase marker to both MFLIs). Optional Kepco field sweep, read by "
-    "Lake Shore 475."
+    "Leader 1f · follower 2f lock-in: two MDS-synced MFLIs or two SR830s. AC source: "
+    "leader's sine output via series R, or 6221 (phase marker to both lock-ins). "
+    "Optional Kepco field sweep, read by Lake Shore 475."
 )
 
 MFLI_DUAL_HARMONIC_SCHEMATIC = """\
@@ -156,6 +158,11 @@ MFLI_DUAL_HARMONIC_SCHEMATIC = """\
   MDS cabling  (both units)
     Leader Ref Out      ───BNC───▶ Follower Ref In
     Leader Trigger Out 1 ──▶ fanned out to Trigger In 1 on BOTH units
+
+  Lock-in = SR830 pair  (GPIB; no MDS)
+    Leader SINE OUT ──[ R_series ]──▶ sample   (lock-in source; internal ref)
+    Leader rear TTL OUT ──BNC──▶ Follower REF IN   (or: 6221 marker ──▶ BOTH REF IN)
+    Each SR830 A/B input (A-B = differential) ──▶ its V+ / V- pair
 
   Magnet field sweep  (optional, "Sweep magnetic field" switch)
     Kepco BOP-GL      ──GPIB──▶ electromagnet coil
@@ -275,7 +282,8 @@ def run_costs(state: dict, currents_A=None) -> RunCost:
     rate, n_avg = state["sample_rate_Hz"], state["n_averages"]
     tc1, tc2 = state["time_constant_1f_s"], state["time_constant_2f_s"]
     # acquire_averaged_pair(): 1f and 2f share ONE poll window -- the longer of the two.
-    pair_s = max(acquire_s(tc1, n_avg, rate), acquire_s(tc2, n_avg, rate)) if rate > 0 else 0.0
+    acq = sr830.acquire_s if state.get("lockin") == "sr830" else acquire_s
+    pair_s = max(acq(tc1, n_avg, rate), acq(tc2, n_avg, rate)) if rate > 0 else 0.0
     has_temp = bool(state["enable_temperature"] and parse_sensor_uids(state["temperature_sensor_uids"]))
     rc.each("settle", state["settling_time_s"])
     rc.each("acquire", pair_s)
@@ -334,6 +342,7 @@ class MeasurementPlan:
     series: str = ""
     data_root: Path = _DEFAULT_DATA_DIR
     run_cost: Optional[RunCost] = None      # modelled seconds per point (progress bar + ETA)
+    sr830_cfgs: Optional[tuple] = None      # (leader, follower) LockinConfig; None = the MFLIs
 
     @property
     def total_points(self) -> int:
@@ -840,25 +849,33 @@ def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
     ctx = plan.run_ctx
     run_contexts.append(ctx)
     run_extras.append(None)
-    daq = magnet = gaussmeter = temp_ctrl = None
+    daq = lockin = magnet = gaussmeter = temp_ctrl = None
     recorded: list[dict] = []
     (leader_prefix, leader_display), (follower_prefix, follower_display) = six.plan_naming(plan)
 
     def measure(point_cb, write_csv) -> None:
-        nonlocal daq, magnet, gaussmeter, temp_ctrl
-        on_status("Connecting to LabOne data server …")
-        daq = connect(plan.daq_host, plan.daq_port)
-        connect_device(daq, plan.leader, interface="1GbE")
-        connect_device(daq, plan.follower, interface="1GbE")
+        nonlocal daq, lockin, magnet, gaussmeter, temp_ctrl
+        if plan.sr830_cfgs is not None:
+            on_status("Connecting SR830 lock-ins …")
+            lockin = sr830.SR830Read()
+            lockin.open(plan.sr830_cfgs)
+            on_status("Locking the follower SR830 to the leader's TTL OUT …")
+            lockin.lock(SR830_LOCK_TIMEOUT_S, stop_event)
+            mds = None
+        else:
+            on_status("Connecting to LabOne data server …")
+            daq = connect(plan.daq_host, plan.daq_port)
+            connect_device(daq, plan.leader, interface="1GbE")
+            connect_device(daq, plan.follower, interface="1GbE")
 
-        on_status("Synchronizing MDS …")
-        mds = setup_mds(daq, leader=plan.leader, follower=plan.follower)
+            on_status("Synchronizing MDS …")
+            mds = setup_mds(daq, leader=plan.leader, follower=plan.follower)
 
-        on_status("Configuring output & demodulators …")
-        configure_output(daq, plan.out_cfg)
-        sync_follower_oscillator(daq, plan.out_cfg, plan.follower)
-        configure_demodulator(daq, plan.demod1_cfg)
-        configure_demodulator(daq, plan.demod2_cfg)
+            on_status("Configuring output & demodulators …")
+            configure_output(daq, plan.out_cfg)
+            sync_follower_oscillator(daq, plan.out_cfg, plan.follower)
+            configure_demodulator(daq, plan.demod1_cfg)
+            configure_demodulator(daq, plan.demod2_cfg)
 
         if plan.temp_cfg is not None:
             on_status("Connecting to MercuryiTC (temperature) …")
@@ -890,40 +907,44 @@ def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
                                    gaussmeter, plan.gauss_cfg,
                                    plan.acq_cfg.field_settle_tolerance_mT, stop_event)
                 time.sleep(plan.acq_cfg.settling_time_s)
-            result = auto_null_phase(
-                daq, plan.demod1_cfg,
-                n_averages=plan.phase_cal_n_averages,
-                max_iterations=plan.phase_cal_max_iterations,
-            )
-            if not result.converged:
-                log.warning(
-                    "Phase null did not fully converge after %d iteration(s) "
-                    "(|Y|/R=%.2e) — check cabling/contacts before trusting the %s data.",
-                    result.iterations, result.residual_ratio, follower_display,
+            if lockin is not None:
+                demod2_phase_null_1f_deg = phase_cal_sr830(
+                    lockin, plan.phase_cal_n_averages, follower_display)
+            else:
+                result = auto_null_phase(
+                    daq, plan.demod1_cfg,
+                    n_averages=plan.phase_cal_n_averages,
+                    max_iterations=plan.phase_cal_max_iterations,
                 )
-            # 2f is measured on a different physical device (the follower) with its
-            # own delay chain, so nulling the leader's 1f phase says nothing about
-            # which 2f channel is physically correct — that must be verified
-            # empirically. Both X2f/Y2f are already saved per point in the CSV;
-            # this snapshot just gives an immediate look at the calibration point.
-            d2 = acquire_averaged(daq, plan.demod2_cfg, plan.phase_cal_n_averages)
-            log.info(
-                "%s snapshot at calibration point: X=%.4e V  Y=%.4e V  R=%.4e V — "
-                "don't assume this matches 1f's X/Y convention (V_2w ~ cos, not sin); "
-                "check which channel carries the structured field dependence in the "
-                "recorded sweep before trusting either one.",
-                follower_display, d2["x_mean"], d2["y_mean"], d2["r_mean"],
-            )
-            # Anchor the follower's 2f reference to the current: null the
-            # follower at 1f against the same (split) V_xy, record the delay
-            # angle as demod2_phase_null_1f_deg so analysis can rotate the
-            # recorded 2f X/Y into the current frame.
-            on_status(f"Phase calibration: anchoring follower {follower_display} reference (1f null) …")
-            demod2_phase_null_1f_deg = null_follower_reference_via_1f(
-                daq, plan.demod2_cfg,
-                n_averages=plan.phase_cal_n_averages,
-                max_iterations=plan.phase_cal_max_iterations,
-            )
+                if not result.converged:
+                    log.warning(
+                        "Phase null did not fully converge after %d iteration(s) "
+                        "(|Y|/R=%.2e) — check cabling/contacts before trusting the %s data.",
+                        result.iterations, result.residual_ratio, follower_display,
+                    )
+                # 2f is measured on a different physical device (the follower) with its
+                # own delay chain, so nulling the leader's 1f phase says nothing about
+                # which 2f channel is physically correct — that must be verified
+                # empirically. Both X2f/Y2f are already saved per point in the CSV;
+                # this snapshot just gives an immediate look at the calibration point.
+                d2 = acquire_averaged(daq, plan.demod2_cfg, plan.phase_cal_n_averages)
+                log.info(
+                    "%s snapshot at calibration point: X=%.4e V  Y=%.4e V  R=%.4e V — "
+                    "don't assume this matches 1f's X/Y convention (V_2w ~ cos, not sin); "
+                    "check which channel carries the structured field dependence in the "
+                    "recorded sweep before trusting either one.",
+                    follower_display, d2["x_mean"], d2["y_mean"], d2["r_mean"],
+                )
+                # Anchor the follower's 2f reference to the current: null the
+                # follower at 1f against the same (split) V_xy, record the delay
+                # angle as demod2_phase_null_1f_deg so analysis can rotate the
+                # recorded 2f X/Y into the current frame.
+                on_status(f"Phase calibration: anchoring follower {follower_display} reference (1f null) …")
+                demod2_phase_null_1f_deg = null_follower_reference_via_1f(
+                    daq, plan.demod2_cfg,
+                    n_averages=plan.phase_cal_n_averages,
+                    max_iterations=plan.phase_cal_max_iterations,
+                )
 
         on_status("Running measurement …")
         run_measurement(
@@ -934,6 +955,7 @@ def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
             geometry_cfg=plan.geometry_cfg,
             demod2_phase_null_1f_deg=demod2_phase_null_1f_deg, mds=mds,
             write_csv=write_csv, demod1_label=leader_prefix, demod2_label=follower_prefix,
+            lockin=lockin,
         )
 
     try:
@@ -946,6 +968,8 @@ def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
         # the magnet can start its ramp-down right away rather than waiting.
         if daq is not None:
             safe_shutdown("MFLI output", lambda: shutdown_output(daq, plan.out_cfg))
+        if lockin is not None:
+            safe_shutdown("SR830 lock-ins", lockin.close)
         if magnet is not None:
             safe_shutdown("magnet", lambda: shutdown_magnet(magnet, plan.magnet_cfg))
         if gaussmeter is not None:
@@ -974,13 +998,34 @@ def save_run_png(plan: MeasurementPlan, records: list[dict], png_path: Path, com
 # exactly what that source's program always wrote. The form is the union of the
 # two (44 shared fields; the source-only ones are hidden in the other mode).
 
-AC_SOURCES = [("MFLI Signal Output (+ series resistor)", "mfli"),
-              ("Keithley 6221 (phase marker → ExtRef)", "6221")]
+AC_SOURCES = [("Lock-in sine output (+ series resistor)", "mfli"),
+              ("Keithley 6221 (phase marker → lock-in reference)", "6221")]
 _MFLI_ONLY_FIELDS = tuple(k for k in DEFAULTS if k not in six.DEFAULTS)
 _6221_ONLY_FIELDS = tuple(k for k in six.DEFAULTS if k not in DEFAULTS)
-DEFAULTS = {**six.DEFAULTS, **DEFAULTS, "ac_source": "mfli"}
-NUMERIC_FIELDS = {**six.NUMERIC_FIELDS, **NUMERIC_FIELDS}
-TEXT_FIELDS = TEXT_FIELDS + [f for f in six.TEXT_FIELDS if f not in TEXT_FIELDS]
+
+# ── Lock-in toggle ── a second, independent axis: either source is read by
+# the MDS-synced MFLI pair (as always) or by two SRS SR830s on GPIB. The
+# SR830 pair keeps the source's type code and columns; the run's header gets
+# `lockin: SR830` (absent = MFLI). Leader = 1f unit (its own SINE OUT is the
+# source in "mfli" source mode), follower = 2f unit on REF IN (the leader's
+# rear TTL OUT, or the 6221 marker).
+LOCKINS = [("Zurich MFLI pair (MDS)", "mfli"), ("SRS SR830 pair (GPIB)", "sr830")]
+SR830_DEFAULTS = {"sr830_a_visa": "GPIB0::8::INSTR", "sr830_b_visa": "GPIB0::9::INSTR",
+                  "sensitivity_1f_V": "1e-3", "sensitivity_2f_V": "1e-3"}
+_MFLI_LOCKIN_FIELDS = ("leader_device", "follower_device", "daq_host", "daq_port",
+                       "input_range_1f_V", "input_range_2f_V",
+                       *(f"{role}_{k}" for role in ("leader", "follower")
+                         for k in ("extref_index", "aux_input_ch", "osc_index",
+                                   "pll_demod_index", "automode")))
+# MFLI-only summary errors whose fields are hidden in SR830 mode
+_MFLI_ONLY_ERRORS = ("Leader and follower device IDs", "Leader PLL", "Follower PLL")
+SR830_LOCK_TIMEOUT_S = 5.0          # follower on the leader's TTL OUT (mfli source mode)
+
+DEFAULTS = {**six.DEFAULTS, **DEFAULTS, **SR830_DEFAULTS, "ac_source": "mfli", "lockin": "mfli"}
+NUMERIC_FIELDS = {**six.NUMERIC_FIELDS, **NUMERIC_FIELDS,
+                  "sensitivity_1f_V": float, "sensitivity_2f_V": float}
+TEXT_FIELDS = TEXT_FIELDS + [f for f in six.TEXT_FIELDS if f not in TEXT_FIELDS] + [
+    "sr830_a_visa", "sr830_b_visa"]
 OPTIONAL_NUMERIC_FIELDS = OPTIONAL_NUMERIC_FIELDS + [
     f for f in six.OPTIONAL_NUMERIC_FIELDS if f not in OPTIONAL_NUMERIC_FIELDS]
 
@@ -989,11 +1034,70 @@ def _uses_6221(state: dict) -> bool:
     return state.get("ac_source") == "6221"
 
 
+def _uses_sr830(state: dict) -> bool:
+    return state.get("lockin") == "sr830"
+
+
 def mode_errors(state: dict, errors: list[str]) -> list[str]:
-    """Parse errors of the ACTIVE source only — a hidden field of the other
-    source never blocks a run."""
-    hidden = _MFLI_ONLY_FIELDS if _uses_6221(state) else _6221_ONLY_FIELDS
+    """Parse errors of the ACTIVE source + lock-in only — a hidden field of
+    the other mode never blocks a run."""
+    hidden = ((_MFLI_ONLY_FIELDS if _uses_6221(state) else _6221_ONLY_FIELDS)
+              + (_MFLI_LOCKIN_FIELDS if _uses_sr830(state) else tuple(SR830_DEFAULTS)))
     return [e for e in errors if not any(e.startswith(f"'{f}'") for f in hidden)]
+
+
+def sr830_cfgs(state: dict) -> tuple:
+    """(leader, follower) SR830 configs from the form. In "mfli" source mode
+    the leader is internally referenced and drives the sample from its SINE
+    OUT — the form's peak amplitude, sent as rms (the SR830's unit), so the
+    saved peak/rms excitation columns mean what they always did."""
+    own_source = not _uses_6221(state)
+    common = dict(frequency_Hz=state["frequency_Hz"], differential=state["differential"],
+                  ac_coupling=state["ac_coupling"], sample_rate_Hz=state["sample_rate_Hz"])
+    leader = sr830.config_from_form(
+        state["sr830_a_visa"], harmonic=int(state["leader_harmonic"]),
+        time_constant_s=state["time_constant_1f_s"], order=int(state["order_1f"]),
+        sinc_filter=state["sinc_filter_1f"], sensitivity_V=state["sensitivity_1f_V"],
+        reference="internal" if own_source else "external",
+        sine_amplitude_V=state["amplitude_V"] / math.sqrt(2) if own_source else 0.004, **common)
+    follower = sr830.config_from_form(
+        state["sr830_b_visa"], harmonic=int(state["follower_harmonic"]),
+        time_constant_s=state["time_constant_2f_s"], order=int(state["order_2f"]),
+        sinc_filter=state["sinc_filter_2f"], sensitivity_V=state["sensitivity_2f_V"], **common)
+    return leader, follower
+
+
+def _sr830_state(state: dict) -> dict:
+    """`state` with the TCs and buffer rate the SR830s will actually apply,
+    so the source's summary / estimate / plan see the real values."""
+    leader, follower = sr830_cfgs(state)
+    return {**state, "time_constant_1f_s": leader.time_constant_s,
+            "time_constant_2f_s": follower.time_constant_s,
+            "sample_rate_Hz": leader.sample_rate_Hz}
+
+
+def _sr830_checks(state: dict, info: list[str], warnings: list[str], errors: list[str]) -> None:
+    if state["sr830_a_visa"] == state["sr830_b_visa"]:
+        errors.append("Leader and follower SR830 VISA resources must be different.")
+    for role, cfg in zip(("Leader", "Follower"), sr830_cfgs(state)):
+        try:
+            sr830.validate(cfg)
+        except ValueError as e:
+            errors.append(f"{role} SR830: {e}")
+        info.append(f"{role} SR830 {cfg.visa_resource}: {cfg.reference} ref, TC "
+                    f"{cfg.time_constant_s:g} s, {cfg.filter_slope_dB} dB/oct, "
+                    f"sensitivity {format_si(cfg.sensitivity_V, 'V')}")
+        if cfg.sync_filter and cfg.harmonic * cfg.frequency_Hz >= 200:
+            info.append(f"{role} SR830: sync filter has no effect above 200 Hz")
+    if state["sample_rate_Hz"] > sr830.SAMPLE_RATES_HZ[-1]:
+        info.append(f"SR830 buffer rate capped at {sr830.SAMPLE_RATES_HZ[-1]:g} Sa/s")
+    for key in ("n_averages", "phase_cal_n_averages"):
+        if state[key] > sr830.BUFFER_POINTS:
+            errors.append(f"'{key}' exceeds the SR830 buffer ({sr830.BUFFER_POINTS} points).")
+    if not _uses_6221(state) and state["series_R_ohm"] > 0:
+        warnings.append("SR830 SINE OUT can't be switched off — after the run it stays at "
+                        f"4 mV rms (≈ {format_si(0.004 / state['series_R_ohm'], 'A')} rms "
+                        "through R_series). Unplug it if that matters.")
 
 
 def resolve_state(state: dict) -> dict:
@@ -1001,7 +1105,13 @@ def resolve_state(state: dict) -> dict:
 
 
 def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
-    return six.build_summary(state) if _uses_6221(state) else _build_summary_mfli(state)
+    sr = _uses_sr830(state)
+    st = _sr830_state(state) if sr else state
+    info, warnings, errors = six.build_summary(st) if _uses_6221(st) else _build_summary_mfli(st)
+    if sr:
+        errors = [e for e in errors if not e.startswith(_MFLI_ONLY_ERRORS)]
+        _sr830_checks(state, info, warnings, errors)
+    return info, warnings, errors
 
 
 def compute_filename_preview(state: dict) -> Optional[str]:
@@ -1009,8 +1119,18 @@ def compute_filename_preview(state: dict) -> Optional[str]:
 
 
 def build_plan(state: dict, data_root: Path):
-    """The active source's plan (its own MeasurementPlan type)."""
-    return six.build_plan(state, data_root) if _uses_6221(state) else _build_plan_mfli(state, data_root)
+    """The active source's plan (its own MeasurementPlan type), carrying the
+    SR830 pair's configs when the SR830 lock-in is picked."""
+    sr = _uses_sr830(state)
+    if sr:
+        state = _sr830_state(state)
+    plan = six.build_plan(state, data_root) if _uses_6221(state) else _build_plan_mfli(state, data_root)
+    if sr:
+        plan.sr830_cfgs = sr830_cfgs(state)
+        plan.header_extra.update(lockin="SR830",
+                                 sr830_sensitivity_1f_V=plan.sr830_cfgs[0].sensitivity_V,
+                                 sr830_sensitivity_2f_V=plan.sr830_cfgs[1].sensitivity_V)
+    return plan
 
 
 def engine(plan):
@@ -1069,9 +1189,16 @@ class MFLIDualHarmonicApp(MeasurementApp):
     TITLE = "MFLI Dual-Harmonic Measurement"
     SUB_TITLE = "1f / 2f lock-in · MFLI or Keithley 6221 excitation · magnet field sweep"
 
-    # widgets shown only for one AC source (see compose)
-    SOURCE_WIDGETS = {"mfli": ("mode_mfli_excitation",),
-                      "6221": ("mode_6221_excitation", "mode_6221_extref")}
+    # widget id -> (AC sources, lock-ins) it is shown for (see compose)
+    _ALL = ("mfli", "6221", "sr830")
+    MODE_WIDGETS = {"mode_mfli_excitation": (("mfli",), _ALL),
+                    "mode_6221_excitation": (("6221",), _ALL),
+                    "mode_6221_source": (("6221",), _ALL),
+                    "mode_6221_extref": (("6221",), ("mfli",)),
+                    "lockin_mfli_devices": (_ALL, ("mfli",)),
+                    "lockin_mfli_ranges": (_ALL, ("mfli",)),
+                    "lockin_sr830_sens": (_ALL, ("sr830",)),
+                    "lockin_sr830_addr": (_ALL, ("sr830",))}
 
     def __init__(self, ac_source: Optional[str] = None) -> None:
         super().__init__()
@@ -1136,14 +1263,16 @@ class MFLIDualHarmonicApp(MeasurementApp):
                         "Excitation",
                         select_field("ac_source", "AC current source", AC_SOURCES,
                                      DEFAULTS["ac_source"],
-                                     hint="MFLI → saved as HARM · 6221 → HARM6"),
+                                     hint="Lock-in output → saved as HARM · 6221 → HARM6"),
+                        select_field("lockin", "Lock-in", LOCKINS, DEFAULTS["lockin"],
+                                     hint="SR830: two units on GPIB, header records lockin: SR830"),
                         field("frequency_Hz", "Excitation frequency (Hz)",
                               DEFAULTS["frequency_Hz"],
                               hint="~300-1000 Hz; avoid multiples of 50/60 Hz.",
                               validators=[Number(minimum=1e-3, failure_description="must be > 0")]),
                     )
                     yield card(
-                        "MFLI Signal Output",
+                        "Lock-in Signal Output",
                         field("amplitude_V", "Output amplitude (V, peak)",
                               DEFAULTS["amplitude_V"],
                               validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
@@ -1166,7 +1295,7 @@ class MFLIDualHarmonicApp(MeasurementApp):
                     for role, harmonic_id, rxx_id in (("Leader", "leader_harmonic", "leader_measure_rxx"),
                                                       ("Follower", "follower_harmonic", "measure_rxx")):
                         yield card(
-                            f"{role} MFLI lock-in",
+                            f"{role} lock-in",
                             select_field(harmonic_id, "Harmonic", six.HARMONIC_OPTIONS,
                                          int(DEFAULTS[harmonic_id]),
                                          hint="Saved as <h>f_* columns."),
@@ -1257,6 +1386,12 @@ class MFLIDualHarmonicApp(MeasurementApp):
                                          DEFAULTS["differential"]),
                             switch_field("ac_coupling", "AC-couple the input",
                                          DEFAULTS["ac_coupling"]),
+                            field("sample_rate_Hz", "Demodulator sample rate (Sa/s)",
+                                  DEFAULTS["sample_rate_Hz"], hint="SR830 buffer: max 512 Sa/s.",
+                                  validators=[Number(minimum=1e-3, failure_description="must be > 0")]),
+                        )
+                        yield card(
+                            "MFLI input ranges",
                             field("input_range_1f_V", "Leader input range (V)",
                                   DEFAULTS["input_range_1f_V"],
                                   hint="Match expected leader signal size.",
@@ -1265,9 +1400,19 @@ class MFLIDualHarmonicApp(MeasurementApp):
                                   DEFAULTS["input_range_2f_V"],
                                   hint="2f is usually much smaller than 1f.",
                                   validators=[Number(minimum=1e-6, failure_description="must be > 0")]),
-                            field("sample_rate_Hz", "Demodulator sample rate (Sa/s)",
-                                  DEFAULTS["sample_rate_Hz"],
-                                  validators=[Number(minimum=1e-3, failure_description="must be > 0")]),
+                            id="lockin_mfli_ranges",
+                        )
+                        yield card(
+                            "SR830 sensitivities",
+                            field("sensitivity_1f_V", "Leader full-scale sensitivity (V)",
+                                  DEFAULTS["sensitivity_1f_V"], hint="Snapped up to 1-2-5 steps.",
+                                  validators=[Number(minimum=2e-9, maximum=1.0,
+                                                     failure_description="2 nV - 1 V")]),
+                            field("sensitivity_2f_V", "Follower full-scale sensitivity (V)",
+                                  DEFAULTS["sensitivity_2f_V"],
+                                  validators=[Number(minimum=2e-9, maximum=1.0,
+                                                     failure_description="2 nV - 1 V")]),
+                            id="lockin_sr830_sens",
                         )
                         yield card(
                             "Acquisition timing",
@@ -1293,10 +1438,19 @@ class MFLIDualHarmonicApp(MeasurementApp):
                                   DEFAULTS["daq_host"], kind="text"),
                             field("daq_port", "LabOne data server port",
                                   DEFAULTS["daq_port"], kind="integer"),
-                            muted=True,
+                            muted=True, id="lockin_mfli_devices",
                         )
                         yield card(
-                            "6221 & ExtRef (phase marker → both MFLIs' Aux In)",
+                            "SR830 addresses",
+                            field("sr830_a_visa", "Leader SR830 VISA resource",
+                                  DEFAULTS["sr830_a_visa"], kind="text",
+                                  hint="Its rear TTL OUT → follower REF IN (lock-in source)."),
+                            field("sr830_b_visa", "Follower SR830 VISA resource",
+                                  DEFAULTS["sr830_b_visa"], kind="text"),
+                            muted=True, id="lockin_sr830_addr",
+                        )
+                        yield card(
+                            "6221 (phase marker → both lock-ins' reference)",
                             field("ac_visa_resource", "6221 VISA resource",
                                   DEFAULTS["ac_visa_resource"], kind="text"),
                             field("phasemarker_line", "6221 Trigger Link phase-marker pin",
@@ -1304,8 +1458,12 @@ class MFLIDualHarmonicApp(MeasurementApp):
                                   hint="Check your unit's factory default.",
                                   validators=[Number(minimum=1, maximum=6,
                                                      failure_description="must be 1-6")]),
-                            field("extref_lock_timeout_s", "ExtRef PLL lock timeout (s)",
+                            field("extref_lock_timeout_s", "Reference lock timeout (s)",
                                   DEFAULTS["extref_lock_timeout_s"]),
+                            muted=True, id="mode_6221_source",
+                        )
+                        yield card(
+                            "MFLI ExtRef (phase marker → both MFLIs' Aux In)",
                             field("leader_extref_index", "Leader ExtRef module index",
                                   DEFAULTS["leader_extref_index"], kind="integer"),
                             field("leader_aux_input_ch", "Leader Aux In channel (0 = Aux In 1)",
@@ -1453,16 +1611,17 @@ class MFLIDualHarmonicApp(MeasurementApp):
         super().on_mount()
         if self._forced_source:
             self.query_one("#ac_source", Select).value = self._forced_source
-        self._show_source(self.query_one("#ac_source", Select).value)
+        self._show_modes()
 
-    def _show_source(self, source) -> None:
-        for mode, widget_ids in self.SOURCE_WIDGETS.items():
-            for widget_id in widget_ids:
-                self.query_one(f"#{widget_id}").display = mode == source
+    def _show_modes(self) -> None:
+        source = self.query_one("#ac_source", Select).value
+        lockin = self.query_one("#lockin", Select).value
+        for widget_id, (sources, lockins) in self.MODE_WIDGETS.items():
+            self.query_one(f"#{widget_id}").display = source in sources and lockin in lockins
 
     def on_select_changed(self, event: Select.Changed) -> None:
-        if event.select.id == "ac_source":
-            self._show_source(event.value)
+        if event.select.id in ("ac_source", "lockin"):
+            self._show_modes()
         super().on_select_changed(event)
 
     def parse_state(self) -> tuple[dict, list[str]]:

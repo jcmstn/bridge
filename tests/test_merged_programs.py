@@ -86,7 +86,7 @@ def test_sot_pulsed_merge_keeps_all_three_forms_settings(tmp_path, monkeypatch):
     assert (v["pulse_width_s"], v["wave_pulse_width_s"]) == ("5e-8", "2e-3")
     assert (v["settle_after_enable_s"], v["lock_settle_s"]) == ("0.2", "1.5")
     assert (v["nplc"], v["demod2_index"], v["harmonic"], v["frequency_Hz"]) == ("2", "3", "1", "977")
-    assert v["_shown"] == {"mode_6221_pulse", "mode_lockin_read", "mode_mfli",
+    assert v["_shown"] == {"mode_6221_pulse", "mode_lockin_read", "mode_lockin_filter", "mode_mfli",
                            "mode_sot1i_demod", "mode_sot1i_harmonic"}
     # ...and the plan is the 6221-only engine's, with its own keys
     plan = v["_plan"]

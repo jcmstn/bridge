@@ -157,6 +157,7 @@ from instruments.mercury_itc import (
     shutdown_temperature_controller,
 )
 from dc.dc_sweep_utils import linear_sweep, safe_shutdown
+from instruments import sr830
 
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 
@@ -394,6 +395,7 @@ def run_measurement(
     field_phi_deg: Optional[float] = None,
     write_csv: Optional[Callable[[List[dict]], None]] = None,
     output_file: str = "sot_pulsed_switching_6221.csv",
+    lockin: Optional[sr830.SR830Read] = None,
 ) -> pd.DataFrame:
     """One write pulse + delayed harmonic read per amplitude in ``points``:
     (6221 wave off) → hardware-timed square-wave pulse → wait → (6221 wave
@@ -405,11 +407,16 @@ def run_measurement(
 
     Same static-field / stop_event / temp_ctrl=None-never-stops / reference_
     locked-is-logged-not-fatal semantics as sot_pulsed_switching_2h.py.
+
+    ``lockin``, if given (an ``sr830.SR830Read``, every unit on the 6221
+    marker), replaces the MFLI calls — lock wait, read, frequency — and
+    ``daq`` / the ExtRef cfg are then unused. None = the MFLI path.
     """
     _check_write_safety(pulse_cfg)
     _check_pulse_currents(points)
     _check_read_safety(read_cfg)
-    _check_extref_demod_conflict(demod_cfg, extref_cfg)
+    if lockin is None:            # an SR830 has no ExtRef demod to clash with
+        _check_extref_demod_conflict(demod_cfg, extref_cfg)
 
     field_measured_mT = None
     if gaussmeter is not None and gauss_cfg is not None:
@@ -439,15 +446,18 @@ def run_measurement(
 
         # ── 4. AC wave ON, wait for PLL lock, settle, read ────────────
         _six221_ac_output_on(source, read_cfg)
-        locked = wait_for_reference_lock(daq, extref_cfg, read_cfg.lock_timeout_s,
-                                         stop_event)
+        locked = (wait_for_reference_lock(daq, extref_cfg, read_cfg.lock_timeout_s, stop_event)
+                  if lockin is None else lockin.wait_locked(read_cfg.lock_timeout_s, stop_event))
         if not locked:
             log.warning("MFLI reference PLL did not report locked within %.2g s "
                        "— reading anyway; this row is tagged reference_locked=False.",
                        read_cfg.lock_timeout_s)
         _interruptible_sleep(read_cfg.settle_after_enable_s, stop_event)
 
-        d = acquire_averaged(daq, demod_cfg, read_cfg.n_averages)
+        if lockin is None:
+            d = acquire_averaged(daq, demod_cfg, read_cfg.n_averages)
+        else:
+            d, = lockin.read(read_cfg.n_averages, stop_event)
         if d["overload"]:
             log.warning("Input overload at pulse %.4g A — this reading is not "
                        "trustworthy.", pt.pulse_current_A)
@@ -466,13 +476,15 @@ def run_measurement(
             "pulse_width_measured_s": pinfo["pulse_width_measured_s"],
             "reference_locked": locked,
             "harmonic":          read_cfg.harmonic,
-            "excitation_frequency_Hz": daq.getDouble(f"/{extref_cfg.device}/oscs/{extref_cfg.osc_index}/freq"),
+            "excitation_frequency_Hz": (daq.getDouble(f"/{extref_cfg.device}/oscs/{extref_cfg.osc_index}/freq")
+                                        if lockin is None else lockin.frequency_Hz()),
             "excitation_current_A_peak": I_peak_A,
             "excitation_current_A_rms":  I_peak_A / 2 ** 0.5,
             "excitation_current_convention": "peak; 6221 waveform_amplitude is peak, not RMS",
             "demod_output_convention": (
                 "RMS; ZI demodulator X/Y/R nodes report the RMS amplitude of "
-                "the input signal's component at the reference frequency"),
+                "the input signal's component at the reference frequency")
+                if lockin is None else sr830.DEMOD_OUTPUT_CONVENTION,
             "demod_X_V":       d["x_mean"],
             "demod_Y_V":       d["y_mean"],
             "demod_R_V":       d["r_mean"],

@@ -63,12 +63,19 @@ Usage example:
     time.sleep(settle_time_s(cfg_2f))
     d1, d2 = acquire_averaged_pair(la, cfg_1f, lb, cfg_2f, n_averages=200)
     # d1/d2: same keys as mfli_daq.acquire_averaged()
+
+    # In a program: the "Lock-in: SR830" toggle (HARM / HARM6 / SOT2H / SOT1I)
+    reader = SR830Read()
+    reader.open([cfg_1f, cfg_2f])          # source unit first
+    reader.lock(timeout_s=5.0)
+    run_measurement(..., lockin=reader)    # the engine's MFLI calls swapped out
+    reader.close()
 """
 
 import logging
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
@@ -131,7 +138,10 @@ def validate(cfg: LockinConfig) -> None:
     if cfg.reference == "external" and cfg.frequency_Hz < 1.0 and cfg.ext_slope == "sine":
         raise ValueError("below 1 Hz the SR830 needs a TTL reference (ext_slope='ttl_*')")
     if cfg.filter_slope_dB not in _SETTLE_TC:
-        raise ValueError(f"filter_slope_dB must be 6/12/18/24, got {cfg.filter_slope_dB}")
+        raise ValueError(f"filter_slope_dB must be 6/12/18/24 (filter order 1-4), "
+                         f"got {cfg.filter_slope_dB}")
+    if not 0.004 <= cfg.sine_amplitude_V <= 5.0:
+        raise ValueError(f"SINE OUT must be 0.004 … 5 V rms, got {cfg.sine_amplitude_V:g} V")
 
 
 def srat_index(sample_rate_Hz: float) -> int:
@@ -434,3 +444,116 @@ def auto_phase(lockin: SR830, cfg: LockinConfig) -> float:
     else:
         log.info("SR830 auto phase: %.2f -> %.2f deg", before, after)
     return after
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Lock-in toggle — the SR830 side of the MFLI programs' "Lock-in" select
+# (HARM / HARM6 / SOT2H / SOT1I). Their run_measurement() takes an SR830Read
+# as ``lockin=`` in place of the MFLI daq calls; None keeps the MFLI path.
+# ─────────────────────────────────────────────────────────────────────────────
+
+DEMOD_OUTPUT_CONVENTION = (
+    "RMS; SR830 X/Y outputs report the RMS amplitude of the input signal's "
+    "component at the detection harmonic"
+)
+
+
+def config_from_form(visa_resource: str, *, harmonic: int, frequency_Hz: float,
+                     time_constant_s: float, order: int, sinc_filter: bool,
+                     differential: bool, ac_coupling: bool, sensitivity_V: float,
+                     sample_rate_Hz: float, reference: str = "external",
+                     sine_amplitude_V: float = 0.004) -> LockinConfig:
+    """One SR830's config from the MFLI form's fields: filter order n ->
+    6n dB/oct (validate() rejects order 5-8), the sinc switch -> the
+    synchronous filter, differential -> "A - B" (else "A"), AC coupling ->
+    coupling. External units take their reference from REF IN as TTL
+    (an SR830's rear TTL OUT, or the 6221's Trigger Link phase marker).
+    TC, sensitivity and buffer rate are snapped up to the unit's tables
+    here already (connect() does the same on the unit), so a form's
+    estimate and summary see the values that will actually apply."""
+    return LockinConfig(
+        visa_resource=visa_resource, reference=reference, ext_slope="ttl_rising",
+        frequency_Hz=frequency_Hz, sine_amplitude_V=sine_amplitude_V, harmonic=harmonic,
+        time_constant_s=snap_up(time_constant_s, SR830.TIME_CONSTANTS),
+        filter_slope_dB=6 * order, sync_filter=sinc_filter,
+        sensitivity_V=snap_up(sensitivity_V, SR830.SENSITIVITIES),
+        input_config="A - B" if differential else "A",
+        coupling="AC" if ac_coupling else "DC",
+        sample_rate_Hz=SAMPLE_RATES_HZ[srat_index(sample_rate_Hz)],
+    )
+
+
+def snap_up(value: float, table) -> float:
+    """The smallest table value >= value (the largest if none) — what the
+    SR830 applies, same rule as pymeasure's truncated_discrete_set."""
+    return next((v for v in sorted(table) if value <= v), max(table))
+
+
+@dataclass
+class SR830Read:
+    """The 1 or 2 connected SR830s a run reads, in column order (unit 0 =
+    the leader / 1f, unit 1 = the follower / 2f). Start it empty and open()
+    it, so close() still reaches a unit that opened before a later one
+    failed — unit A's SINE OUT is live the moment it is configured."""
+    units: list = field(default_factory=list)      # [(SR830, LockinConfig), ...]
+
+    def open(self, cfgs) -> None:
+        """Connect every cfg in order (a reference source before the unit
+        locked to it)."""
+        for cfg in cfgs:
+            self.units.append((connect(cfg), cfg))
+
+    def lock(self, timeout_s: float, stop_event: Optional[threading.Event] = None) -> bool:
+        """Wait for the external units to lock, then settle. Returns the
+        lock result — logged, not fatal, like the MFLI ExtRef."""
+        locked = self.wait_locked(timeout_s, stop_event)
+        if not locked:
+            log.warning("SR830 external reference not locked within %.2g s — "
+                        "check the TTL into REF IN.", timeout_s)
+        time.sleep(max(settle_time_s(cfg) for _, cfg in self.units))
+        return locked
+
+    def read(self, n_averages: int, stop_event: Optional[threading.Event] = None) -> list:
+        """One acquire_averaged() dict per unit, over one shared window."""
+        if len(self.units) == 1:
+            (lk, cfg), = self.units
+            return [acquire_averaged(lk, cfg, n_averages, stop_event)]
+        (la, ca), (lb, cb) = self.units
+        return list(acquire_averaged_pair(la, ca, lb, cb, n_averages, stop_event))
+
+    def wait_locked(self, timeout_s: float,
+                    stop_event: Optional[threading.Event] = None) -> bool:
+        return all(wait_for_reference_lock(lk, timeout_s, stop_event)
+                   for lk, cfg in self.units if cfg.reference == "external")
+
+    def locked(self) -> list:
+        """Per unit: False if its reference unlocked since the last call,
+        None on an internally referenced unit (nothing to lock to)."""
+        return [check_reference_locked(lk) if cfg.reference == "external" else None
+                for lk, cfg in self.units]
+
+    def frequency_Hz(self) -> float:
+        """Unit 0's reference frequency — measured, on an external unit."""
+        return self.units[0][0].frequency
+
+    def phase_deg(self, i: int) -> float:
+        return self.units[i][0].phase
+
+    def filter_meta(self, i: int) -> tuple:
+        """(applied time constant [s], equivalent filter order) of unit i."""
+        cfg = self.units[i][1]
+        return cfg.time_constant_s, cfg.filter_slope_dB // 6
+
+    def close(self) -> None:
+        """shutdown() every unit, even if an earlier one fails."""
+        errors = []
+        for lk, cfg in self.units:
+            if cfg.reference == "internal":
+                log.warning("SR830 %s SINE OUT left at its 4 mV rms minimum — it cannot "
+                            "be switched off; unplug it if that matters.", cfg.visa_resource)
+            try:
+                shutdown(lk)
+            except Exception as e:      # noqa: BLE001 — re-raised below
+                errors.append(e)
+        if errors:
+            raise errors[0]

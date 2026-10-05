@@ -72,7 +72,8 @@ from mfli.mfli_dual_harmonic_6221 import (
     _AC_CURRENT_CEILING_A,
     _AC_COMPLIANCE_CEILING_V,
 )
-from mfli.mfli_dual_harmonic import phase_cal_s
+from mfli.mfli_dual_harmonic import phase_cal_s, phase_cal_sr830
+from instruments import sr830
 from instruments.data_dir import validate_directory
 from instruments.field_geometry import field_direction_summary_line
 from instruments.data_naming import (
@@ -320,7 +321,8 @@ def run_costs(state: dict, currents_A=None) -> RunCost:
     rate, n_avg = state["sample_rate_Hz"], state["n_averages"]
     tc1, tc2 = state["time_constant_1f_s"], state["time_constant_2f_s"]
     # acquire_averaged_pair(): leader and follower share ONE poll window -- the longer of the two.
-    pair_s = max(acquire_s(tc1, n_avg, rate), acquire_s(tc2, n_avg, rate)) if rate > 0 else 0.0
+    acq = sr830.acquire_s if state.get("lockin") == "sr830" else acquire_s
+    pair_s = max(acq(tc1, n_avg, rate), acq(tc2, n_avg, rate)) if rate > 0 else 0.0
     has_temp = bool(state["enable_temperature"] and parse_sensor_uids(state["temperature_sensor_uids"]))
     rc.each("settle", state["settling_time_s"])
     rc.each("acquire", pair_s)
@@ -394,6 +396,7 @@ class MeasurementPlan:
     series: str = ""
     data_root: Path = _DEFAULT_DATA_DIR
     run_cost: Optional[RunCost] = None      # modelled seconds per point (progress bar + ETA)
+    sr830_cfgs: Optional[tuple] = None      # (leader, follower) LockinConfig; None = the MFLIs
 
     @property
     def total_points(self) -> int:
@@ -966,23 +969,29 @@ def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
     their own callbacks."""
     run_contexts = [] if run_contexts is None else run_contexts
     run_extras = [] if run_extras is None else run_extras
-    daq = source = magnet = gaussmeter = temp_ctrl = None
+    daq = lockin = source = magnet = gaussmeter = temp_ctrl = None
     (leader_prefix, leader_display), (follower_prefix, follower_display) = plan_naming(plan)
     try:
-        on_status("Connecting to LabOne data server …")
-        daq = connect(plan.daq_host, plan.daq_port)
-        connect_device(daq, plan.leader, interface="1GbE")
-        connect_device(daq, plan.follower, interface="1GbE")
+        if plan.sr830_cfgs is not None:
+            on_status("Connecting SR830 lock-ins …")
+            lockin = sr830.SR830Read()
+            lockin.open(plan.sr830_cfgs)
+            mds = None
+        else:
+            on_status("Connecting to LabOne data server …")
+            daq = connect(plan.daq_host, plan.daq_port)
+            connect_device(daq, plan.leader, interface="1GbE")
+            connect_device(daq, plan.follower, interface="1GbE")
 
-        on_status("Synchronizing MDS …")
-        mds = setup_mds(daq, leader=plan.leader, follower=plan.follower)
+            on_status("Synchronizing MDS …")
+            mds = setup_mds(daq, leader=plan.leader, follower=plan.follower)
 
-        disable_sigout(daq, plan.leader)
-        disable_sigout(daq, plan.follower)
+            disable_sigout(daq, plan.leader)
+            disable_sigout(daq, plan.follower)
 
-        on_status("Configuring demodulators …")
-        configure_demodulator(daq, plan.demod1_cfg)
-        configure_demodulator(daq, plan.demod2_cfg)
+            on_status("Configuring demodulators …")
+            configure_demodulator(daq, plan.demod1_cfg)
+            configure_demodulator(daq, plan.demod2_cfg)
 
         if plan.temp_cfg is not None:
             on_status("Connecting to MercuryiTC (temperature) …")
@@ -1027,19 +1036,23 @@ def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
             on_status(f"Starting 6221 AC current source{f' ({amp:g} A)' if multi else ''} …")
             source = connect_ac_source(plan.ac_cfg)
 
-            on_status("Locking MFLI oscillators to the 6221 marker (ExtRef) …")
-            configure_external_reference(daq, plan.leader_extref_cfg, plan.ac_cfg.frequency_Hz)
-            configure_external_reference(daq, plan.follower_extref_cfg, plan.ac_cfg.frequency_Hz)
-            if not wait_for_reference_lock(daq, plan.leader_extref_cfg,
-                                           plan.extref_lock_timeout_s, stop_event):
-                log.warning("Leader ExtRef PLL did not report locked within %.2g s — "
-                            "check the marker cabling before trusting any data.",
-                            plan.extref_lock_timeout_s)
-            if not wait_for_reference_lock(daq, plan.follower_extref_cfg,
-                                           plan.extref_lock_timeout_s, stop_event):
-                log.warning("Follower ExtRef PLL did not report locked within %.2g s — "
-                            "check the marker fan-out cabling before trusting any data.",
-                            plan.extref_lock_timeout_s)
+            if lockin is not None:
+                on_status("Locking both SR830s to the 6221 marker …")
+                lockin.lock(plan.extref_lock_timeout_s, stop_event)
+            else:
+                on_status("Locking MFLI oscillators to the 6221 marker (ExtRef) …")
+                configure_external_reference(daq, plan.leader_extref_cfg, plan.ac_cfg.frequency_Hz)
+                configure_external_reference(daq, plan.follower_extref_cfg, plan.ac_cfg.frequency_Hz)
+                if not wait_for_reference_lock(daq, plan.leader_extref_cfg,
+                                               plan.extref_lock_timeout_s, stop_event):
+                    log.warning("Leader ExtRef PLL did not report locked within %.2g s — "
+                                "check the marker cabling before trusting any data.",
+                                plan.extref_lock_timeout_s)
+                if not wait_for_reference_lock(daq, plan.follower_extref_cfg,
+                                               plan.extref_lock_timeout_s, stop_event):
+                    log.warning("Follower ExtRef PLL did not report locked within %.2g s — "
+                                "check the marker fan-out cabling before trusting any data.",
+                                plan.extref_lock_timeout_s)
 
             demod2_phase_null_1f_deg = None
             if plan.phase_cal_enabled:
@@ -1051,31 +1064,35 @@ def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
                                        gaussmeter, plan.gauss_cfg,
                                        plan.acq_cfg.field_settle_tolerance_mT, stop_event)
                     time.sleep(plan.acq_cfg.settling_time_s)
-                result = auto_null_phase(
-                    daq, plan.demod1_cfg,
-                    n_averages=plan.phase_cal_n_averages,
-                    max_iterations=plan.phase_cal_max_iterations,
-                )
-                if not result.converged:
-                    log.warning(
-                        "Phase null did not fully converge after %d iteration(s) "
-                        "(|Y|/R=%.2e) — check cabling/contacts before trusting the %s data.",
-                        result.iterations, result.residual_ratio, follower_display,
+                if lockin is not None:
+                    demod2_phase_null_1f_deg = phase_cal_sr830(
+                        lockin, plan.phase_cal_n_averages, follower_display)
+                else:
+                    result = auto_null_phase(
+                        daq, plan.demod1_cfg,
+                        n_averages=plan.phase_cal_n_averages,
+                        max_iterations=plan.phase_cal_max_iterations,
                     )
-                d2 = acquire_averaged(daq, plan.demod2_cfg, plan.phase_cal_n_averages)
-                log.info(
-                    "%s snapshot at calibration point: X=%.4e V  Y=%.4e V  R=%.4e V — "
-                    "don't assume this matches 1f's X/Y convention (V_2w ~ cos, not sin); "
-                    "check which channel carries the structured field dependence in the "
-                    "recorded sweep before trusting either one.",
-                    follower_display, d2["x_mean"], d2["y_mean"], d2["r_mean"],
-                )
-                on_status(f"Phase calibration: anchoring follower {follower_display} reference (1f null) …")
-                demod2_phase_null_1f_deg = null_follower_reference_via_1f(
-                    daq, plan.demod2_cfg,
-                    n_averages=plan.phase_cal_n_averages,
-                    max_iterations=plan.phase_cal_max_iterations,
-                )
+                    if not result.converged:
+                        log.warning(
+                            "Phase null did not fully converge after %d iteration(s) "
+                            "(|Y|/R=%.2e) — check cabling/contacts before trusting the %s data.",
+                            result.iterations, result.residual_ratio, follower_display,
+                        )
+                    d2 = acquire_averaged(daq, plan.demod2_cfg, plan.phase_cal_n_averages)
+                    log.info(
+                        "%s snapshot at calibration point: X=%.4e V  Y=%.4e V  R=%.4e V — "
+                        "don't assume this matches 1f's X/Y convention (V_2w ~ cos, not sin); "
+                        "check which channel carries the structured field dependence in the "
+                        "recorded sweep before trusting either one.",
+                        follower_display, d2["x_mean"], d2["y_mean"], d2["r_mean"],
+                    )
+                    on_status(f"Phase calibration: anchoring follower {follower_display} reference (1f null) …")
+                    demod2_phase_null_1f_deg = null_follower_reference_via_1f(
+                        daq, plan.demod2_cfg,
+                        n_averages=plan.phase_cal_n_averages,
+                        max_iterations=plan.phase_cal_max_iterations,
+                    )
 
             # A fresh RunContext (own run number, own file) EVERY amplitude
             # iteration -- never reuse one across the series.
@@ -1104,7 +1121,7 @@ def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
                     geometry_cfg=plan.geometry_cfg,
                     demod2_phase_null_1f_deg=_null, mds=mds,
                     write_csv=write_csv, demod2_label=follower_prefix,
-                    demod1_label=leader_prefix),
+                    demod1_label=leader_prefix, lockin=lockin),
                 stop_event, on_point=on_point,
                 tags={"series_index": series_idx, "series_label": label},
                 on_finished=on_run_finished)
@@ -1113,6 +1130,8 @@ def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
         # magnet can start its ramp-down right away rather than waiting behind it.
         if source is not None:
             safe_shutdown("6221 AC source", lambda: shutdown_ac_source(source))
+        if lockin is not None:
+            safe_shutdown("SR830 lock-ins", lockin.close)
         if magnet is not None:
             safe_shutdown("magnet", lambda: shutdown_magnet(magnet, plan.magnet_cfg))
         if gaussmeter is not None:

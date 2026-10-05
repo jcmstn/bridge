@@ -25,7 +25,7 @@ from nicegui import ui
 import sot.sot_pulsed_switching_tui as program
 from instruments.data_naming import TEST_SAMPLE, RunContext
 from sot.sot_pulsed_switching_tui import (
-    DEFAULTS, PULSE_SOURCES, READ_MODES, SOT_PULSED_DESCRIPTION, SOTPulsedSwitchingApp,
+    DEFAULTS, LOCKINS, PULSE_SOURCES, READ_MODES, SOT_PULSED_DESCRIPTION, SOTPulsedSwitchingApp,
     build_plan, build_summary, compute_filename_preview, engine, mode_errors,
 )
 from web.directory_picker import validate_directory
@@ -120,7 +120,7 @@ def page() -> None:
     inputs: dict = {}
     optional_inputs: dict = {}
     switches: dict = {}
-    mode_cards: dict = {}           # MODE_WIDGETS id -> card, shown per (pulse, read)
+    mode_cards: dict = {}           # MODE_WIDGETS id -> card, shown per (pulse, read, lock-in)
     controller: dict[str, Optional[RunController]] = {"c": None}
 
     def fld(fid: str, label: str, hint: str = "") -> None:
@@ -180,9 +180,11 @@ def page() -> None:
                     fld("n_reversals", "Reversal pairs per read")
                     fld("settle_after_enable_s", "6221 settle after enable (s)")
 
-                with param_card("Lock-in read (6221 AC + MFLI)") as mode_cards["mode_lockin_read"]:
+                with param_card("Lock-in read (6221 AC + lock-in)") as mode_cards["mode_lockin_read"]:
+                    lockin_select = ui.select({v: k for k, v in LOCKINS}, value=d("lockin"),
+                                              label="Lock-in").classes("w-full")
                     fld("frequency_Hz", "AC excitation frequency (Hz)", "Avoid multiples of 50/60 Hz.")
-                    fld("n_averages", "MFLI samples averaged per read")
+                    fld("n_averages", "Lock-in samples averaged per read")
                     fld("lock_settle_s", "Settle after PLL lock (s)")
                     fld("lock_timeout_s", "PLL lock timeout (s)",
                         "Timeout is logged, not fatal.")
@@ -259,16 +261,23 @@ def page() -> None:
                                                     label="PLL bandwidth adaptation").classes("w-full")
                         ui.label(program.h2.AUTOMODE_HINT).classes("text-xs text-grey-6 -mt-2 mb-2")
                         fld("input_ch", "Signal Input channel (0-based)")
+                        fld("input_range_V", "Signal Input range (V)")
+
+                    with stable_card("SRS SR830 lock-in(s) — 6221 marker → REF IN") as mode_cards["mode_sr830"]:
+                        fld("sr830_a_visa", "SR830 VISA resource (1f, or the one harmonic)")
+                        fld("sr830_b_visa", "SR830 VISA resource (2f — 4200A pulse only)")
+                        fld("sr830_sensitivity_V", "Full-scale sensitivity (V)", "Snapped up to 1-2-5 steps.")
+
+                    with stable_card("Lock-in input, filter & marker") as mode_cards["mode_lockin_filter"]:
                         switches["differential"] = bool_switch("Differential input (IN+ / IN−)", d("differential"))
                         switches["ac_coupling"] = bool_switch("AC-couple the input", d("ac_coupling"))
-                        fld("input_range_V", "Signal Input range (V)")
-                        fld("sample_rate_Hz", "Demodulator output rate (Sa/s)")
+                        fld("sample_rate_Hz", "Demodulator output rate (Sa/s)", "SR830 buffer: max 512 Sa/s.")
                         fld("filter_time_constant_s", "Filter time constant (s)")
-                        fld("filter_order", "Filter order (1-8)")
+                        fld("filter_order", "Filter order (1-8; SR830 1-4)")
                         switches["filter_sinc"] = bool_switch("Sinc filter (extra harmonic rejection)",
                                                               d("filter_sinc"))
                         fld("phasemarker_line", "Trigger Link phase-marker pin (1-6)",
-                            "Wire to MFLI Aux In; check it isn't a 6221 default pin.")
+                            "To MFLI Aux In / SR830 REF IN; check it isn't a 6221 default pin.")
 
                     with stable_card("MFLI demodulators (1f + 2f)") as mode_cards["mode_sot2h_demods"]:
                         fld("demod1_index", "1f demodulator index")
@@ -316,12 +325,13 @@ def page() -> None:
     def show_mode() -> None:
         shown = SOTPulsedSwitchingApp.MODE_WIDGETS
         for widget_id, card in mode_cards.items():
-            card.set_visibility(shown[widget_id](pulse_select.value, read_select.value))
+            card.set_visibility(shown[widget_id](pulse_select.value, read_select.value,
+                                                 lockin_select.value))
 
     def parse_state() -> tuple[dict, list[str]]:
         state, errors = form_state(
             program, identity, inputs=inputs, switches=switches, optional_inputs=optional_inputs,
-            selects={"pulse_source": pulse_select, "read_mode": read_select,
+            selects={"pulse_source": pulse_select, "read_mode": read_select, "lockin": lockin_select,
                      "automode": automode_select})
         return state, mode_errors(state, errors)     # a hidden mode's field never blocks
 
@@ -333,6 +343,7 @@ def page() -> None:
             raw[fid] = sw.value
         raw["pulse_source"] = pulse_select.value
         raw["read_mode"] = read_select.value
+        raw["lockin"] = lockin_select.value
         raw["automode"] = automode_select.value
         raw["data_dir"] = identity.data_dir_input.value
         raw["device"] = identity.device_input.value
@@ -376,7 +387,7 @@ def page() -> None:
     for sw in switches.values():
         sw.on_value_change(refresh_summary.refresh)
     automode_select.on_value_change(refresh_summary.refresh)
-    for select in (pulse_select, read_select):
+    for select in (pulse_select, read_select, lockin_select):
         select.on_value_change(lambda _e: (show_mode(), refresh_summary.refresh()))
     show_mode()
     refresh_summary()

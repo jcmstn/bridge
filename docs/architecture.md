@@ -116,6 +116,20 @@ How it fits together:
 - An engine module has no `App`; its `main()` opens the merged form on its
   mode.
 
+**Lock-in toggle (MFLI | SR830).** Both forms also have a `lockin` select
+(SOT: harmonic read only). It is not another engine: the active mode's own
+plan gets `sr830_cfgs` (a tuple of `sr830.LockinConfig`, None = MFLI) plus
+`header_extra["lockin"] = "SR830"`, built by the form's `build_plan`
+dispatcher from the shared form fields (`sr830.config_from_form`; TC /
+sensitivity / buffer rate snapped to the unit's tables first, so the summary
+and estimate see the applied values). The engine's `run_plan` connects an
+`sr830.SR830Read` instead of the MFLI and passes it as
+`run_measurement(..., lockin=reader)`; the loop swaps only its lock-in
+calls (acquire, lock check, frequency/phase/filter metadata). `lockin=None`
+is the unchanged MFLI path. Same type codes and columns. DIFFR (needs a DC
+offset on the source), NOISE (wideband streaming) and PHCAL have no SR830
+mode.
+
 ### Shared TUI scaffolding (`instruments/tui_common.py`)
 
 Every TUI's `App` subclasses `MeasurementApp` and its `RunScreen`
@@ -471,6 +485,7 @@ units sub-header row as data. Use `read_raw()`.
 | Anything every TUI form / run screen does the same way (settings file, sample picker, identity bar, abort/back, status/comment prompt, run history, run-screen CSS) | `instruments/tui_common.py` only |
 | How a program runs (connect, series loop, teardown, per-run finalize) | its `run_plan()` in `{suite}/{name}_tui.py` — both front ends call it; the per-run record/finalize block is `data_naming.record_run()` |
 | A mode of a merged program (HARM/HARM6, SOTPS/SOT2H/SOT1I) | its engine module for the run itself; the toggle, card visibility and settings fallback in the merged form's module (+ its web page for HARM) |
+| The SR830 lock-in mode (HARM/HARM6/SOT2H/SOT1I) | form → `sr830_cfgs()` / `_sr830_checks()` in `mfli/mfli_dual_harmonic_tui.py` or `sot/sot_pulsed_switching_tui.py` (+ web pages); connect/teardown in the engine `*_tui.py` `run_plan`; per-point reads at the `lockin` branches in the engine `run_measurement`; instrument side `instruments/sr830.py` (`SR830Read`, `config_from_form`) |
 | The sweep-size cap (a form error instead of a frozen form) | `dc/dc_sweep_utils.py` `MAX_SWEEP_POINTS` / `check_sweep_size` |
 
 

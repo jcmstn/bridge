@@ -78,6 +78,7 @@ from instruments.keithley4200a import pulse_once_s
 from instruments.keithley6221 import ac_source_restart_s
 from instruments.kepco_magnet import magnet_move_s
 from instruments.lakeshore475 import read_field_s
+from instruments import sr830
 from instruments.mfli_daq import acquire_s
 from instruments.run_time import (
     ARM_S, GPIB_TXN_S, LOCK_TYP_S, PER_FILE_S, PER_RUN_S, POINT_OVERHEAD_S, TEMP_READ_S,
@@ -317,8 +318,9 @@ def run_costs(state: dict) -> RunCost:
     rc.each("6221 re-arm", ARM_S)
     rc.each("PLL lock", lock_typ, worst_extra=max(0.0, state["lock_timeout_s"] - lock_typ))
     rc.each("settle", state["settle_after_enable_s"])
-    rc.each("MFLI reads", acquire_s(state["filter_time_constant_s"], state["n_averages"],
-                                    max(state["sample_rate_Hz"], 1.0)))
+    acq = sr830.acquire_s if state.get("lockin") == "sr830" else acquire_s
+    rc.each("MFLI reads", acq(state["filter_time_constant_s"], state["n_averages"],
+                              max(state["sample_rate_Hz"], 1.0)))
     rc.each("overhead", 8 * GPIB_TXN_S + POINT_OVERHEAD_S + (TEMP_READ_S if has_temp else 0.0))
     prev = 0.0                                       # magnet starts at 0 A
     for k, (_I_sense, I_mag) in enumerate(series):
@@ -365,6 +367,7 @@ class MeasurementPlan:
     temp_cfg: Optional[TemperatureControllerConfig] = None
     data_root: Path = _DEFAULT_DATA_DIR
     run_cost: Optional[RunCost] = None      # modelled seconds per point (progress bar + ETA)
+    sr830_cfgs: Optional[tuple] = None      # SR830 LockinConfig(s), in demod order; None = the MFLI
 
     @property
     def series_values(self) -> List[tuple[float, float]]:
@@ -859,7 +862,7 @@ def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
     down (6221 first). Pure — the TUI's RunScreen runs it with its own callbacks."""
     run_contexts = [] if run_contexts is None else run_contexts
     run_extras = [] if run_extras is None else run_extras
-    k4200 = source = daq = magnet = gaussmeter = temp_ctrl = None
+    k4200 = source = daq = lockin = magnet = gaussmeter = temp_ctrl = None
     try:
         on_status("Connecting to Keithley 4200A (KXCI) …")
         k4200 = connect_4200a(plan.k4200_cfg)
@@ -869,14 +872,19 @@ def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
             log.warning("Could not read `UL` — set the PMU module name from the 4200A manually.")
         configure_pmu_pulse(k4200, plan.pmu_cfg)
 
-        _check_extref_demod_conflict(plan.demod1_cfg, plan.demod2_cfg, plan.extref_cfg)
+        if plan.sr830_cfgs is not None:
+            on_status("Connecting SR830 lock-in(s) …")
+            lockin = sr830.SR830Read()
+            lockin.open(plan.sr830_cfgs)     # locks per read, once the 6221 AC is on
+        else:
+            _check_extref_demod_conflict(plan.demod1_cfg, plan.demod2_cfg, plan.extref_cfg)
 
-        on_status("Connecting to MFLI …")
-        daq = connect(plan.mfli_host, plan.mfli_port)
-        connect_device(daq, plan.extref_cfg.device, interface="1GbE")
-        configure_external_reference(daq, plan.extref_cfg, plan.ac_cfg.frequency_Hz)
-        configure_demodulator(daq, plan.demod1_cfg)
-        configure_demodulator(daq, plan.demod2_cfg)
+            on_status("Connecting to MFLI …")
+            daq = connect(plan.mfli_host, plan.mfli_port)
+            connect_device(daq, plan.extref_cfg.device, interface="1GbE")
+            configure_external_reference(daq, plan.extref_cfg, plan.ac_cfg.frequency_Hz)
+            configure_demodulator(daq, plan.demod1_cfg)
+            configure_demodulator(daq, plan.demod2_cfg)
 
         on_status("Connecting to Kepco magnet + Lake Shore 475 …")
         magnet = connect_magnet(plan.magnet_cfg)
@@ -941,7 +949,7 @@ def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
                     gaussmeter=gaussmeter, gauss_cfg=plan.gauss_cfg,
                     temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg, magnet_current_A=_I,
                     field_theta_deg=plan.field_theta_deg, field_phi_deg=plan.field_phi_deg,
-                    write_csv=write_csv, output_file=str(_ctx.raw_path)),
+                    write_csv=write_csv, output_file=str(_ctx.raw_path), lockin=lockin),
                 stop_event, on_point=on_point,
                 tags={"series_index": series_idx, "series_label": label},
                 on_finished=on_run_finished)
@@ -950,6 +958,8 @@ def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
         # magnet — never ramp an inductive field while the DUT still carries current.
         if source is not None:
             safe_shutdown("6221", lambda: shutdown_ac_source(source))
+        if lockin is not None:
+            safe_shutdown("SR830 lock-in(s)", lockin.close)
         if k4200 is not None:
             safe_shutdown("4200A", lambda: shutdown_4200a(k4200))
         if magnet is not None:

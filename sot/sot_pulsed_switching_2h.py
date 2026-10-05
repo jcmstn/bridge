@@ -163,6 +163,7 @@ from instruments.mercury_itc import (
     shutdown_temperature_controller,
 )
 from dc.dc_sweep_utils import linear_sweep, safe_shutdown
+from instruments import sr830
 
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 
@@ -384,6 +385,7 @@ def run_measurement(
     field_phi_deg: Optional[float] = None,
     write_csv: Optional[Callable[[List[dict]], None]] = None,
     output_file: str = "sot_pulsed_switching_2h.csv",
+    lockin: Optional[sr830.SR830Read] = None,
 ) -> pd.DataFrame:
     """One pulse + delayed 1f/2f read per amplitude in ``points``:
     (6221 AC off) → write pulse → wait → (6221 AC on, wait for PLL lock,
@@ -401,9 +403,14 @@ def run_measurement(
 
     Raises ``RuntimeError`` after ``_MAX_CONSECUTIVE_PULSE_FAILURES`` write
     pulses in a row fail — identical guard to sot_pulsed_switching.py.
+
+    ``lockin``, if given (an ``sr830.SR830Read``, every unit on the 6221
+    marker), replaces the MFLI calls — lock wait, read, frequency — and
+    ``daq`` / the ExtRef cfg are then unused. None = the MFLI path.
     """
     _check_read_safety(read_cfg)
-    _check_extref_demod_conflict(demod1_cfg, demod2_cfg, extref_cfg)
+    if lockin is None:            # an SR830 has no ExtRef demod to clash with
+        _check_extref_demod_conflict(demod1_cfg, demod2_cfg, extref_cfg)
 
     field_measured_mT = None
     if gaussmeter is not None and gauss_cfg is not None:
@@ -446,15 +453,18 @@ def run_measurement(
 
         # ── 4. 6221 AC ON, wait for PLL lock, settle, read 1f + 2f ───
         _six221_ac_output_on(source)
-        locked = wait_for_reference_lock(daq, extref_cfg, read_cfg.lock_timeout_s,
-                                         stop_event)
+        locked = (wait_for_reference_lock(daq, extref_cfg, read_cfg.lock_timeout_s, stop_event)
+                  if lockin is None else lockin.wait_locked(read_cfg.lock_timeout_s, stop_event))
         if not locked:
             log.warning("MFLI reference PLL did not report locked within %.2g s "
                        "— reading anyway; this row is tagged reference_locked=False.",
                        read_cfg.lock_timeout_s)
         _interruptible_sleep(read_cfg.settle_after_enable_s, stop_event)
 
-        d1, d2 = acquire_averaged_pair(daq, demod1_cfg, demod2_cfg, read_cfg.n_averages)
+        if lockin is None:
+            d1, d2 = acquire_averaged_pair(daq, demod1_cfg, demod2_cfg, read_cfg.n_averages)
+        else:
+            d1, d2 = lockin.read(read_cfg.n_averages, stop_event)
         if d1["overload"] or d2["overload"]:
             log.warning("Input overload at amp %.4g V (1f=%s, 2f=%s) — this "
                        "reading is not trustworthy.",
@@ -478,13 +488,15 @@ def run_measurement(
             "pulse_base_voltage_V": pinfo.get("pulse_base_voltage_V"),
             "pulse_base_current_A": pinfo.get("pulse_base_current_A"),
             "reference_locked": locked,
-            "excitation_frequency_Hz": daq.getDouble(f"/{extref_cfg.device}/oscs/{extref_cfg.osc_index}/freq"),
+            "excitation_frequency_Hz": (daq.getDouble(f"/{extref_cfg.device}/oscs/{extref_cfg.osc_index}/freq")
+                                        if lockin is None else lockin.frequency_Hz()),
             "excitation_current_A_peak": I_peak_A,
             "excitation_current_A_rms":  I_peak_A / 2 ** 0.5,
             "excitation_current_convention": "peak; 6221 waveform_amplitude is peak, not RMS",
             "demod_output_convention": (
                 "RMS; ZI demodulator X/Y/R nodes report the RMS amplitude of "
-                "the input signal's component at the reference frequency"),
+                "the input signal's component at the reference frequency")
+                if lockin is None else sr830.DEMOD_OUTPUT_CONVENTION,
             "1f_X_V":       d1["x_mean"],
             "1f_Y_V":       d1["y_mean"],
             "1f_R_V":       d1["r_mean"],

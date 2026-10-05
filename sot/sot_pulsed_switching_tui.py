@@ -69,6 +69,7 @@ from sot.sot_pulsed_switching import (
 )
 from sot.sot_pulsed_switching import _six221_output_off
 from dc.dc_sweep_utils import linear_sweep, parse_value_list, safe_shutdown
+from instruments import sr830
 from instruments.data_dir import validate_directory
 from instruments.field_geometry import field_direction_summary_line, render_ascii_field_diagram
 from instruments.data_naming import (
@@ -111,7 +112,7 @@ MEASUREMENT_TYPE = "SOTPS"
 
 SOT_PULSED_DESCRIPTION = (
     "Write: 4200A PMU (ns, RPM1, KULT bridge_sot_pulse) or 6221 WAVE (µs–ms). Read: "
-    "DC R_xy (6221 ±I + 2182) or lock-in (6221 AC + MFLI). Kepco static field, read "
+    "DC R_xy (6221 ±I + 2182) or lock-in (6221 AC + MFLI or SR830s). Kepco static field, read "
     "by Lake Shore 475."
 )
 
@@ -130,6 +131,8 @@ SOT_PULSED_SCHEMATIC = """\
   Read = lock-in     6221 WAVE sine + Trigger Link phase marker (pin 1)
                        ──▶ ZURICH MFLI AUX IN 1 (ExtRef)
                      MFLI Signal Input (differential) ──▶ transverse (Hall) arms
+                     or SR830s: marker ──▶ REF IN of each (SOT2H: 1f unit + 2f
+                       unit, both inputs on the Hall arms; SOT1I: one unit)
 
   KEPCO BOP-GL      ──GPIB──▶ electromagnet   (ONE static tilted field)
   LAKE SHORE 475    ──GPIB──▶ Gaussmeter probe at the sample
@@ -930,10 +933,22 @@ def _as_form(engine, d: dict) -> dict:
 
 
 _ENGINE_FIELDS = {eng: set(_form_keys(eng, eng.DEFAULTS)) for eng in (h2, i1)} | {_PS: set(DEFAULTS)}
-DEFAULTS = {**_as_form(i1, i1.DEFAULTS), **_as_form(h2, h2.DEFAULTS), **DEFAULTS,
-            "pulse_source": "pmu", "read_mode": "dc"}
-NUMERIC_FIELDS = {**_as_form(i1, i1.NUMERIC_FIELDS), **_as_form(h2, h2.NUMERIC_FIELDS), **NUMERIC_FIELDS}
-TEXT_FIELDS = list(dict.fromkeys(TEXT_FIELDS + h2.TEXT_FIELDS + i1.TEXT_FIELDS))
+# Lock-in toggle (harmonic read only): the MFLI, or SR830s on GPIB — one per
+# harmonic read (SOT2H: A = 1f, B = 2f; SOT1I: A only), every unit on the
+# 6221 marker into REF IN. Same type codes; the header records lockin: SR830.
+LOCKINS = [("Zurich MFLI (ExtRef)", "mfli"), ("SRS SR830 (GPIB)", "sr830")]
+SR830_DEFAULTS = {"sr830_a_visa": "GPIB0::8::INSTR", "sr830_b_visa": "GPIB0::9::INSTR",
+                  "sr830_sensitivity_V": "1e-3"}
+_MFLI_LOCKIN_FIELDS = {"mfli_host", "mfli_port", "mfli_device", "aux_input_ch", "osc_index",
+                       "extref_index", "pll_demod_index", "automode", "input_ch",
+                       "input_range_V", "demod1_index", "demod2_index", "demod_index"}
+
+DEFAULTS = {**_as_form(i1, i1.DEFAULTS), **_as_form(h2, h2.DEFAULTS), **DEFAULTS, **SR830_DEFAULTS,
+            "pulse_source": "pmu", "read_mode": "dc", "lockin": "mfli"}
+NUMERIC_FIELDS = {**_as_form(i1, i1.NUMERIC_FIELDS), **_as_form(h2, h2.NUMERIC_FIELDS), **NUMERIC_FIELDS,
+                  "sr830_sensitivity_V": float}
+TEXT_FIELDS = list(dict.fromkeys(TEXT_FIELDS + h2.TEXT_FIELDS + i1.TEXT_FIELDS
+                                 + ["sr830_a_visa", "sr830_b_visa"]))
 OPTIONAL_NUMERIC_FIELDS = list(dict.fromkeys(
     OPTIONAL_NUMERIC_FIELDS + h2.OPTIONAL_NUMERIC_FIELDS + i1.OPTIONAL_NUMERIC_FIELDS))
 
@@ -955,13 +970,58 @@ def _engine_state(state: dict):
     return engine, state
 
 
+def _uses_sr830(engine, state: dict) -> bool:
+    return engine in (h2, i1) and state.get("lockin") == "sr830"
+
+
 def mode_errors(state: dict, errors: list[str]) -> list[str]:
-    """Parse errors of the active engine's fields only."""
+    """Parse errors of the active engine's (and lock-in's) fields only."""
     engine = _ENGINES.get(mode(state))
     if engine is None:
         return errors
     hidden = set(DEFAULTS) - _ENGINE_FIELDS[engine]
+    if _uses_sr830(engine, state):
+        hidden = (hidden - set(SR830_DEFAULTS)) | _MFLI_LOCKIN_FIELDS
     return [e for e in errors if not any(e.startswith(f"'{f}'") for f in hidden)]
+
+
+def sr830_cfgs(engine, state: dict) -> tuple:
+    """The SR830 config(s) for an engine-keyed state, in its demod order —
+    SOT2H reads 1f + 2f (two units), SOT1I its one harmonic (one unit)."""
+    harmonics = (1, 2) if engine is h2 else (int(state["harmonic"]),)
+    return tuple(
+        sr830.config_from_form(
+            visa, harmonic=h, frequency_Hz=state["frequency_Hz"],
+            time_constant_s=state["filter_time_constant_s"], order=int(state["filter_order"]),
+            sinc_filter=state["filter_sinc"], differential=state["differential"],
+            ac_coupling=state["ac_coupling"], sensitivity_V=state["sr830_sensitivity_V"],
+            sample_rate_Hz=state["sample_rate_Hz"])
+        for visa, h in zip((state["sr830_a_visa"], state["sr830_b_visa"]), harmonics))
+
+
+def _sr830_state(engine, state: dict) -> dict:
+    """`state` with the TC and buffer rate the SR830(s) will actually apply."""
+    cfg = sr830_cfgs(engine, state)[0]
+    return {**state, "filter_time_constant_s": cfg.time_constant_s,
+            "sample_rate_Hz": cfg.sample_rate_Hz}
+
+
+def _sr830_checks(engine, state: dict, info: list[str], errors: list[str]) -> None:
+    cfgs = sr830_cfgs(engine, state)
+    if len(cfgs) == 2 and state["sr830_a_visa"] == state["sr830_b_visa"]:
+        errors.append("The 1f and 2f SR830 VISA resources must be different.")
+    for cfg in cfgs:
+        try:
+            sr830.validate(cfg)
+        except ValueError as e:
+            errors.append(f"SR830 {cfg.visa_resource} ({cfg.harmonic}f): {e}")
+        info.append(f"SR830 {cfg.visa_resource}: {cfg.harmonic}f on REF IN (6221 marker), TC "
+                    f"{cfg.time_constant_s:g} s, {cfg.filter_slope_dB} dB/oct, "
+                    f"sensitivity {format_si(cfg.sensitivity_V, 'V')}")
+    if state["sample_rate_Hz"] > sr830.SAMPLE_RATES_HZ[-1]:
+        info.append(f"SR830 buffer rate capped at {sr830.SAMPLE_RATES_HZ[-1]:g} Sa/s")
+    if state["n_averages"] > sr830.BUFFER_POINTS:
+        errors.append(f"'n_averages' exceeds the SR830 buffer ({sr830.BUFFER_POINTS} points).")
 
 
 def resolve_state(state: dict) -> dict:
@@ -976,7 +1036,12 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     if engine is None:
         return [], [], ["A 6221 write pulse with the DC 2182 read is not a program here — use the "
                         "lock-in read, or the nonlocal-switching program for 6221 pulses + a 2182A read."]
-    return (_build_summary_ps if engine is _PS else engine.build_summary)(state)
+    if not _uses_sr830(engine, state):
+        return (_build_summary_ps if engine is _PS else engine.build_summary)(state)
+    info, warnings, errors = engine.build_summary(_sr830_state(engine, state))
+    errors = [e for e in errors if "demod index" not in e]      # MFLI-only (hidden) fields
+    _sr830_checks(engine, state, info, errors)
+    return info, warnings, errors
 
 
 def compute_filename_preview(state: dict) -> Optional[str]:
@@ -991,7 +1056,13 @@ def build_plan(state: dict, data_root: Path):
     engine, state = _engine_state(state)
     if engine is None:
         raise ValueError("6221 write pulse + DC read is not a program")
-    return (_build_plan_ps if engine is _PS else engine.build_plan)(state, data_root)
+    if not _uses_sr830(engine, state):
+        return (_build_plan_ps if engine is _PS else engine.build_plan)(state, data_root)
+    state = _sr830_state(engine, state)
+    plan = engine.build_plan(state, data_root)
+    plan.sr830_cfgs = sr830_cfgs(engine, state)
+    plan.header_extra.update(lockin="SR830", sr830_sensitivity_V=plan.sr830_cfgs[0].sensitivity_V)
+    return plan
 
 
 def engine(plan):
@@ -1036,16 +1107,18 @@ class SOTPulsedSwitchingApp(MeasurementApp):
 
     # widget id -> shown for which (write pulse, read) combination
     MODE_WIDGETS = {
-        "mode_pmu_pulse": lambda p, r: p == "pmu",
-        "mode_pmu_config": lambda p, r: p == "pmu",
-        "mode_6221_pulse": lambda p, r: p == "6221",
-        "mode_dc_read": lambda p, r: r == "dc",
-        "mode_dc_instruments": lambda p, r: r == "dc",
-        "mode_lockin_read": lambda p, r: r == "harmonic",
-        "mode_mfli": lambda p, r: r == "harmonic",
-        "mode_sot2h_demods": lambda p, r: (p, r) == ("pmu", "harmonic"),
-        "mode_sot1i_demod": lambda p, r: (p, r) == ("6221", "harmonic"),
-        "mode_sot1i_harmonic": lambda p, r: (p, r) == ("6221", "harmonic"),
+        "mode_pmu_pulse": lambda p, r, l: p == "pmu",
+        "mode_pmu_config": lambda p, r, l: p == "pmu",
+        "mode_6221_pulse": lambda p, r, l: p == "6221",
+        "mode_dc_read": lambda p, r, l: r == "dc",
+        "mode_dc_instruments": lambda p, r, l: r == "dc",
+        "mode_lockin_read": lambda p, r, l: r == "harmonic",
+        "mode_lockin_filter": lambda p, r, l: r == "harmonic",
+        "mode_mfli": lambda p, r, l: r == "harmonic" and l == "mfli",
+        "mode_sr830": lambda p, r, l: r == "harmonic" and l == "sr830",
+        "mode_sot2h_demods": lambda p, r, l: (p, r, l) == ("pmu", "harmonic", "mfli"),
+        "mode_sot1i_demod": lambda p, r, l: (p, r, l) == ("6221", "harmonic", "mfli"),
+        "mode_sot1i_harmonic": lambda p, r, l: (p, r) == ("6221", "harmonic"),
     }
     # a former program's settings file -> the (write pulse, read) it was
     LEGACY = ((h2, ("pmu", "harmonic")), (i1, ("6221", "harmonic")))
@@ -1165,11 +1238,13 @@ class SOTPulsedSwitchingApp(MeasurementApp):
                         id="mode_dc_read",
                     )
                     yield card(
-                        "Lock-in read (6221 AC + MFLI)",
+                        "Lock-in read (6221 AC + lock-in)",
+                        select_field("lockin", "Lock-in", LOCKINS, DEFAULTS["lockin"],
+                                     hint="SR830: one unit per harmonic, all on the 6221 marker."),
                         field("frequency_Hz", "AC excitation frequency (Hz)",
                               DEFAULTS["frequency_Hz"],
                               hint="Avoid multiples of 50/60 Hz."),
-                        field("n_averages", "MFLI samples averaged per read",
+                        field("n_averages", "Lock-in samples averaged per read",
                               DEFAULTS["n_averages"], kind="integer",
                               validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
                         field("lock_settle_s", "Settle after PLL lock (s)",
@@ -1306,24 +1381,40 @@ class SOTPulsedSwitchingApp(MeasurementApp):
                                   hint=h2.AUTOMODE_HINT),
                             field("input_ch", "Signal Input channel (0-based)",
                                   DEFAULTS["input_ch"], kind="integer"),
+                            field("input_range_V", "Signal Input range (V)",
+                                  DEFAULTS["input_range_V"]),
+                            muted=True,
+                            id="mode_mfli",
+                        )
+                        yield card(
+                            "SRS SR830 lock-in(s) — 6221 marker → REF IN",
+                            field("sr830_a_visa", "SR830 VISA resource (1f, or the one harmonic)",
+                                  DEFAULTS["sr830_a_visa"], kind="text"),
+                            field("sr830_b_visa", "SR830 VISA resource (2f — 4200A pulse only)",
+                                  DEFAULTS["sr830_b_visa"], kind="text"),
+                            field("sr830_sensitivity_V", "Full-scale sensitivity (V)",
+                                  DEFAULTS["sr830_sensitivity_V"], hint="Snapped up to 1-2-5 steps."),
+                            muted=True,
+                            id="mode_sr830",
+                        )
+                        yield card(
+                            "Lock-in input, filter & marker",
                             switch_field("differential", "Differential input (IN+ / IN−)",
                                   DEFAULTS["differential"]),
                             switch_field("ac_coupling", "AC-couple the input", DEFAULTS["ac_coupling"]),
-                            field("input_range_V", "Signal Input range (V)",
-                                  DEFAULTS["input_range_V"]),
                             field("sample_rate_Hz", "Demodulator output rate (Sa/s)",
-                                  DEFAULTS["sample_rate_Hz"]),
+                                  DEFAULTS["sample_rate_Hz"], hint="SR830 buffer: max 512 Sa/s."),
                             field("filter_time_constant_s", "Filter time constant (s)",
                                   DEFAULTS["filter_time_constant_s"]),
-                            field("filter_order", "Filter order (1-8)", DEFAULTS["filter_order"],
-                                  kind="integer"),
+                            field("filter_order", "Filter order (1-8; SR830 1-4)",
+                                  DEFAULTS["filter_order"], kind="integer"),
                             switch_field("filter_sinc", "Sinc filter (extra harmonic rejection)",
                                   DEFAULTS["filter_sinc"]),
                             field("phasemarker_line", "Trigger Link phase-marker pin (1-6)",
                                   DEFAULTS["phasemarker_line"], kind="integer",
-                                  hint="Wire to MFLI Aux In; check it isn't a 6221 default pin."),
+                                  hint="To MFLI Aux In / SR830 REF IN; check it isn't a 6221 default pin."),
                             muted=True,
-                            id="mode_mfli",
+                            id="mode_lockin_filter",
                         )
                         yield card(
                             "MFLI demodulators (1f + 2f)",
@@ -1445,11 +1536,12 @@ class SOTPulsedSwitchingApp(MeasurementApp):
     def _show_mode(self) -> None:
         pulse = self.query_one("#pulse_source", Select).value
         read = self.query_one("#read_mode", Select).value
+        lockin = self.query_one("#lockin", Select).value
         for widget_id, shown in self.MODE_WIDGETS.items():
-            self.query_one(f"#{widget_id}").display = shown(pulse, read)
+            self.query_one(f"#{widget_id}").display = shown(pulse, read, lockin)
 
     def on_select_changed(self, event: Select.Changed) -> None:
-        if event.select.id in ("pulse_source", "read_mode"):
+        if event.select.id in ("pulse_source", "read_mode", "lockin"):
             self._show_mode()
         super().on_select_changed(event)
 

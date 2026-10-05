@@ -151,6 +151,7 @@ from mfli.mfli_dual_harmonic import (
     get_demod_phase_deg,
     null_follower_reference_via_1f,
 )
+from instruments import sr830
 from instruments.run_time import GPIB_TXN_S, LOCK_TYP_S
 
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
@@ -232,6 +233,7 @@ def build_run_metadata(
     geometry_cfg: Optional[SampleGeometryConfig] = None,
     demod2_phase_null_1f_deg: Optional[float] = None,
     measure_rxx: bool = False,
+    lockin: Optional[sr830.SR830Read] = None,
 ) -> dict:
     """Same shape/purpose as mfli_dual_harmonic.build_run_metadata(), with
     the excitation terms sourced from the 6221 instead: amplitude_A is
@@ -244,11 +246,26 @@ def build_run_metadata(
     `measure_rxx` (the follower's R_xx naming toggle) is recorded verbatim
     so a downstream analysis script can tell what the follower's columns
     mean without re-deriving it from which column prefix is present.
+
+    `lockin` (an SR830 pair) swaps the frequency / phase / filter reads and
+    the output convention for the SR830's own — the frequency is the leader
+    SR830's measured REF IN frequency. None = the MFLIs.
     """
     geometry_cfg = geometry_cfg or SampleGeometryConfig()
     I_peak_A = ac_cfg.amplitude_A
-    excitation_frequency_Hz = daq.getDouble(
-        f"/{leader_extref_cfg.device}/oscs/{leader_extref_cfg.osc_index}/freq")
+    if lockin is None:
+        excitation_frequency_Hz = daq.getDouble(
+            f"/{leader_extref_cfg.device}/oscs/{leader_extref_cfg.osc_index}/freq")
+        (tc1, order1), (tc2, order2) = ((c.filter.time_constant_s, c.filter.order)
+                                        for c in (demod1_cfg, demod2_cfg))
+        phase1, phase2 = get_demod_phase_deg(daq, demod1_cfg), get_demod_phase_deg(daq, demod2_cfg)
+        convention = ("RMS; ZI demodulator X/Y/R nodes report the RMS amplitude of "
+                      "the input signal's component at the reference frequency")
+    else:
+        excitation_frequency_Hz = lockin.frequency_Hz()
+        (tc1, order1), (tc2, order2) = lockin.filter_meta(0), lockin.filter_meta(1)
+        phase1, phase2 = lockin.phase_deg(0), lockin.phase_deg(1)
+        convention = sr830.DEMOD_OUTPUT_CONVENTION
     return {
         "measure_rxx": measure_rxx,
         "demod2_phase_null_1f_deg": demod2_phase_null_1f_deg,
@@ -259,16 +276,13 @@ def build_run_metadata(
             "peak; Keithley 6221 waveform_amplitude is peak, not RMS — an "
             "ideal current source, no series-resistor V/R assumption"
         ),
-        "demod_output_convention": (
-            "RMS; ZI demodulator X/Y/R nodes report the RMS amplitude of "
-            "the input signal's component at the reference frequency"
-        ),
-        "demod1_time_constant_s":   demod1_cfg.filter.time_constant_s,
-        "demod1_filter_order":      demod1_cfg.filter.order,
-        "demod1_ref_phase_deg":     get_demod_phase_deg(daq, demod1_cfg),
-        "demod2_time_constant_s":   demod2_cfg.filter.time_constant_s,
-        "demod2_filter_order":      demod2_cfg.filter.order,
-        "demod2_ref_phase_deg":     get_demod_phase_deg(daq, demod2_cfg),
+        "demod_output_convention":  convention,
+        "demod1_time_constant_s":   tc1,
+        "demod1_filter_order":      order1,
+        "demod1_ref_phase_deg":     phase1,
+        "demod2_time_constant_s":   tc2,
+        "demod2_filter_order":      order2,
+        "demod2_ref_phase_deg":     phase2,
         "hall_bar_length_um":       geometry_cfg.hall_bar_length_um,
         "hall_bar_width_um":        geometry_cfg.hall_bar_width_um,
         "hall_bar_thickness_nm":    geometry_cfg.hall_bar_thickness_nm,
@@ -302,6 +316,7 @@ def run_measurement(
     write_csv: Optional[Callable[[List[dict]], None]] = None,
     demod2_label: str = "2f",
     demod1_label: str = "1f",
+    lockin: Optional[sr830.SR830Read] = None,
 ) -> pd.DataFrame:
     """Same loop shape as mfli_dual_harmonic.run_measurement(): iterate
     `points`, acquire 1f (leader) + demod2 (follower) at each, log to CSV,
@@ -322,6 +337,11 @@ def run_measurement(
     the caller set on each demod, e.g. `"3f"` or `"rxx_1f"` (see
     mfli_dual_harmonic_6221_tui.demod_naming()). An `rxx_` follower label is
     what `measure_rxx` in the recorded run metadata reflects.
+
+    `lockin`, if given (an sr830.SR830Read, both units on the 6221 marker),
+    replaces every MFLI read — the pair acquire, both units' latched
+    reference-unlock flags (same columns) and the metadata reads. `daq` and
+    the ExtRef cfgs are then unused; pass mds=None. None = the MFLI path.
     """
     _check_ac_safety(ac_cfg)
     measure_rxx = demod2_label.startswith("rxx_")
@@ -346,11 +366,14 @@ def run_measurement(
         mds_synced = check_mds_status(mds) if mds is not None else None
         if mds_synced is False:
             log.error("   MDS sync has dropped — check Ref/Trigger cabling.")
-        leader_locked = check_reference_locked(daq, leader_extref_cfg)
+        if lockin is None:
+            leader_locked = check_reference_locked(daq, leader_extref_cfg)
+            follower_locked = check_reference_locked(daq, follower_extref_cfg)
+        else:
+            leader_locked, follower_locked = lockin.locked()
         if leader_locked is False:
             log.error("   Leader ExtRef PLL has dropped lock — 1f data from "
                        "this point on may be corrupted until it relocks.")
-        follower_locked = check_reference_locked(daq, follower_extref_cfg)
         if follower_locked is False:
             log.error("   Follower ExtRef PLL has dropped lock — 2f data from "
                        "this point on may be corrupted (garbage/beating "
@@ -364,7 +387,10 @@ def run_measurement(
         time.sleep(settle)
 
         # ── 3. Acquire 1f + demod2 together (one poll window, not two) ──────
-        d1, d2 = acquire_averaged_pair(daq, demod1_cfg, demod2_cfg, acq_cfg.n_averages)
+        if lockin is None:
+            d1, d2 = acquire_averaged_pair(daq, demod1_cfg, demod2_cfg, acq_cfg.n_averages)
+        else:
+            d1, d2 = lockin.read(acq_cfg.n_averages, stop_event)
         log.info("   %s  R=%.4e V  θ=%.2f°  SEM_R=%.2e V  (n=%d)",
                  demod1_label, d1["r_mean"], d1["theta_mean"], d1["r_sem"], d1["n_samples"])
         if d1["overload"]:
@@ -387,7 +413,7 @@ def run_measurement(
         # ── 4d. Run metadata (excitation, filters, phases, geometry) ────────
         run_meta = build_run_metadata(daq, ac_cfg, leader_extref_cfg, demod1_cfg,
                                       demod2_cfg, geometry_cfg, demod2_phase_null_1f_deg,
-                                      measure_rxx=measure_rxx)
+                                      measure_rxx=measure_rxx, lockin=lockin)
 
         # ── 5. Build record ────────────────────────────────────────────────
         record: dict = {

@@ -62,7 +62,7 @@ import logging
 import threading
 import numpy as np
 import pandas as pd
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Callable, List
@@ -80,6 +80,7 @@ from instruments.mfli_daq import (
     acquire_averaged_pair,
     acquire_s,
 )
+from instruments import sr830
 from instruments.run_time import GPIB_TXN_S, PHASE_NULL_ITER_TYP
 from instruments.kepco_magnet import (
     KepkoBOPGL,
@@ -369,6 +370,7 @@ def build_run_metadata(
     demod2_cfg: DemodConfig,
     geometry_cfg: Optional[SampleGeometryConfig] = None,
     demod2_phase_null_1f_deg: Optional[float] = None,
+    lockin: Optional[sr830.SR830Read] = None,
 ) -> dict:
     """
     Assemble the run-level metadata a harmonic-Hall analysis needs to turn
@@ -399,9 +401,22 @@ def build_run_metadata(
     once at phase-calibration time) is the follower path's delay angle at
     f — recorded so analysis can rotate the 2f X/Y into the current frame
     (by -2× this). Left blank when no follower calibration was done.
+
+    `lockin` (an SR830 pair, see run_measurement()) swaps the phase / filter
+    reads and the output convention for the SR830's own; None = the MFLIs.
     """
     geometry_cfg = geometry_cfg or SampleGeometryConfig()
     I_peak_A = out_cfg.amplitude_V / out_cfg.series_R_ohm
+    if lockin is None:
+        (tc1, order1), (tc2, order2) = ((c.filter.time_constant_s, c.filter.order)
+                                        for c in (demod1_cfg, demod2_cfg))
+        phase1, phase2 = get_demod_phase_deg(daq, demod1_cfg), get_demod_phase_deg(daq, demod2_cfg)
+        convention = ("RMS; ZI demodulator X/Y/R nodes report the RMS amplitude of "
+                      "the input signal's component at the reference frequency")
+    else:
+        (tc1, order1), (tc2, order2) = lockin.filter_meta(0), lockin.filter_meta(1)
+        phase1, phase2 = lockin.phase_deg(0), lockin.phase_deg(1)
+        convention = sr830.DEMOD_OUTPUT_CONVENTION
     return {
         "demod2_phase_null_1f_deg": demod2_phase_null_1f_deg,
         "excitation_frequency_Hz":       out_cfg.frequency_Hz,
@@ -411,16 +426,13 @@ def build_run_metadata(
             "peak (0-to-peak); I = V_out/R_series assumes the series "
             "resistor dominates the load impedance"
         ),
-        "demod_output_convention": (
-            "RMS; ZI demodulator X/Y/R nodes report the RMS amplitude of "
-            "the input signal's component at the reference frequency"
-        ),
-        "demod1_time_constant_s":   demod1_cfg.filter.time_constant_s,
-        "demod1_filter_order":      demod1_cfg.filter.order,
-        "demod1_ref_phase_deg":     get_demod_phase_deg(daq, demod1_cfg),
-        "demod2_time_constant_s":   demod2_cfg.filter.time_constant_s,
-        "demod2_filter_order":      demod2_cfg.filter.order,
-        "demod2_ref_phase_deg":     get_demod_phase_deg(daq, demod2_cfg),
+        "demod_output_convention":  convention,
+        "demod1_time_constant_s":   tc1,
+        "demod1_filter_order":      order1,
+        "demod1_ref_phase_deg":     phase1,
+        "demod2_time_constant_s":   tc2,
+        "demod2_filter_order":      order2,
+        "demod2_ref_phase_deg":     phase2,
         "hall_bar_length_um":       geometry_cfg.hall_bar_length_um,
         "hall_bar_width_um":        geometry_cfg.hall_bar_width_um,
         "hall_bar_thickness_nm":    geometry_cfg.hall_bar_thickness_nm,
@@ -588,6 +600,66 @@ def null_follower_reference_via_1f(
     return delay_angle_deg
 
 
+def auto_null_phase_sr830(lockin, cfg: "sr830.LockinConfig", n_averages: int = 20,
+                          tol_deg: float = 0.02) -> PhaseCalibrationResult:
+    """auto_null_phase() for an SR830: the unit's own APHS (the manual's
+    auto-phase, sr830.auto_phase() waits out the filter settle) instead of
+    the measure/adjust loop, then one acquire to report the residual."""
+    phase_before = lockin.phase
+    phase_after = sr830.auto_phase(lockin, cfg)
+    d = sr830.acquire_averaged(lockin, cfg, n_averages)
+    if d["r_mean"] <= 0:
+        raise RuntimeError(f"No signal on SR830 {cfg.visa_resource} (R=0) — "
+                           "can't null a phase against zero amplitude.")
+    residual_deg = math.degrees(math.atan2(d["y_mean"], d["x_mean"]))
+    return PhaseCalibrationResult(
+        phase_before_deg=phase_before, phase_after_deg=phase_after, iterations=1,
+        x_V=d["x_mean"], y_V=d["y_mean"], r_V=d["r_mean"],
+        residual_ratio=abs(d["y_mean"]) / d["r_mean"], converged=abs(residual_deg) < tol_deg,
+    )
+
+
+def null_follower_reference_via_1f_sr830(lockin, cfg: "sr830.LockinConfig",
+                                         n_averages: int = 20) -> float:
+    """null_follower_reference_via_1f() for an SR830: HARM 1, APHS against
+    the same (split) V_xy, read the phase, then restore the phase and the
+    harmonic — measures the anchor only, never rotates the acquired data."""
+    cfg_1f = replace(cfg, harmonic=1)
+    original_phase = lockin.phase
+    lockin.write("HARM 1")
+    time.sleep(sr830.settle_time_s(cfg_1f))
+    try:
+        result = auto_null_phase_sr830(lockin, cfg_1f, n_averages)
+        delay_angle_deg = result.phase_after_deg
+        if not result.converged:
+            log.warning("Follower 1f null did not converge (|Y|/R=%.2e) — the 2f reference "
+                        "anchor demod2_phase_null_1f_deg may be unreliable.", result.residual_ratio)
+    finally:
+        lockin.phase = original_phase
+        lockin.write(f"HARM {cfg.harmonic}")
+        time.sleep(sr830.settle_time_s(cfg))
+    log.info("Follower 2f reference anchor (SR830): 1f delay angle = %.4f° at f.", delay_angle_deg)
+    return delay_angle_deg
+
+
+def phase_cal_sr830(lockin: sr830.SR830Read, n_averages: int,
+                    follower_display: str = "2f") -> float:
+    """The TUIs' phase-calibration block (HARM and HARM6) for an SR830 pair:
+    APHS-null the leader's Y, log a follower snapshot, then measure the
+    follower's 1f anchor. Returns demod2_phase_null_1f_deg."""
+    (la, ca), (lb, cb) = lockin.units
+    result = auto_null_phase_sr830(la, ca, n_averages)
+    if not result.converged:
+        log.warning("SR830 auto-phase left |Y|/R=%.2e on the leader — check cabling/"
+                    "contacts before trusting the %s data.", result.residual_ratio,
+                    follower_display)
+    d2 = sr830.acquire_averaged(lb, cb, n_averages)
+    log.info("%s snapshot at calibration point: X=%.4e V  Y=%.4e V  R=%.4e V — check "
+             "which channel carries the field dependence before trusting either one.",
+             follower_display, d2["x_mean"], d2["y_mean"], d2["r_mean"])
+    return null_follower_reference_via_1f_sr830(lb, cb, n_averages)
+
+
 def phase_cal_s(time_constant_1f_s: float, time_constant_2f_s: float, n_averages: int,
                 max_iterations: int, sample_rate_Hz: float) -> float:
     """Modelled wall time of the TUI's phase-calibration block, EXCLUDING its
@@ -705,6 +777,7 @@ def run_measurement(
     write_csv: Optional[Callable[[List[dict]], None]] = None,
     demod1_label: str = "1f",
     demod2_label: str = "2f",
+    lockin: Optional[sr830.SR830Read] = None,
 ) -> pd.DataFrame:
     """
     Iterate over `points`, acquire 1f and 2f at each, log to CSV.
@@ -760,6 +833,12 @@ def run_measurement(
     a caller that set a different `harmonic` on a demod passes e.g. `"3f"`
     or `"rxx_1f"` (see mfli_dual_harmonic_6221_tui.demod_naming()).
 
+    `lockin`, if given (an sr830.SR830Read of the leader + follower SR830s),
+    replaces every MFLI read: the pair acquire, the phase/filter metadata,
+    and — in place of the MDS check (pass mds=None) — each unit's latched
+    reference-unlock flag, saved as leader_/follower_reference_locked (the
+    HARM6 column names). `daq` is then unused. None = the MFLI path.
+
     ── Adding more measurements per point ─────────────────────────────────
     Just extend the `record` dict below with any quantity you want to log:
     e.g. a resistance, or an additional demodulator.
@@ -788,6 +867,13 @@ def run_measurement(
                        "may be corrupted (garbage/beating phasor) until it's "
                        "re-established. Check Ref/Trigger cabling.")
 
+        if lockin is not None:
+            leader_locked, follower_locked = lockin.locked()
+            if follower_locked is False:
+                log.error("   Follower SR830 reference dropped lock — %s data from this "
+                          "point on may be corrupted. Check the TTL into its REF IN.",
+                          demod2_label)
+
         # ── 2. Settle ──────────────────────────────────────────────────────
         settle = pt.settling_override_s if pt.settling_override_s is not None \
                  else acq_cfg.settling_time_s
@@ -795,7 +881,10 @@ def run_measurement(
         time.sleep(settle)
 
         # ── 3. Acquire 1f + 2f together (one poll window, not two) ──────────
-        d1, d2 = acquire_averaged_pair(daq, demod1_cfg, demod2_cfg, acq_cfg.n_averages)
+        if lockin is None:
+            d1, d2 = acquire_averaged_pair(daq, demod1_cfg, demod2_cfg, acq_cfg.n_averages)
+        else:
+            d1, d2 = lockin.read(acq_cfg.n_averages, stop_event)
         log.info("   %s  R=%.4e V  θ=%.2f°  SEM_R=%.2e V  (n=%d)",
                  demod1_label, d1["r_mean"], d1["theta_mean"], d1["r_sem"], d1["n_samples"])
         if d1["overload"]:
@@ -819,13 +908,15 @@ def run_measurement(
         # Built fresh each point — see build_run_metadata()'s docstring for
         # why this isn't hoisted above the loop.
         run_meta = build_run_metadata(daq, out_cfg, demod1_cfg, demod2_cfg, geometry_cfg,
-                                      demod2_phase_null_1f_deg)
+                                      demod2_phase_null_1f_deg, lockin=lockin)
 
         # ── 5. Build record ────────────────────────────────────────────────
         record: dict = {
             "point_index": idx,
             "timestamp":   time.strftime("%Y-%m-%dT%H:%M:%S"),
             "mds_synced":  mds_synced,
+            **({"leader_reference_locked": leader_locked,
+                "follower_reference_locked": follower_locked} if lockin is not None else {}),
             # ── Magnet sweep ─────────────────────────────────────────────────
             "magnet_current_A": pt.magnet_current_A,
             "magnet_field_mT":  field_mT,

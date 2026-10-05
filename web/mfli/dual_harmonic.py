@@ -10,7 +10,8 @@ run (that module's pure DEFAULTS/*_FIELDS/resolve_state/build_summary/
 build_plan, and the plan's engine's run_plan). "AC current source" picks the
 leader MFLI's Signal Output (type HARM) or a Keithley 6221 (type HARM6); the
 other source's cards are hidden. /mfli/dual-harmonic-6221 opens this page with
-the 6221 selected.
+the 6221 selected. "Lock-in" picks the MDS-synced MFLI pair or two SR830s
+(same type codes; the header records lockin: SR830).
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ from nicegui import ui
 import mfli.mfli_dual_harmonic_tui as program
 from mfli.mfli_dual_harmonic_6221_tui import HARMONIC_OPTIONS, migrate_settings, plan_naming
 from mfli.mfli_dual_harmonic_tui import (
-    AC_SOURCES, DEFAULTS, MFLI_DUAL_HARMONIC_DESCRIPTION, build_plan, build_summary,
+    AC_SOURCES, DEFAULTS, LOCKINS, MFLI_DUAL_HARMONIC_DESCRIPTION, build_plan, build_summary,
     compute_filename_preview, mode_errors,
 )
 from instruments.data_naming import (
@@ -123,8 +124,11 @@ def page(source: str = "") -> None:
                     ac_select = ui.select(
                         dict((v, k) for k, v in AC_SOURCES), value=d("ac_source"),
                         label="AC current source").classes("w-full")
-                    ui.label("MFLI → saved as HARM · 6221 → saved as HARM6").classes(
+                    ui.label("Lock-in output → saved as HARM · 6221 → saved as HARM6").classes(
                         "text-xs text-grey-6 -mt-2 mb-2")
+                    lockin_select = ui.select(
+                        dict((v, k) for k, v in LOCKINS), value=d("lockin"),
+                        label="Lock-in").classes("w-full")
                     inputs["frequency_Hz"] = num_field(
                         "Excitation frequency (Hz)", float(d("frequency_Hz")),
                         hint="Avoid multiples of 50/60 Hz.")
@@ -132,7 +136,10 @@ def page(source: str = "") -> None:
                 def only_for(card, source: str) -> None:
                     card.bind_visibility_from(ac_select, "value", backward=lambda v: v == source)
 
-                with param_card("MFLI Signal Output") as mfli_card:
+                def only_for_lockin(card, lockin: str) -> None:
+                    card.bind_visibility_from(lockin_select, "value", backward=lambda v: v == lockin)
+
+                with param_card("Lock-in Signal Output") as mfli_card:
                     inputs["amplitude_V"] = num_field(
                         "Output amplitude (V, peak)", float(d("amplitude_V")))
                     inputs["series_R_ohm"] = num_field(
@@ -151,7 +158,7 @@ def page(source: str = "") -> None:
                 harmonic_selects = {}
                 for role, harmonic_id, rxx_id in (("Leader", "leader_harmonic", "leader_measure_rxx"),
                                                   ("Follower", "follower_harmonic", "measure_rxx")):
-                    with param_card(f"{role} MFLI lock-in"):
+                    with param_card(f"{role} lock-in"):
                         harmonic_selects[harmonic_id] = ui.select(
                             {h: label for label, h in HARMONIC_OPTIONS}, value=int(d(harmonic_id)),
                             label="Harmonic").classes("w-full")
@@ -222,13 +229,26 @@ def page(source: str = "") -> None:
                         switches["sinc_filter_2f"] = bool_switch("Sinc filter (extra harmonic rejection)", d("sinc_filter_2f"))
 
                     with param_card("Input channels"):
+                        inputs["sample_rate_Hz"] = num_field(
+                            "Demodulator sample rate (Sa/s)", float(d("sample_rate_Hz")),
+                            hint="SR830 buffer: max 512 Sa/s.")
+
+                    with param_card("MFLI input ranges") as ranges_card:
                         inputs["input_range_1f_V"] = num_field(
                             "Leader input range (V)", float(d("input_range_1f_V")),
                             hint="Match expected leader signal size.")
                         inputs["input_range_2f_V"] = num_field(
                             "Follower input range (V)", float(d("input_range_2f_V")),
                             hint="2f is usually much smaller than 1f.")
-                        inputs["sample_rate_Hz"] = num_field("Demodulator sample rate (Sa/s)", float(d("sample_rate_Hz")))
+                    only_for_lockin(ranges_card, "mfli")
+
+                    with param_card("SR830 sensitivities") as sens_card:
+                        inputs["sensitivity_1f_V"] = num_field(
+                            "Leader full-scale sensitivity (V)", float(d("sensitivity_1f_V")),
+                            hint="Snapped up to 1-2-5 steps.")
+                        inputs["sensitivity_2f_V"] = num_field(
+                            "Follower full-scale sensitivity (V)", float(d("sensitivity_2f_V")))
+                    only_for_lockin(sens_card, "sr830")
 
                     with param_card("Acquisition timing"):
                         inputs["settling_time_s"] = num_field(
@@ -239,21 +259,32 @@ def page(source: str = "") -> None:
             # ── Tier 3: instrument wiring & safety — collapsed ──────────────
             with advanced_section("Instrument configuration & addresses", icon="settings"):
                 with stable_grid():
-                    with stable_card("Devices & connection"):
+                    with stable_card("Devices & connection") as devices_card:
                         inputs["leader_device"] = text_field(
                             "Leader MFLI (the source in MFLI mode)", d("leader_device"))
                         inputs["follower_device"] = text_field(
                             "Follower MFLI", d("follower_device"))
                         inputs["daq_host"] = text_field("LabOne data server host", d("daq_host"))
                         inputs["daq_port"] = num_field("LabOne data server port", float(d("daq_port")), integer=True)
+                    only_for_lockin(devices_card, "mfli")
 
-                    with stable_card("6221 & ExtRef (phase marker → both MFLIs' Aux In)") as extref_card:
+                    with stable_card("SR830 addresses") as sr830_card:
+                        inputs["sr830_a_visa"] = text_field(
+                            "Leader SR830 VISA resource", d("sr830_a_visa"),
+                            hint="Its rear TTL OUT → follower REF IN (lock-in source).")
+                        inputs["sr830_b_visa"] = text_field("Follower SR830 VISA resource", d("sr830_b_visa"))
+                    only_for_lockin(sr830_card, "sr830")
+
+                    with stable_card("6221 (phase marker → both lock-ins' reference)") as source_card:
                         inputs["ac_visa_resource"] = text_field("6221 VISA resource", d("ac_visa_resource"))
                         inputs["phasemarker_line"] = num_field(
                             "6221 Trigger Link phase-marker pin", float(d("phasemarker_line")), integer=True,
                             hint="Check your unit's factory default.")
                         inputs["extref_lock_timeout_s"] = num_field(
-                            "ExtRef PLL lock timeout (s)", float(d("extref_lock_timeout_s")))
+                            "Reference lock timeout (s)", float(d("extref_lock_timeout_s")))
+                    only_for(source_card, "6221")
+
+                    with stable_card("MFLI ExtRef (phase marker → both MFLIs' Aux In)") as extref_card:
                         inputs["leader_extref_index"] = num_field(
                             "Leader ExtRef module index", float(d("leader_extref_index")), integer=True)
                         inputs["leader_aux_input_ch"] = num_field(
@@ -282,7 +313,13 @@ def page(source: str = "") -> None:
                             AUTOMODE_OPTIONS, value=int(d("follower_automode")),
                             label="Follower PLL bandwidth adaptation").classes("w-full")
                         ui.label(AUTOMODE_HINT).classes("text-xs text-grey-6 -mt-2 mb-2")
-                    only_for(extref_card, "6221")
+
+                    def show_extref(_=None) -> None:      # 6221 source AND the MFLI pair
+                        extref_card.set_visibility(ac_select.value == "6221"
+                                                   and lockin_select.value == "mfli")
+                    show_extref()
+                    ac_select.on_value_change(show_extref)
+                    lockin_select.on_value_change(show_extref)
 
                     with stable_card("Magnet & gaussmeter addresses"):
                         inputs["visa_resource"] = text_field("Magnet VISA resource", d("visa_resource"))
@@ -350,7 +387,7 @@ def page(source: str = "") -> None:
     def parse_state() -> tuple[dict, list[str]]:
         state, errors = form_state(
             program, identity, inputs=inputs, switches=switches, optional_inputs=optional_inputs,
-            selects={"ac_source": ac_select,
+            selects={"ac_source": ac_select, "lockin": lockin_select,
                      "order_1f": order_select_1f, "order_2f": order_select_2f,
                      "leader_automode": leader_automode_select,
                      "follower_automode": follower_automode_select, **harmonic_selects})
@@ -363,6 +400,7 @@ def page(source: str = "") -> None:
         for fid, sw in switches.items():
             raw[fid] = sw.value
         raw["ac_source"] = ac_select.value
+        raw["lockin"] = lockin_select.value
         raw["order_1f"] = order_select_1f.value
         raw["order_2f"] = order_select_2f.value
         raw["leader_automode"] = leader_automode_select.value
@@ -411,6 +449,7 @@ def page(source: str = "") -> None:
     for sw in switches.values():
         sw.on_value_change(refresh_summary.refresh)
     ac_select.on_value_change(refresh_summary.refresh)
+    lockin_select.on_value_change(refresh_summary.refresh)
     order_select_1f.on_value_change(refresh_summary.refresh)
     order_select_2f.on_value_change(refresh_summary.refresh)
     leader_automode_select.on_value_change(refresh_summary.refresh)
