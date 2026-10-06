@@ -60,6 +60,23 @@ BASE_COLUMNS = [
 
 _LOCK_TIMEOUT_S = 5.0
 
+# Raw files + index.csv are UTF-8 with a BOM: Windows programs (OriginLab's
+# Text/CSV connector, Excel) detect UTF-8 from the BOM, and pandas strips it
+# on read. Files written before this was set are cp1252 (the Windows locale
+# default) -- text_encoding() picks the right codec for reading either.
+ENCODING = "utf-8-sig"
+
+
+def text_encoding(path: Path) -> str:
+    """ENCODING for a UTF-8 file (BOM or not); "cp1252" for a legacy Windows-written one."""
+    # ponytail: reads the file twice (once here, once to parse); fine at raw-file
+    # sizes. Drop this once every pre-UTF-8 file has been converted.
+    try:
+        path.read_bytes().decode("utf-8")
+        return ENCODING
+    except UnicodeDecodeError:
+        return "cp1252"
+
 _SAMPLE_YAML_STUB = """\
 # {sample} -- sample metadata
 # Fill in by hand. This file is documentation only; nothing in bridge
@@ -232,11 +249,12 @@ def ensure_sample(data_root: Path, sample: str, *, create: bool = False) -> Path
 
     if not yaml_path.exists():
         created_at = datetime.now().astimezone().isoformat(timespec="seconds")
-        yaml_path.write_text(_SAMPLE_YAML_STUB.format(sample=sample, created_at=created_at))
+        yaml_path.write_text(_SAMPLE_YAML_STUB.format(sample=sample, created_at=created_at),
+                             encoding="utf-8")
 
     notes_path = sample_dir / "notes.md"
     if not notes_path.exists():
-        notes_path.write_text(f"# {sample}\n")
+        notes_path.write_text(f"# {sample}\n", encoding="utf-8")
 
     index_path = sample_dir / "index.csv"
     if not index_path.exists():
@@ -264,7 +282,7 @@ def ensure_test_sample(data_root: Path) -> Path:
 def _read_index(index_path: Path) -> tuple[list[dict], list[str]]:
     if not index_path.exists():
         return [], list(BASE_COLUMNS)
-    with open(index_path, newline="") as f:
+    with open(index_path, newline="", encoding=text_encoding(index_path)) as f:
         reader = csv.DictReader(f)
         fieldnames = list(reader.fieldnames or BASE_COLUMNS)
         rows = list(reader)
@@ -273,7 +291,7 @@ def _read_index(index_path: Path) -> tuple[list[dict], list[str]]:
 
 def _write_index(index_path: Path, rows: list[dict], fieldnames: list[str]) -> None:
     index_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(index_path, "w", newline="") as f:
+    with open(index_path, "w", newline="", encoding=ENCODING) as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, restval="")
         writer.writeheader()
         for row in rows:
@@ -461,7 +479,7 @@ def write_record(raw_path: Path, records: list[dict], header_fields: dict) -> No
     # rename. Same directory so os.replace stays on one filesystem (atomic);
     # the .tmp suffix keeps a leftover out of raw/*.csv globs.
     tmp_path = raw_path.with_name(raw_path.name + ".tmp")
-    with open(tmp_path, "w", newline="") as f:
+    with open(tmp_path, "w", newline="", encoding=ENCODING) as f:
         f.write("\n".join(header_lines) + "\n")
         if len(df.columns):
             names, units = zip(*(_split_column_unit(c) for c in df.columns))
@@ -480,7 +498,7 @@ def read_raw(raw_path: Path) -> pd.DataFrame:
     yield an empty DataFrame.
     """
     try:
-        df = pd.read_csv(raw_path, comment="#", header=[0, 1])
+        df = pd.read_csv(raw_path, comment="#", header=[0, 1], encoding=text_encoding(raw_path))
     except pd.errors.EmptyDataError:
         return pd.DataFrame()
     df.columns = [

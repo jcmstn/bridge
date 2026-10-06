@@ -16,6 +16,7 @@ import pytest
 from instruments.data_naming import (
     TEST_SAMPLE,
     RunContext,
+    _read_index,
     SampleNotFoundError,
     allocate_run,
     ensure_sample,
@@ -42,7 +43,7 @@ def test_ensure_sample_creates_expected_tree(tmp_path: Path) -> None:
     assert (sample_dir / "proc").is_dir()
     assert (sample_dir / "index.csv").is_file()
 
-    index_text = (sample_dir / "index.csv").read_text()
+    index_text = (sample_dir / "index.csv").read_text(encoding="utf-8-sig")
     assert index_text.strip().startswith("run,timestamp,sample,device,type")
 
 
@@ -179,7 +180,7 @@ def test_write_record_header_and_body_round_trip(tmp_path: Path) -> None:
     ]
     write_record(ctx.raw_path, records, header_fields)
 
-    raw_text = ctx.raw_path.read_text()
+    raw_text = ctx.raw_path.read_text(encoding="utf-8-sig")
     lines = raw_text.splitlines()
     assert f"# run: {ctx.run_number}" in lines
     assert "# B_range_T: [-2, 2]" in lines
@@ -206,6 +207,30 @@ def test_allocate_run_puts_setpoint_in_T_setpoint_not_measured_T_K(tmp_path: Pat
     row = df[df["run"] == ctx.run_number].iloc[0]
     assert row["T_setpoint_K"] == 300
     assert pd.isna(row["T_K"])
+
+
+def test_raw_and_index_are_utf8_and_legacy_cp1252_still_reads(tmp_path: Path) -> None:
+    ensure_sample(tmp_path, "A", create=True)
+    ctx = allocate_run(tmp_path, "A", "HB3", "IV")
+    header_fields = {"run": ctx.run_number, "comment": "a–b — 5 Ω"}
+    write_record(ctx.raw_path, [{"B_T": 1.0}], header_fields)
+    finalize_index_row(tmp_path, "A", ctx.run_number, header_fields)
+
+    # UTF-8 with BOM (Origin/Excel detect it), round-trips non-cp1252 chars.
+    for path in (ctx.raw_path, tmp_path / "A" / "index.csv"):
+        raw_bytes = path.read_bytes()
+        assert raw_bytes.startswith(b"\xef\xbb\xbf")
+        assert "a–b — 5 Ω" in raw_bytes.decode("utf-8")
+    assert list(read_raw(ctx.raw_path).columns) == ["B_T"]
+
+    # Files written before the switch are cp1252 (Windows locale default).
+    legacy = ctx.raw_path.with_name("legacy.csv")
+    legacy.write_text("# comment: a–b\nB\nT\n1.0\n", encoding="cp1252")
+    assert read_raw(legacy)["B_T"].tolist() == [1.0]
+    index_path = tmp_path / "A" / "index.csv"
+    index_path.write_text("run,comment\n1,a–b\n", encoding="cp1252")
+    rows, _ = _read_index(index_path)
+    assert rows[0]["comment"] == "a–b"
 
 
 def test_write_record_is_atomic_and_leaves_no_tmp(tmp_path: Path) -> None:

@@ -61,6 +61,7 @@ from instruments.data_naming import (
     finalize_index_row,
     list_samples,
     read_raw,
+    text_encoding,
 )
 
 # <repo>/../data — the same default data root as every measurement program
@@ -91,7 +92,8 @@ def normalize_bool(value) -> Optional[bool]:
 
 
 def load_index(sample_dir: Path) -> pd.DataFrame:
-    df = pd.read_csv(sample_dir / "index.csv")
+    index_path = sample_dir / "index.csv"
+    df = pd.read_csv(index_path, encoding=text_encoding(index_path))
     for col in CURATION_COLUMNS:
         if col not in df.columns:
             df[col] = pd.NA

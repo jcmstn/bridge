@@ -159,6 +159,16 @@ each column name (`magnet_field_mT` → `magnet_field` + `mT`); the suffix
 set is `_COLUMN_UNITS` in `data_naming.py`. A column with no recognised
 suffix keeps its full name and an empty unit.
 
+**Encoding:** raw files and `index.csv` are UTF-8 **with a BOM**
+(`data_naming.ENCODING = "utf-8-sig"`). The BOM is what lets Windows
+programs (Origin's connector, Excel) detect UTF-8 rather than fall back to
+ANSI; pandas strips it on read. Files written before this was set are
+cp1252 (the Windows locale default, e.g. `–` as byte `0x96`) —
+`read_raw()` and the index reader pick the codec per file via
+`data_naming.text_encoding(path)`, and a legacy `index.csv` is rewritten as
+UTF-8 at its next `finalize_index_row()`. Outside tools reading the files
+directly should use `utf-8-sig` (falling back to `cp1252` for old files).
+
 Header lines still start with `#` in column 0, but `pd.read_csv(path,
 comment="#")` is **no longer** a correct read — it would treat the Units
 row as the first data row. Use **`read_raw(path)`** (below), which skips
