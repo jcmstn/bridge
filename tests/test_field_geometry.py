@@ -47,3 +47,12 @@ def test_render_ascii_field_diagram_varies_with_input() -> None:
         for theta, phi in [(0, 0), (90, 0), (90, 90), (None, None)]
     }
     assert len(diagrams) == 4  # all visually distinct
+
+
+def test_ascii_diagram_is_right_handed() -> None:
+    # Viewed from above with +z drawn up, a right-handed frame puts x to the
+    # left of y on screen (x lower-left, y lower-right).
+    from instruments.field_geometry import _iso
+
+    assert _iso(0, 0, 1)[1] < _iso(0, 0, 0)[1]  # +z drawn up
+    assert _iso(1, 0, 0)[0] < _iso(0, 0, 0)[0] < _iso(0, 1, 0)[0]

@@ -292,6 +292,7 @@ def run_measurement(
             "magnet_field_mT":  field_mT,
             "field_theta_deg":  field_theta_deg,
             "field_phi_deg":    field_phi_deg,
+            "field_frame":      "RH",  # right-handed (z=normal, x=current, y=z×x); see docs/data_convention.md
             "temperature_1_K":  temp_1_K,
             "temperature_2_K":  temp_2_K,
             "sense_current_A":  src_cfg.sense_current_A,

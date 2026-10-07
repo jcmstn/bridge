@@ -20,7 +20,7 @@ from mfli.mfli_dual_harmonic_6221 import ExtRefConfig
 
 _DEMOD = ["X_V", "Y_V", "R_V", "theta_deg", "R_sem_V", "n_samples", "overload"]
 _GEOM = ["hall_bar_length_um", "hall_bar_width_um", "hall_bar_thickness_nm",
-         "field_theta_deg", "field_phi_deg"]
+         "field_theta_deg", "field_phi_deg", "field_frame"]
 _DEMOD_META = ["demod1_time_constant_s", "demod1_filter_order", "demod1_ref_phase_deg",
                "demod2_time_constant_s", "demod2_filter_order", "demod2_ref_phase_deg"]
 _EXC = ["excitation_frequency_Hz", "excitation_current_A_peak", "excitation_current_A_rms",

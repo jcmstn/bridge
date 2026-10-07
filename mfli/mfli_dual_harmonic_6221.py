@@ -288,6 +288,7 @@ def build_run_metadata(
         "hall_bar_thickness_nm":    geometry_cfg.hall_bar_thickness_nm,
         "field_theta_deg":          geometry_cfg.field_theta_deg,
         "field_phi_deg":            geometry_cfg.field_phi_deg,
+        "field_frame":              "RH",  # right-handed (z=normal, x=current, y=z×x); see docs/data_convention.md
     }
 
 

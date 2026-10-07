@@ -461,6 +461,7 @@ def run_measurement(
             "assist_field_measured_mT": field_measured_mT,
             "field_theta_deg":   field_theta_deg,
             "field_phi_deg":     field_phi_deg,
+            "field_frame":       "RH",  # right-handed (z=normal, x=current, y=z×x); see docs/data_convention.md
             "temperature_1_K":   t1_K,
             "temperature_2_K":   t2_K,
         }

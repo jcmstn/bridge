@@ -8,7 +8,10 @@ Created: 2026-09-16
 Coordinate convention (see docs/data_convention.md "Field direction
 convention" for the full writeup): z = film normal (out-of-plane), x =
 current/channel direction (in-plane), y = transverse in-plane, completing a
-right-handed frame.
+right-handed frame (y = z × x): with the normal up and the current flowing
+away from you, +y points to your left. Rows record this as field_frame="RH";
+runs without that column were entered against an older, left-handed ASCII
+diagram -- convert with phi_RH = (-phi) % 360 (docs/data_convention.md).
 
     theta_deg  polar angle from +z.   0 deg = out-of-plane, 90 deg = in-plane.
     phi_deg    azimuth from +x, in the xy-plane, 0-360 deg.
@@ -45,7 +48,8 @@ def field_unit_vector(theta_deg: float, phi_deg: float) -> tuple[float, float, f
 # One fixed iso transform (classic "floor tile" projection): the film's xy
 # extent draws as a diamond, +z draws straight up. Terminal cells are ~2x
 # taller than wide, so the column scale is larger than the row scale to keep
-# the diamond looking roughly regular instead of squashed.
+# the diamond looking roughly regular instead of squashed. Viewed from above
+# (+z up), x draws lower-left and y lower-right -- a right-handed frame.
 
 _COS30 = math.cos(math.radians(30))
 _SIN30 = math.sin(math.radians(30))
@@ -55,7 +59,7 @@ _COL_SCALE, _ROW_SCALE = 5.2, 3.6
 
 
 def _iso(x: float, y: float, z: float) -> tuple[int, int]:
-    sx = (x - y) * _COS30
+    sx = (y - x) * _COS30
     sy = (x + y) * _SIN30 - z
     col = _ORIGIN[0] + round(sx * _COL_SCALE)
     row = _ORIGIN[1] + round(sy * _ROW_SCALE)

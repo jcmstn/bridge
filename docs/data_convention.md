@@ -206,7 +206,11 @@ field direction in software, only field magnitude). Coordinate frame:
 
 - **z** — film normal (out-of-plane).
 - **x** — the current/channel direction (a Hall bar's long axis).
-- **y** — transverse in-plane, completing a right-handed frame.
+- **y** — transverse in-plane, completing a right-handed frame: y = z × x.
+  Physically: normal up, current flowing away from you, +y points to your
+  left. Every run that records the angles also writes `field_frame = RH`.
+  Your analysis sign for V_xy depends on which Hall arm is +y, so check the
+  wiring against this rule.
 
 `field_theta_deg` is the polar angle from `+z`: 0° = fully out-of-plane,
 90° = fully in-plane. `field_phi_deg` is the azimuth from `+x` in the
@@ -219,6 +223,13 @@ There is no separate "which plane" column. A fixed-phi, theta-swept series
 existing `series` column already reconstructs that grouping; a redundant
 plane label would be ambiguous at the boundaries anyway (theta=90,phi=0 is
 simultaneously an xy-plane point and a zx-plane point).
+
+**Legacy runs (no `field_frame` column).** Before 2026-10-07 the TUI's ASCII
+diagram drew a left-handed frame (x lower-right, y lower-left, z up), so any
+φ entered from that diagram has y flipped. Convert with
+`phi_RH = (-phi) % 360` and leave θ as is. Runs with θ = 0, or φ ∈ {0, 180}
+(out-of-plane and the zx plane), are the same in both frames. In the zy
+plane, φ = 90 and 270 swap. The web 3D diagram was always right-handed.
 
 `instruments/field_geometry.py` — `field_unit_vector(theta_deg, phi_deg)`
 converts to a Cartesian unit vector in this frame; `render_ascii_field_diagram`
