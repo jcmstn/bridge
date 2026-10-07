@@ -34,7 +34,6 @@ def test_page_reuses_the_tui_modules_pure_helpers():
     ("web.dc.rt_log", "dc.dc_rt_log_tui"),
     ("web.mfli.dual_harmonic", "mfli.mfli_dual_harmonic_tui"),
     ("web.mfli.diff_resistance", "mfli.mfli_diff_resistance_tui"),
-    ("web.mfli.phase_calibration", "mfli.mfli_phase_calibration_tui"),
     ("web.sot.nonlocal_switching", "sot.sot_nonlocal_switching_tui"),
     ("web.sot.pulsed_switching", "sot.sot_pulsed_switching_tui"),
 ])
@@ -79,7 +78,6 @@ def test_web_build_plan_takes_the_data_root_from_the_page(tmp_path):
     ("dc.dc_rt_log_tui", "DCRTLogApp"),
     ("mfli.mfli_dual_harmonic_tui", "MFLIDualHarmonicApp"),
     ("mfli.mfli_diff_resistance_tui", "MFLIDiffResistanceApp"),
-    ("mfli.mfli_phase_calibration_tui", "MFLIPhaseCalibrationApp"),
     ("sot.sot_nonlocal_switching_tui", "NonlocalSwitchingApp"),
     ("sot.sot_pulsed_switching_tui", "SOTPulsedSwitchingApp"),
 ])

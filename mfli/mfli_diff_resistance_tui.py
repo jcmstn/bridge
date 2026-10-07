@@ -132,7 +132,7 @@ MFLI_DIFF_RESISTANCE_SCHEMATIC = """\
                                         Kelvin)
 
   MDS cabling  (both units)
-    Leader Ref Out      ───BNC───▶ Follower Ref In
+    Leader Clock 10 MHz Out ──BNC──▶ Follower Clock 10 MHz In
     Leader Trigger Out 1 ──▶ fanned out to Trigger In 1 on BOTH units
     (equal cable lengths on the fan-out)
 """

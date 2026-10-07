@@ -250,20 +250,18 @@ def test_sot_sr830_plan_one_unit_per_harmonic(tmp_path, pulse, harmonics):
     assert plan.header_extra["lockin"] == "SR830"
 
 
-def test_sr830_follower_anchor_measures_at_1f_then_restores(monkeypatch):
-    lk = _FakeSR830(x=[1.0] * 10, y=[0.0] * 10)
-    object.__setattr__(lk, "phase", 5.0)
-
-    def fake_auto_phase(lockin, cfg):
-        assert cfg.harmonic == 1                 # nulled at f, not at 2f
-        lockin.phase = 33.0
-        return 33.0
-
-    monkeypatch.setattr(sr830, "auto_phase", fake_auto_phase)
-    cfg = sr830.LockinConfig(harmonic=2, reference="external")
-    assert harm.null_follower_reference_via_1f_sr830(lk, cfg, n_averages=10) == 33.0
-    assert lk.phase == 5.0                       # measured only — data frame untouched
-    assert [c for c in lk.log if c.startswith("HARM")] == ["HARM 1", "HARM 2"]
+@pytest.mark.parametrize("ac_source", ["mfli", "6221"])
+def test_harm_reference_phases_reach_both_lockin_kinds_and_header(tmp_path, ac_source):
+    ensure_sample(tmp_path, "A", create=True)
+    state = _harm_state(ac_source=ac_source, leader_phi_I_deg=12.5, follower_phi_I_deg=-40.0)
+    plan = harm_tui.build_plan(state, tmp_path)
+    # 1f leader: phi_I; 2f follower: 2 x phi_I
+    assert (plan.demod1_cfg.phase_deg, plan.demod2_cfg.phase_deg) == (12.5, -80.0)
+    assert (plan.header_extra["demod1_ref_phase_deg"],
+            plan.header_extra["demod2_ref_phase_deg"]) == (12.5, -80.0)
+    assert plan.header_extra["phi_I_follower_deg"] == -40.0
+    plan = harm_tui.build_plan({**state, "lockin": "sr830"}, tmp_path)
+    assert [c.phase_deg for c in plan.sr830_cfgs] == [12.5, -80.0]
 
 
 def _mount_and_toggle(monkeypatch, tmp_path, mod, app_cls, selects: dict, ids):

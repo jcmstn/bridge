@@ -22,7 +22,6 @@ RUN_SCREEN_MODULES = [
     "mfli.mfli_dual_harmonic_6221_tui",
     "mfli.mfli_dual_harmonic_tui",
     "mfli.mfli_noise_spectrum_tui",
-    "mfli.mfli_phase_calibration_tui",
     "sot.sot_nonlocal_switching_tui",
     "sot.sot_pulsed_switching_2h_tui",
     "sot.sot_pulsed_switching_6221_tui",

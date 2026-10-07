@@ -44,8 +44,6 @@ from mfli.mfli_dual_harmonic_tui import (
     MFLI_DUAL_HARMONIC_DESCRIPTION, MFLI_DUAL_HARMONIC_SCHEMATIC, MFLIDualHarmonicApp)
 from mfli.mfli_noise_spectrum_tui import (
     MFLI_NOISE_SPECTRUM_DESCRIPTION, MFLI_NOISE_SPECTRUM_SCHEMATIC, MFLINoiseSpectrumApp)
-from mfli.mfli_phase_calibration_tui import (
-    MFLI_PHASE_CALIBRATION_DESCRIPTION, MFLI_PHASE_CALIBRATION_SCHEMATIC, MFLIPhaseCalibrationApp)
 from sot.sot_nonlocal_switching_tui import NLSW_DESCRIPTION, NLSW_SCHEMATIC, NonlocalSwitchingApp
 from sot.sot_pulsed_switching_tui import SOT_PULSED_DESCRIPTION, SOT_PULSED_SCHEMATIC, SOTPulsedSwitchingApp
 
@@ -79,9 +77,6 @@ PROGRAMS: dict[str, list[Program]] = {
                 MFLI_DUAL_HARMONIC_DESCRIPTION, MFLI_DUAL_HARMONIC_SCHEMATIC, MFLIDualHarmonicApp),
         Program("diff", "Differential Resistance vs. Bias (dV/dI)",
                 MFLI_DIFF_RESISTANCE_DESCRIPTION, MFLI_DIFF_RESISTANCE_SCHEMATIC, MFLIDiffResistanceApp),
-        Program("phase_cal", "Phase Calibration (1f Y-null + 2f channel ID)",
-                MFLI_PHASE_CALIBRATION_DESCRIPTION, MFLI_PHASE_CALIBRATION_SCHEMATIC,
-                MFLIPhaseCalibrationApp),
         Program("noise", "Noise Floor Estimate (2 MFLI + 6221)",
                 MFLI_NOISE_SPECTRUM_DESCRIPTION, MFLI_NOISE_SPECTRUM_SCHEMATIC, MFLINoiseSpectrumApp),
     ],

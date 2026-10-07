@@ -21,7 +21,6 @@ _ALL_APPS = {
     ("dc.dc_rt_log_tui", "DCRTLogApp"),
     ("mfli.mfli_dual_harmonic_tui", "MFLIDualHarmonicApp"),
     ("mfli.mfli_diff_resistance_tui", "MFLIDiffResistanceApp"),
-    ("mfli.mfli_phase_calibration_tui", "MFLIPhaseCalibrationApp"),
     ("mfli.mfli_noise_spectrum_tui", "MFLINoiseSpectrumApp"),
     ("sot.sot_pulsed_switching_tui", "SOTPulsedSwitchingApp"),
     ("sot.sot_nonlocal_switching_tui", "NonlocalSwitchingApp"),

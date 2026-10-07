@@ -33,7 +33,6 @@ import multiprocessing as mp
 import textwrap
 import sys
 import threading
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
@@ -48,8 +47,10 @@ from textual.widgets import (
     Collapsible,
     Footer,
     Header,
+    Input,
     Select,
     Static,
+    Switch,
 )
 
 from dc.dc_sweep_utils import build_segmented_sweep, parse_sweep_rows, safe_shutdown, try_parse
@@ -64,8 +65,6 @@ from mfli.mfli_dual_harmonic import (
     OutputConfig,
     SampleGeometryConfig,
     TemperatureControllerConfig,
-    acquire_averaged,
-    auto_null_phase,
     configure_demodulator,
     configure_output,
     connect,
@@ -73,9 +72,6 @@ from mfli.mfli_dual_harmonic import (
     connect_gaussmeter,
     connect_magnet,
     connect_temperature_controller,
-    null_follower_reference_via_1f,
-    phase_cal_s,
-    phase_cal_sr830,
     run_measurement,
     set_magnet_current,
     setup_mds,
@@ -85,6 +81,7 @@ from mfli.mfli_dual_harmonic import (
     shutdown_temperature_controller,
     sync_follower_oscillator,
 )
+from instruments.mfli_daq import disable_external_references, sync_oscillator_phases
 from instruments import sr830
 from instruments.data_dir import validate_directory
 from instruments.field_geometry import field_direction_summary_line, render_ascii_field_diagram
@@ -156,7 +153,7 @@ MFLI_DUAL_HARMONIC_SCHEMATIC = """\
     the columns (rxx_<h>f_*) — move the Signal Input to the R_xx leads by hand
 
   MDS cabling  (both units)
-    Leader Ref Out      ───BNC───▶ Follower Ref In
+    Leader Clock 10 MHz Out ──BNC──▶ Follower Clock 10 MHz In
     Leader Trigger Out 1 ──▶ fanned out to Trigger In 1 on BOTH units
 
   Lock-in = SR830 pair  (GPIB; no MDS)
@@ -212,10 +209,10 @@ DEFAULTS: dict = {
     "enable_temperature": True,
     "temperature_visa_resource": "TCPIP0::192.168.1.5::7020::SOCKET",
     "temperature_sensor_uids": "MB1.T1",
-    "enable_phase_cal": False,
-    "phase_cal_current_A": "",
-    "phase_cal_n_averages": "20",
-    "phase_cal_max_iterations": "5",
+    "measure_phi_I": False,
+    "leader_phi_I_deg": "0",
+    "follower_phi_I_deg": "0",
+    "phi_I_context": "",
     "hall_bar_length_um": "",
     "hall_bar_width_um": "",
     "hall_bar_thickness_nm": "",
@@ -243,17 +240,16 @@ NUMERIC_FIELDS: dict = {
     "ramp_delay_s": float,
     "gaussmeter_n_averages": int,
     "gaussmeter_read_delay_s": float,
-    "phase_cal_n_averages": int,
-    "phase_cal_max_iterations": int,
+    "leader_phi_I_deg": float,
+    "follower_phi_I_deg": float,
 }
 TEXT_FIELDS = ["leader_device", "follower_device", "daq_host", "device", "cooldown", "visa_resource",
                "gaussmeter_visa_resource", "temperature_visa_resource", "temperature_sensor_uids",
-               "data_dir"]
+               "data_dir", "phi_I_context"]
 # Free-text, blank-allowed: parsed to Optional[float] by hand in parse_state()
 # rather than going through NUMERIC_FIELDS' "blank is an error" casting.
 OPTIONAL_NUMERIC_FIELDS = [
     "temperature_setpoint_K",
-    "phase_cal_current_A",
     "hall_bar_length_um", "hall_bar_width_um", "hall_bar_thickness_nm",
     "field_theta_deg", "field_phi_deg",
 ]
@@ -277,6 +273,8 @@ def run_costs(state: dict, currents_A=None) -> RunCost:
     the present field). Also drives the run screen's progress bar, so the
     estimate and the live ETA cannot disagree. Every term mirrors a step of
     run_measurement() / RunScreen.do_run() -- see mfli_dual_harmonic.py."""
+    if state.get("measure_phi_I"):
+        return six.measure_phi_I_cost(state, PER_RUN_S + MDS_SYNC_S)
     n = len(currents_A) if currents_A is not None else 1
     rc = RunCost(n)
     rate, n_avg = state["sample_rate_Hz"], state["n_averages"]
@@ -292,13 +290,6 @@ def run_costs(state: dict, currents_A=None) -> RunCost:
     rc.at("connect + MDS", PER_RUN_S + MDS_SYNC_S, 0)
     magnet_cfg = MagnetConfig(ramp_step_A=state["ramp_step_A"], ramp_delay_s=state["ramp_delay_s"])
     i_now = 0.0                                   # the magnet starts at 0 A
-    if state["enable_phase_cal"]:
-        rc.at("phase cal", phase_cal_s(tc1, tc2, state["phase_cal_n_averages"],
-                                       state["phase_cal_max_iterations"], rate) if rate > 0 else 0.0, 0)
-        if currents_A is not None and state["phase_cal_current_A"] is not None:
-            typ, worst = magnet_move_s(abs(state["phase_cal_current_A"]), magnet_cfg)
-            rc.at("phase cal", typ + state["settling_time_s"], 0, worst_extra=worst - typ)
-            i_now = state["phase_cal_current_A"]
     if currents_A is not None:
         rc.each("field read", read_field_s(GaussmeterConfig(
             n_averages=state["gaussmeter_n_averages"], read_delay_s=state["gaussmeter_read_delay_s"])))
@@ -328,12 +319,8 @@ class MeasurementPlan:
     gauss_cfg: Optional[GaussmeterConfig]
     currents_A: Optional[np.ndarray]
     temp_cfg: Optional[TemperatureControllerConfig]
-    phase_cal_enabled: bool
-    phase_cal_current_A: Optional[float]
-    phase_cal_n_averages: int
-    phase_cal_max_iterations: int
     geometry_cfg: SampleGeometryConfig
-    run_ctx: RunContext
+    run_ctx: Optional[RunContext]         # None in the measure-phi_I mode (no data file)
     measure_rxx: bool                     # follower's R_xx naming toggle
     leader_measure_rxx: bool
     temperature_setpoint_K: Optional[float]
@@ -343,6 +330,8 @@ class MeasurementPlan:
     data_root: Path = _DEFAULT_DATA_DIR
     run_cost: Optional[RunCost] = None      # modelled seconds per point (progress bar + ETA)
     sr830_cfgs: Optional[tuple] = None      # (leader, follower) LockinConfig; None = the MFLIs
+    measure_phi_I: bool = False             # measure mode: autophase both at 1f, no data file
+    phi_I_result: Optional[list] = None     # set by the measure mode (PhaseCalibrationResult each)
 
     @property
     def total_points(self) -> int:
@@ -428,6 +417,7 @@ def _build_summary_mfli(state: dict) -> tuple[list[str], list[str], list[str]]:
     (_, leader_display), (_, follower_display) = six.state_naming(state)
     info.append(f"Lock-in: leader {leader_display} · follower {follower_display}")
     six.harmonic_checks(state, warnings, errors)
+    six.phase_summary(state, "MFLI output", info, warnings)
 
     acq_window_s = {leader_display: 0.0, follower_display: 0.0}
     for label, tc_key, order_key in ((leader_display, "time_constant_1f_s", "order_1f"),
@@ -522,32 +512,6 @@ def _build_summary_mfli(state: dict) -> tuple[list[str], list[str], list[str]]:
             info.append(f"Temperature: MercuryiTC {', '.join(uids)} — empty if unreachable")
     else:
         info.append("Temperature: off")
-
-    if state["enable_phase_cal"]:
-        if state["phase_cal_current_A"] is not None:
-            if not state["enable_sweep"]:
-                warnings.append(
-                    "Phase-cal current is set but field sweep is disabled — "
-                    "it will be ignored; calibration runs at the present field."
-                )
-            else:
-                rows = state.get("sweep_rows_parsed", [])
-                max_abs_I = max((max(abs(s), abs(e)) for s, e, _ in rows), default=0.0)
-                if abs(state["phase_cal_current_A"]) > state["current_limit_A"]:
-                    errors.append(
-                        f"Phase-cal current ({state['phase_cal_current_A']:g} A) exceeds "
-                        f"the current limit ({state['current_limit_A']:g} A)."
-                    )
-                elif abs(state["phase_cal_current_A"]) < max_abs_I:
-                    warnings.append(
-                        f"Phase-cal current ({state['phase_cal_current_A']:g} A) is smaller "
-                        f"than the sweep extremes (±{max_abs_I:g} A) — pick a point near "
-                        "saturation for a clean, well-behaved PHE/AHE null."
-                    )
-                info.append(f"Phase cal: at {state['phase_cal_current_A']:g} A — null "
-                            f"{leader_display} Y, then sweep")
-        else:
-            info.append(f"Phase cal: at present field — null {leader_display} Y")
 
     geom_fields = {
         "Hall bar length": state["hall_bar_length_um"],
@@ -740,14 +704,17 @@ def _build_plan_mfli(state: dict, data_root: Path) -> MeasurementPlan:
         differential=state["differential"], ac_coupling=state["ac_coupling"],
         input_range_V=state["input_range_1f_V"],
         sample_rate_Hz=state["sample_rate_Hz"], filter=filt_1f,
+        phase_deg=six.demod_phases(state)[0],
     )
     demod2_cfg = DemodConfig(
         device=state["follower_device"], demod_index=0, harmonic=state["follower_harmonic"],
         differential=state["differential"], ac_coupling=state["ac_coupling"],
         input_range_V=state["input_range_2f_V"],
         sample_rate_Hz=state["sample_rate_Hz"], filter=filt_2f,
+        phase_deg=six.demod_phases(state)[1],
     )
-    run_ctx = allocate_run(
+    measure = state["measure_phi_I"]       # no run number, magnet and temperature untouched
+    run_ctx = None if measure else allocate_run(
         data_root, state["sample"], state["device"], MEASUREMENT_TYPE,
         temperature_setpoint_K=state["temperature_setpoint_K"],
     )
@@ -755,13 +722,13 @@ def _build_plan_mfli(state: dict, data_root: Path) -> MeasurementPlan:
         settling_time_s=state["settling_time_s"],
         field_settle_tolerance_mT=state["field_settle_tolerance_mT"],
         n_averages=state["n_averages"],
-        output_file=str(run_ctx.raw_path),
+        output_file=str(run_ctx.raw_path) if run_ctx is not None else "",
     )
 
     magnet_cfg = None
     gauss_cfg = None
     currents_A = None
-    if state["enable_sweep"]:
+    if state["enable_sweep"] and not measure:
         magnet_cfg = MagnetConfig(
             visa_resource=state["visa_resource"],
             current_limit_A=state["current_limit_A"],
@@ -777,7 +744,7 @@ def _build_plan_mfli(state: dict, data_root: Path) -> MeasurementPlan:
         currents_A = build_segmented_sweep(state["sweep_rows_parsed"], bidirectional=True)
 
     temp_cfg = None
-    if state["enable_temperature"]:
+    if state["enable_temperature"] and not measure:
         uids = parse_sensor_uids(state["temperature_sensor_uids"])
         if uids:
             temp_cfg = TemperatureControllerConfig(
@@ -804,6 +771,7 @@ def _build_plan_mfli(state: dict, data_root: Path) -> MeasurementPlan:
         "demod1_order": state["order_1f"],
         "demod2_time_constant_s": state["time_constant_2f_s"],
         "demod2_order": state["order_2f"],
+        **six.phase_header(state),
         "n_averages": state["n_averages"],
         "settling_time_s": state["settling_time_s"],
     }
@@ -816,16 +784,12 @@ def _build_plan_mfli(state: dict, data_root: Path) -> MeasurementPlan:
         out_cfg=out_cfg, demod1_cfg=demod1_cfg, demod2_cfg=demod2_cfg,
         acq_cfg=acq_cfg, magnet_cfg=magnet_cfg, gauss_cfg=gauss_cfg, currents_A=currents_A,
         temp_cfg=temp_cfg,
-        phase_cal_enabled=state["enable_phase_cal"],
-        phase_cal_current_A=state["phase_cal_current_A"],
-        phase_cal_n_averages=state["phase_cal_n_averages"],
-        phase_cal_max_iterations=state["phase_cal_max_iterations"],
         geometry_cfg=geometry_cfg,
         run_ctx=run_ctx, data_root=data_root,
         measure_rxx=state["measure_rxx"], leader_measure_rxx=state["leader_measure_rxx"],
         temperature_setpoint_K=state["temperature_setpoint_K"],
         cooldown=state["cooldown"], header_extra=header_extra,
-        run_cost=run_costs(state, currents_A),
+        run_cost=run_costs(state, currents_A), measure_phi_I=measure,
     )
 
 def _ignore(*_args) -> None:
@@ -840,42 +804,76 @@ def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
              run_contexts: Optional[list] = None,
              run_extras: Optional[list] = None) -> None:
     """Record the plan's single run (plan.run_ctx, allocated at Start): connect
-    both MFLIs (MDS), optionally phase-calibrate, sweep, finalize the run the
-    instant it ends — even if connecting failed — then shut down, and only
-    then save the PNG. Pure — the TUI's RunScreen and the web page each pass
-    their own callbacks."""
+    both MFLIs (MDS, oscillator phases reset after the frequency writes),
+    sweep, finalize the run the instant it ends — even if connecting failed —
+    then shut down, and only then save the PNG. In the measure-phi_I mode:
+    connect and configure exactly the same way, autophase both lock-ins at 1f
+    (plan.phi_I_result), record nothing. Pure — the TUI's RunScreen and the
+    web page each pass their own callbacks."""
     run_contexts = [] if run_contexts is None else run_contexts
     run_extras = [] if run_extras is None else run_extras
-    ctx = plan.run_ctx
-    run_contexts.append(ctx)
-    run_extras.append(None)
-    daq = lockin = magnet = gaussmeter = temp_ctrl = None
+    daq = lockin = magnet = gaussmeter = temp_ctrl = mds = None
     recorded: list[dict] = []
-    (leader_prefix, leader_display), (follower_prefix, follower_display) = six.plan_naming(plan)
+    (leader_prefix, _), (follower_prefix, _) = six.plan_naming(plan)
 
-    def measure(point_cb, write_csv) -> None:
-        nonlocal daq, lockin, magnet, gaussmeter, temp_ctrl
+    def connect_lockins() -> None:
+        nonlocal daq, lockin, mds
         if plan.sr830_cfgs is not None:
             on_status("Connecting SR830 lock-ins …")
             lockin = sr830.SR830Read()
             lockin.open(plan.sr830_cfgs)
             on_status("Locking the follower SR830 to the leader's TTL OUT …")
             lockin.lock(SR830_LOCK_TIMEOUT_S, stop_event)
-            mds = None
-        else:
-            on_status("Connecting to LabOne data server …")
-            daq = connect(plan.daq_host, plan.daq_port)
-            connect_device(daq, plan.leader, interface="1GbE")
-            connect_device(daq, plan.follower, interface="1GbE")
+            return
+        on_status("Connecting to LabOne data server …")
+        daq = connect(plan.daq_host, plan.daq_port)
+        connect_device(daq, plan.leader, interface="1GbE")
+        connect_device(daq, plan.follower, interface="1GbE")
 
-            on_status("Synchronizing MDS …")
-            mds = setup_mds(daq, leader=plan.leader, follower=plan.follower)
+        on_status("Synchronizing MDS …")
+        mds = setup_mds(daq, leader=plan.leader, follower=plan.follower)
 
-            on_status("Configuring output & demodulators …")
-            configure_output(daq, plan.out_cfg)
-            sync_follower_oscillator(daq, plan.out_cfg, plan.follower)
-            configure_demodulator(daq, plan.demod1_cfg)
-            configure_demodulator(daq, plan.demod2_cfg)
+        on_status("Configuring output & demodulators …")
+        # A HARM6 run leaves both oscillators PLL-locked to the (now absent)
+        # 6221 marker — release them before setting the frequency.
+        disable_external_references(daq, plan.leader)
+        disable_external_references(daq, plan.follower)
+        configure_output(daq, plan.out_cfg)
+        sync_follower_oscillator(daq, plan.out_cfg, plan.follower)
+        configure_demodulator(daq, plan.demod1_cfg)
+        configure_demodulator(daq, plan.demod2_cfg)
+        on_status("Aligning both oscillators' phases (MDS phasesync) …")
+        sync_oscillator_phases(mds, daq)
+
+    def shutdown() -> None:
+        # Excitation output off first (immediate, no current into the DUT), so
+        # the magnet can start its ramp-down right away rather than waiting.
+        if daq is not None:
+            safe_shutdown("MFLI output", lambda: shutdown_output(daq, plan.out_cfg))
+        if lockin is not None:
+            safe_shutdown("SR830 lock-ins", lockin.close)
+        if magnet is not None:
+            safe_shutdown("magnet", lambda: shutdown_magnet(magnet, plan.magnet_cfg))
+        if gaussmeter is not None:
+            safe_shutdown("gaussmeter", lambda: shutdown_gaussmeter(gaussmeter))
+        if temp_ctrl is not None:
+            safe_shutdown("MercuryiTC", lambda: shutdown_temperature_controller(temp_ctrl))
+
+    if plan.measure_phi_I:
+        try:
+            connect_lockins()
+            six.run_measure_phi_I(plan, daq, lockin, on_status)
+        finally:
+            shutdown()
+        return
+
+    ctx = plan.run_ctx
+    run_contexts.append(ctx)
+    run_extras.append(None)
+
+    def measure(point_cb, write_csv) -> None:
+        nonlocal magnet, gaussmeter, temp_ctrl
+        connect_lockins()
 
         if plan.temp_cfg is not None:
             on_status("Connecting to MercuryiTC (temperature) …")
@@ -898,62 +896,13 @@ def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
         else:
             points = [MeasurementPoint()]
 
-        demod2_phase_null_1f_deg = None
-        if plan.phase_cal_enabled:
-            on_status(f"Phase calibration: nulling {leader_display} Y (leader demod phaseshift) …")
-            if magnet is not None and plan.phase_cal_current_A is not None:
-                log.info("Phase calibration: ramping magnet to %.4f A ...", plan.phase_cal_current_A)
-                set_magnet_current(magnet, plan.magnet_cfg, plan.phase_cal_current_A,
-                                   gaussmeter, plan.gauss_cfg,
-                                   plan.acq_cfg.field_settle_tolerance_mT, stop_event)
-                time.sleep(plan.acq_cfg.settling_time_s)
-            if lockin is not None:
-                demod2_phase_null_1f_deg = phase_cal_sr830(
-                    lockin, plan.phase_cal_n_averages, follower_display)
-            else:
-                result = auto_null_phase(
-                    daq, plan.demod1_cfg,
-                    n_averages=plan.phase_cal_n_averages,
-                    max_iterations=plan.phase_cal_max_iterations,
-                )
-                if not result.converged:
-                    log.warning(
-                        "Phase null did not fully converge after %d iteration(s) "
-                        "(|Y|/R=%.2e) — check cabling/contacts before trusting the %s data.",
-                        result.iterations, result.residual_ratio, follower_display,
-                    )
-                # 2f is measured on a different physical device (the follower) with its
-                # own delay chain, so nulling the leader's 1f phase says nothing about
-                # which 2f channel is physically correct — that must be verified
-                # empirically. Both X2f/Y2f are already saved per point in the CSV;
-                # this snapshot just gives an immediate look at the calibration point.
-                d2 = acquire_averaged(daq, plan.demod2_cfg, plan.phase_cal_n_averages)
-                log.info(
-                    "%s snapshot at calibration point: X=%.4e V  Y=%.4e V  R=%.4e V — "
-                    "don't assume this matches 1f's X/Y convention (V_2w ~ cos, not sin); "
-                    "check which channel carries the structured field dependence in the "
-                    "recorded sweep before trusting either one.",
-                    follower_display, d2["x_mean"], d2["y_mean"], d2["r_mean"],
-                )
-                # Anchor the follower's 2f reference to the current: null the
-                # follower at 1f against the same (split) V_xy, record the delay
-                # angle as demod2_phase_null_1f_deg so analysis can rotate the
-                # recorded 2f X/Y into the current frame.
-                on_status(f"Phase calibration: anchoring follower {follower_display} reference (1f null) …")
-                demod2_phase_null_1f_deg = null_follower_reference_via_1f(
-                    daq, plan.demod2_cfg,
-                    n_averages=plan.phase_cal_n_averages,
-                    max_iterations=plan.phase_cal_max_iterations,
-                )
-
         on_status("Running measurement …")
         run_measurement(
             daq, plan.out_cfg, plan.demod1_cfg, plan.demod2_cfg, plan.acq_cfg, points,
             stop_event=stop_event, on_point=point_cb,
             gaussmeter=gaussmeter, gauss_cfg=plan.gauss_cfg,
             temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg,
-            geometry_cfg=plan.geometry_cfg,
-            demod2_phase_null_1f_deg=demod2_phase_null_1f_deg, mds=mds,
+            geometry_cfg=plan.geometry_cfg, mds=mds,
             write_csv=write_csv, demod1_label=leader_prefix, demod2_label=follower_prefix,
             lockin=lockin,
         )
@@ -964,18 +913,7 @@ def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
                    measure, stop_event,
                    on_point=lambda record: (recorded.append(record), on_point(record)))
     finally:
-        # Excitation output off first (immediate, no current into the DUT), so
-        # the magnet can start its ramp-down right away rather than waiting.
-        if daq is not None:
-            safe_shutdown("MFLI output", lambda: shutdown_output(daq, plan.out_cfg))
-        if lockin is not None:
-            safe_shutdown("SR830 lock-ins", lockin.close)
-        if magnet is not None:
-            safe_shutdown("magnet", lambda: shutdown_magnet(magnet, plan.magnet_cfg))
-        if gaussmeter is not None:
-            safe_shutdown("gaussmeter", lambda: shutdown_gaussmeter(gaussmeter))
-        if temp_ctrl is not None:
-            safe_shutdown("MercuryiTC", lambda: shutdown_temperature_controller(temp_ctrl))
+        shutdown()
         if on_run_finished is not None:
             try:
                 on_run_finished(ctx, recorded)
@@ -1058,12 +996,14 @@ def sr830_cfgs(state: dict) -> tuple:
         state["sr830_a_visa"], harmonic=int(state["leader_harmonic"]),
         time_constant_s=state["time_constant_1f_s"], order=int(state["order_1f"]),
         sinc_filter=state["sinc_filter_1f"], sensitivity_V=state["sensitivity_1f_V"],
+        phase_deg=six.demod_phases(state)[0],
         reference="internal" if own_source else "external",
         sine_amplitude_V=state["amplitude_V"] / math.sqrt(2) if own_source else 0.004, **common)
     follower = sr830.config_from_form(
         state["sr830_b_visa"], harmonic=int(state["follower_harmonic"]),
         time_constant_s=state["time_constant_2f_s"], order=int(state["order_2f"]),
-        sinc_filter=state["sinc_filter_2f"], sensitivity_V=state["sensitivity_2f_V"], **common)
+        sinc_filter=state["sinc_filter_2f"], sensitivity_V=state["sensitivity_2f_V"],
+        phase_deg=six.demod_phases(state)[1], **common)
     return leader, follower
 
 
@@ -1091,9 +1031,8 @@ def _sr830_checks(state: dict, info: list[str], warnings: list[str], errors: lis
             info.append(f"{role} SR830: sync filter has no effect above 200 Hz")
     if state["sample_rate_Hz"] > sr830.SAMPLE_RATES_HZ[-1]:
         info.append(f"SR830 buffer rate capped at {sr830.SAMPLE_RATES_HZ[-1]:g} Sa/s")
-    for key in ("n_averages", "phase_cal_n_averages"):
-        if state[key] > sr830.BUFFER_POINTS:
-            errors.append(f"'{key}' exceeds the SR830 buffer ({sr830.BUFFER_POINTS} points).")
+    if state["n_averages"] > sr830.BUFFER_POINTS:
+        errors.append(f"'n_averages' exceeds the SR830 buffer ({sr830.BUFFER_POINTS} points).")
     if not _uses_6221(state) and state["series_R_ohm"] > 0:
         warnings.append("SR830 SINE OUT can't be switched off — after the run it stays at "
                         f"4 mV rms (≈ {format_si(0.004 / state['series_R_ohm'], 'A')} rms "
@@ -1290,6 +1229,8 @@ class MFLIDualHarmonicApp(MeasurementApp):
                         field("ac_compliance_V", "6221 voltage compliance (V)",
                               DEFAULTS["ac_compliance_V"],
                               validators=[Number(minimum=0.1, failure_description="must be > 0")]),
+                        field("ac_offset_A", "DC offset (A)", DEFAULTS["ac_offset_A"],
+                              hint=six.OFFSET_HINT),
                         id="mode_6221_excitation",
                     )
                     for role, harmonic_id, rxx_id in (("Leader", "leader_harmonic", "leader_measure_rxx"),
@@ -1304,6 +1245,18 @@ class MFLIDualHarmonicApp(MeasurementApp):
                                    "cable to the R_xx leads by hand.", classes="hint"),
                         )
                     yield card(
+                        "Reference phase (φ_I)",
+                        switch_field("measure_phi_I", "Measure φ_I (c–e wired to both lock-in inputs)",
+                                     DEFAULTS["measure_phi_I"]),
+                        field("leader_phi_I_deg", "Leader φ_I — current phase at its input, 1f (°)",
+                              DEFAULTS["leader_phi_I_deg"]),
+                        field("follower_phi_I_deg", "Follower φ_I — current phase at its input, 1f (°)",
+                              DEFAULTS["follower_phi_I_deg"]),
+                        field("phi_I_context", "φ_I measured with", DEFAULTS["phi_I_context"],
+                              kind="text", valid_empty=True, hint="Set by Measure φ_I."),
+                        Static(six.PHI_I_HINT, classes="hint"),
+                    )
+                    yield card(
                         "Magnet & field sweep",
                         switch_field("enable_sweep", "Sweep magnetic field (Kepco magnet)",
                                      DEFAULTS["enable_sweep"]),
@@ -1314,19 +1267,6 @@ class MFLIDualHarmonicApp(MeasurementApp):
                         switch_field("enable_temperature",
                                      "Log temperature (Oxford Instruments MercuryiTC)",
                                      DEFAULTS["enable_temperature"]),
-                    )
-                    yield card(
-                        "Phase calibration",
-                        switch_field(
-                            "enable_phase_cal",
-                            "Auto-null 1f phase before run (leader demod phaseshift)",
-                            DEFAULTS["enable_phase_cal"],
-                        ),
-                        field(
-                            "phase_cal_current_A", "Calibration magnet current (A)",
-                            DEFAULTS["phase_cal_current_A"], kind="text", valid_empty=True,
-                            hint="Blank = present field. Else near saturation; needs the field sweep on.",
-                        ),
                     )
                     yield card(
                         "Sample geometry & field direction (optional)",
@@ -1527,26 +1467,6 @@ class MFLIDualHarmonicApp(MeasurementApp):
                                   hint="1-2 UIDs, e.g. MB1.T1, DB5.T1."),
                             muted=True,
                         )
-                        yield card(
-                            "Phase-cal advanced",
-                            field("phase_cal_n_averages", "Averages per phase read",
-                                  DEFAULTS["phase_cal_n_averages"], kind="integer",
-                                  validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
-                            field("phase_cal_max_iterations", "Max null iterations",
-                                  DEFAULTS["phase_cal_max_iterations"], kind="integer",
-                                  validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
-                            Static(
-                                "Nulls the leader's 1f Y quadrature by adjusting its demod "
-                                "phaseshift node — the resistive PHE/AHE response at 1f must be "
-                                "exactly in phase with the drive current, so any measured Y there is "
-                                "pure instrumental delay. X and Y at 2f are both already recorded per "
-                                "point in the CSV — check which one actually tracks field there before "
-                                "trusting it (V₂ω ∝ cos, not sin, so X₁f being right says nothing "
-                                "about X₂f).",
-                                classes="hint",
-                            ),
-                            muted=True,
-                        )
 
             with Vertical(id="sidebar"):
                 yield Static("Summary", classes="sidebar-title")
@@ -1630,6 +1550,21 @@ class MFLIDualHarmonicApp(MeasurementApp):
 
     def run_screen(self, plan):
         return engine(plan).RunScreen(plan)
+
+    def after_run(self, plan) -> None:
+        """Measure-phi_I mode: copy each converged phi_I into the form, stamp
+        what it was measured with, turn the mode off, and save."""
+        if not plan.phi_I_result:
+            return
+        state, _ = self.parse_state()
+        for fid, r in zip(("leader_phi_I_deg", "follower_phi_I_deg"), plan.phi_I_result):
+            if r.converged:
+                self.query_one(f"#{fid}", Input).value = f"{r.phase_after_deg:.3f}"
+        source = "6221" if _uses_6221(state) else "MFLI output"
+        self.query_one("#phi_I_context", Input).value = six.phi_I_context(state, source)
+        self.query_one("#measure_phi_I", Switch).value = False
+        self._save_settings(self.collect_raw())
+        self.refresh_summary()
 
 
 def main() -> None:

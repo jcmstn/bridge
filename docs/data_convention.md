@@ -79,7 +79,7 @@ Example: `A_0001_HB3_NOISE_T293K_20260811T143022.csv`
 | `HARM`  | Dual-harmonic lock-in (`mfli_dual_harmonic`)  |
 | `HARM6` | Dual-harmonic lock-in, 6221-sourced AC current (`mfli_dual_harmonic_6221`) |
 | `DIFFR` | Differential resistance vs. bias (`mfli_diff_resistance_vs_bias`) |
-| `PHCAL` | Phase calibration (`mfli_phase_calibration`)  |
+| `PHCAL` | Phase calibration (`mfli_phase_calibration`, retired 2026-10 — superseded by the dual-harmonic form's Measure φ_I; kept so old files resolve) |
 | `NOISE` | Noise-floor estimate, 6221-sourced AC current (`mfli_noise_spectrum`) |
 | `RT`    | Resistance vs. temperature — the free-drift ±I log (`dc/dc_rt_log`) and the setpoint template (`examples/custom_program.py`) |
 | `SOTPS` | SOT pulsed switching — 4200A PMU write pulse + delayed 6221/2182 R_xy read (`sot/sot_pulsed_switching`) |

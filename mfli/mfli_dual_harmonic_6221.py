@@ -7,7 +7,7 @@ Created: 2026-09-14
 
 Same measurement as mfli_dual_harmonic.py (leader reads 1f, follower reads
 2f, MDS-synced, optional Kepco field sweep + Lake Shore 475 + MercuryiTC +
-phase calibration + sample geometry) — the only thing that changes is WHO
+phi_I reference phase + sample geometry) — the only thing that changes is WHO
 sources the AC excitation current:
 
     mfli_dual_harmonic.py:       MFLI Signal Output → [R_series] → sample
@@ -42,7 +42,7 @@ Wiring
       BNC by hand between the R_xy and R_xx probe pairs to match.
 
     MDS cabling (both units, same as mfli_dual_harmonic.py):
-      Leader Ref Out       ───BNC───▶ Follower Ref In
+      Leader Clock 10 MHz Out ──BNC──▶ Follower Clock 10 MHz In
       Leader Trigger Out 1  ──▶ fanned out to Trigger In 1 on BOTH units
 
     Kepco BOP-GL ──GPIB──▶ electromagnet ;  Lake Shore 475 ──GPIB──▶ Gaussmeter
@@ -73,9 +73,9 @@ rather than an obviously wrong number.
 The fix used here: lock **both** MFLIs' oscillators to the same external
 6221 marker (configure_external_reference() runs for leader and follower
 alike). Both are then anchored to the actual drive, and the only remaining
-leader/follower difference is a static cable/electronics delay — exactly
-what null_follower_reference_via_1f() already measures and records as
-demod2_phase_null_1f_deg. MDS is still configured and still checked
+leader/follower difference is a static cable/electronics delay — which
+each lock-in's fixed reference phase absorbs (see "Reference phase" in
+mfli_dual_harmonic.py's module docstring). MDS is still configured and still checked
 per-point (mds_synced) for a common sample clock and start instant; it is
 simply no longer what keeps the two demodulators frequency-coherent.
 
@@ -115,7 +115,7 @@ from dc.dc_sweep_utils import safe_shutdown
 from instruments.keithley6221 import ACSourceConfig, connect_ac_source, shutdown_ac_source
 from instruments.mfli_daq import (
     connect, connect_device, setup_mds, check_mds_status,
-    acquire_averaged, acquire_averaged_pair,
+    acquire_averaged_pair,
     ExtRefConfig, configure_external_reference, wait_for_reference_lock,
     check_reference_locked,
 )
@@ -145,11 +145,9 @@ from mfli.mfli_dual_harmonic import (
     FilterConfig,
     MeasurementPoint,
     SampleGeometryConfig,
-    auto_null_phase,
     bidirectional_current_sweep,
     configure_demodulator,
     get_demod_phase_deg,
-    null_follower_reference_via_1f,
 )
 from instruments import sr830
 from instruments.run_time import GPIB_TXN_S, LOCK_TYP_S
@@ -180,6 +178,10 @@ def _check_ac_safety(ac_cfg: ACSourceConfig) -> None:
             f"amplitude_A must be in (0, {_AC_CURRENT_CEILING_A} A]; got "
             f"{ac_cfg.amplitude_A} A. A harmonic-Hall excitation needs "
             "microamps-to-milliamps — check for a mistyped exponent.")
+    if ac_cfg.amplitude_A + abs(ac_cfg.offset_A) > _AC_CURRENT_CEILING_A:
+        raise ValueError(
+            f"amplitude_A + |offset_A| must be <= {_AC_CURRENT_CEILING_A} A; got "
+            f"{ac_cfg.amplitude_A} + {abs(ac_cfg.offset_A)} A.")
     if not 0 < ac_cfg.compliance_V <= _AC_COMPLIANCE_CEILING_V:
         raise ValueError(
             f"compliance_V must be in (0, {_AC_COMPLIANCE_CEILING_V} V]; got "
@@ -231,7 +233,6 @@ def build_run_metadata(
     demod1_cfg: DemodConfig,
     demod2_cfg: DemodConfig,
     geometry_cfg: Optional[SampleGeometryConfig] = None,
-    demod2_phase_null_1f_deg: Optional[float] = None,
     measure_rxx: bool = False,
     lockin: Optional[sr830.SR830Read] = None,
 ) -> dict:
@@ -268,7 +269,6 @@ def build_run_metadata(
         convention = sr830.DEMOD_OUTPUT_CONVENTION
     return {
         "measure_rxx": measure_rxx,
-        "demod2_phase_null_1f_deg": demod2_phase_null_1f_deg,
         "excitation_frequency_Hz":       excitation_frequency_Hz,
         "excitation_current_A_peak":     I_peak_A,
         "excitation_current_A_rms":      I_peak_A / math.sqrt(2.0),
@@ -311,7 +311,6 @@ def run_measurement(
     temp_ctrl: Optional[MercuryITC] = None,
     temp_cfg:  Optional[TemperatureControllerConfig] = None,
     geometry_cfg: Optional[SampleGeometryConfig] = None,
-    demod2_phase_null_1f_deg: Optional[float] = None,
     mds=None,
     write_csv: Optional[Callable[[List[dict]], None]] = None,
     demod2_label: str = "2f",
@@ -412,7 +411,7 @@ def run_measurement(
 
         # ── 4d. Run metadata (excitation, filters, phases, geometry) ────────
         run_meta = build_run_metadata(daq, ac_cfg, leader_extref_cfg, demod1_cfg,
-                                      demod2_cfg, geometry_cfg, demod2_phase_null_1f_deg,
+                                      demod2_cfg, geometry_cfg,
                                       measure_rxx=measure_rxx, lockin=lockin)
 
         # ── 5. Build record ────────────────────────────────────────────────

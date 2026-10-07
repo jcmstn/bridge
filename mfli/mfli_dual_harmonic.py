@@ -13,7 +13,8 @@ Measures two differential voltage signals:
     MFLI_2 Signal Input 1 → Demodulator at 2f  (2nd harmonic)
 
 Both MFLIs are synchronized via the Multi-Device Synchronization (MDS)
-module so their oscillators share the same reference phase.
+module; their oscillator phases are reset together after every frequency
+write (see "Reference phase" below).
 
 IMPORTANT — oscillator frequency is NOT shared automatically by MDS:
 MDS synchronizes the sample clock and start trigger across devices, not
@@ -43,14 +44,69 @@ Run metadata (see build_run_metadata()):
   quantity: excitation frequency and current (both peak and RMS, with the
   MFLI's peak-amplitude / RMS-demodulator conventions spelled out), each
   demodulator's filter time-constant/order and its reference phase as
-  actually programmed (read live, since auto_null_phase() or
-  set_excitation_frequency() can change it mid-run), plus Hall bar
+  actually programmed (read live — see "Reference phase" below), plus Hall bar
   dimensions and the external-field angle from the out-of-plane axis if
   supplied via SampleGeometryConfig (optional — None leaves those columns
   blank rather than blocking a run; the TUI exposes them as optional
   fields). set_excitation_frequency() lets a MeasurementPoint.set_action
   drive a frequency sweep, e.g. to repeat the sweep at ≥3 frequencies and
   separate instrumental phase from thermal quadrature.
+
+Reference phase (HARM, HARM6, MFLI or SR830 pair):
+  Phases are referenced to the CURRENT, never to the signal being
+  measured. With I = I0 sin wt and R(I) = R0 + R'I,
+      V = R0 I0 sin wt + (R'I0^2/2)(1 - cos 2wt)
+  so 1f is in phase with the current and every 2f term (torque, Nernst,
+  heating) lands at -cos 2wt: twice the current phase + 180 deg, one
+  fixed 2f quadrature.
+
+  What the operator enters is phi_I: the phase of the current at each
+  lock-in input, measured at 1f on a purely resistive voltage. The form's
+  "Measure phi_I" mode does that — c-e (V+ on the I+ side) wired to BOTH
+  lock-in inputs, same source / MDS / ExtRef setup as a real run, both
+  demods at harmonic 1, auto_null_phase() on each (measure_phi_I()) — and
+  fills the two phi_I fields. Never autophase on the Hall pair: its
+  dominant 1f signal is the misalignment offset, whose sign is arbitrary.
+  Re-measure after a cooldown, rewiring, source change or frequency
+  change (the form warns on the last two).
+
+  Each demod's phase is then set to harmonic x phi_I
+  (harmonic_phase_deg()): 1f -> phi_I, 2f -> 2 phi_I. Why 2x: the ZI node
+  doc says demods/n/phaseshift "Applies phase shift to the reference input
+  of the demodulator" and demods/n/harmonic "Multiplies the selected
+  oscillator's frequency", i.e. the shift is applied to the reference at
+  the demodulation (harmonic) frequency, where a 1f current phase phi_I
+  is 2 phi_I. The SR830 computes its PSD reference at N x f the same way.
+  With that, 1f X is the resistive Hall signal with a physical sign, and
+  the 2f current-squared terms sit on Y2 (-Y2 for R' > 0, sine-referenced
+  demod — consistent with the ChipL runs). Bench check, once: with a
+  visible 2f signal, add +30 deg to the follower's demod phase in LabOne;
+  Theta2 must move by -30 deg. If it moves -60 deg, set
+  PHASE_APPLIED_AT_HARMONIC = False.
+
+  Three instrument details the phases depend on (MFLI manual, MDS tab and
+  Lock-in tab):
+    - MDS aligns clocks and timestamps; oscillator PHASES are aligned only
+      by the MDS module's phasesync, and "must be manually adjusted each
+      time that the frequencies are changed". run_plan() calls
+      sync_oscillator_phases() after the last frequency write (HARM). In
+      HARM6 both oscillators are PLL-locked to the 6221 marker instead,
+      with the PLL demod's phase pinned to 0.
+    - A demod's phase "is added both, to the reference channel and the
+      output of the demodulator". configure_output() therefore drives the
+      sine from demod 1 (harmonic 1, phase 0), never from demod 0, so the
+      leader's phase setting rotates only its reference, not the current.
+    - Both are re-applied on every run, so phi_I measured once holds.
+
+  Sign of the 2f quadrature, once (HARM6): a 6221 DC offset I_dc (form
+  "DC offset") shifts 1f by 2R'I_dc in phase with the current. At B || x,
+  runs at +I_dc and -I_dc give 2R' with the sign fixed by phi_I; the 2f
+  quadrature must give the same R' (2f / 1f-shift = I0/(4 I_dc)).
+
+  The header records phi_I_leader_deg, phi_I_follower_deg, the demod
+  phases written (demod1/2_ref_phase_deg) and phase_policy; every row
+  re-reads the demod phases live. Copy them into sample.yaml
+  (conventions.lockin_phase_policy).
 
 Requirements:
     pip install zhinst-core zhinst-utils numpy pandas pyvisa
@@ -68,7 +124,6 @@ from pathlib import Path
 from typing import Optional, Callable, List
 
 import zhinst.core as zi
-import zhinst.utils as ziutils
 
 from instruments.mfli_daq import (
     connect,
@@ -76,14 +131,12 @@ from instruments.mfli_daq import (
     setup_mds,
     check_mds_status,
     sync_follower_oscillator,
+    sync_oscillator_phases,
     acquire_averaged,
     acquire_averaged_pair,
-    acquire_s,
 )
 from instruments import sr830
-from instruments.run_time import GPIB_TXN_S, PHASE_NULL_ITER_TYP
 from instruments.kepco_magnet import (
-    KepkoBOPGL,
     MagnetConfig,
     connect_magnet,
     set_magnet_current,
@@ -167,6 +220,10 @@ class DemodConfig:
     sample_rate_Hz: float = 857.0      # Demodulator output rate  [Sa/s]
                                        #   must be > 2× highest signal bandwidth
     filter: FilterConfig = field(default_factory=FilterConfig)
+    phase_deg: Optional[float] = None  # Reference phaseshift [deg] written by
+                                       #   configure_demodulator(); None = leave
+                                       #   the device's value (see "Reference
+                                       #   phase" in the module docstring)
 
 
 @dataclass
@@ -225,31 +282,48 @@ class PhaseCalibrationResult:
 # (this program's pure-AC excitation topology) and set_excitation_frequency
 # stay local since each MFLI program's output topology differs.
 
+# The demod whose output mixer channel generates the drive sine. A demod's
+# phase "is added both, to the reference channel and the output of the
+# demodulator" (MFLI manual, Lock-in tab), and zhinst.utils' default mixer
+# channel on an MD unit is 0 = demod 0 = the leader's READING demod — its
+# phase setting would rotate the current along with the reference. Demod 1
+# is also the only output channel a non-MD MFLI exposes.
+_OUTPUT_DEMOD = 1
+
+
 def configure_output(daq: zi.ziDAQServer, cfg: OutputConfig) -> None:
-    """Set up the voltage output that drives the current through the sample."""
-    d = cfg.device
-
-    # The sigouts/N/{amplitudes,enables} node index is a hardware "mixer
-    # channel", NOT the demodulator index — it depends on device type and
-    # installed options (e.g. a base MFLI without the MD/MF option exposes
-    # mixer channel 1 for output 0, not 0). Ask zhinst.utils to resolve it
-    # rather than hardcoding it, or you'll get a NotFoundError like
-    # "Could not find any node that matches path .../amplitudes/0".
+    """Set up the voltage output that drives the current through the sample:
+    the sine comes from demod _OUTPUT_DEMOD pinned to harmonic 1 / phase 0,
+    so the current's phase follows the oscillator and nothing else. On an MD
+    unit every other mixer channel is switched off (a previous run may have
+    left channel 0 enabled, which would add a second sine)."""
+    d, m = cfg.device, _OUTPUT_DEMOD
     discovery = zi.ziDiscovery()
-    props = discovery.get(discovery.find(d))
-    mixer_c = ziutils.default_output_mixer_channel(props, cfg.out_ch)
+    md = "MD" in discovery.get(discovery.find(d))["options"]
 
-    daq.setDouble(f"/{d}/oscs/{cfg.osc_index}/freq",               cfg.frequency_Hz)
-    daq.setDouble(f"/{d}/sigouts/{cfg.out_ch}/amplitudes/{mixer_c}", cfg.amplitude_V)
-    daq.setDouble(f"/{d}/sigouts/{cfg.out_ch}/range",              max(0.01, cfg.amplitude_V * 2))
-    daq.setInt(   f"/{d}/sigouts/{cfg.out_ch}/on",                 1)
-    daq.setInt(   f"/{d}/sigouts/{cfg.out_ch}/enables/{mixer_c}",  1)
-    daq.setInt(   f"/{d}/sigouts/{cfg.out_ch}/imp50",              0)   # High-Z output
+    if md:   # a non-MD MFLI has one oscillator, so oscselect is fixed
+        daq.setInt(f"/{d}/demods/{m}/oscselect", cfg.osc_index)
+    daq.setInt(   f"/{d}/demods/{m}/harmonic",                1)
+    daq.setDouble(f"/{d}/demods/{m}/phaseshift",              0.0)
+    daq.setDouble(f"/{d}/oscs/{cfg.osc_index}/freq",          cfg.frequency_Hz)
+    if md:
+        for k in (0, 2, 3):
+            daq.setInt(f"/{d}/sigouts/{cfg.out_ch}/enables/{k}", 0)
+    daq.setDouble(f"/{d}/sigouts/{cfg.out_ch}/amplitudes/{m}", cfg.amplitude_V)
+    daq.setDouble(f"/{d}/sigouts/{cfg.out_ch}/range",         max(0.01, cfg.amplitude_V * 2))
+    daq.setInt(   f"/{d}/sigouts/{cfg.out_ch}/on",            1)
+    daq.setInt(   f"/{d}/sigouts/{cfg.out_ch}/enables/{m}",   1)
+    daq.setInt(   f"/{d}/sigouts/{cfg.out_ch}/imp50",         0)   # High-Z output
     daq.sync()
+    harmonic = daq.getInt(f"/{d}/demods/{m}/harmonic")
+    phase = daq.getDouble(f"/{d}/demods/{m}/phaseshift")
+    if harmonic != 1 or abs(phase) > 1e-6:
+        raise RuntimeError(f"{d}: output demod {m} reads harmonic={harmonic}, phase={phase:g}° "
+                           "after writing 1 / 0° — the drive current's phase would be wrong.")
     I_nA = cfg.amplitude_V / cfg.series_R_ohm * 1e9
     log.info(
-        "Output: %s  f=%.4f Hz  Vpp=%.4f V  R=%.2e Ω  → I≈%.3f nA  (mixer_c=%d)",
-        d, cfg.frequency_Hz, cfg.amplitude_V, cfg.series_R_ohm, I_nA, mixer_c,
+        "Output: %s  f=%.4f Hz  Vpk=%.4f V  R=%.2e Ω  → I≈%.3f nA  (demod %d, harmonic 1, phase 0°)",
+        d, cfg.frequency_Hz, cfg.amplitude_V, cfg.series_R_ohm, I_nA, m,
     )
 
 
@@ -259,6 +333,7 @@ def set_excitation_frequency(
     frequency_Hz: float,
     follower: Optional[str] = None,
     follower_osc_index: int = 0,
+    mds=None,
 ) -> None:
     """
     Change the excitation frequency mid-run and mutate `out_cfg` in place
@@ -270,13 +345,20 @@ def set_excitation_frequency(
 
     If `follower` is given, re-syncs its oscillator too — see
     sync_follower_oscillator()'s docstring for why that's required on
-    every frequency change, not just once at startup.
+    every frequency change, not just once at startup. Pass the run's `mds`
+    handle to re-align both oscillators' phases afterwards (required for
+    the follower's fixed phase to stay referenced to the current). phi_I
+    itself is frequency dependent, so a frequency sweep records X/Y in a
+    frame rotated by the delay difference — re-measure phi_I per frequency
+    if that matters.
     """
     out_cfg.frequency_Hz = frequency_Hz
     daq.setDouble(f"/{out_cfg.device}/oscs/{out_cfg.osc_index}/freq", frequency_Hz)
     daq.sync()
     if follower is not None:
         sync_follower_oscillator(daq, out_cfg, follower, follower_osc_index)
+    if mds is not None:
+        sync_oscillator_phases(mds, daq)
     log.info("Excitation frequency set to %.4f Hz", frequency_Hz)
 
 
@@ -296,6 +378,8 @@ def configure_demodulator(daq: zi.ziDAQServer, cfg: DemodConfig) -> None:
     # Oscillator / harmonic
     daq.setInt(   f"/{d}/demods/{di}/oscselect",   cfg.osc_index)
     daq.setInt(   f"/{d}/demods/{di}/harmonic",    cfg.harmonic)
+    if cfg.phase_deg is not None:
+        daq.setDouble(f"/{d}/demods/{di}/phaseshift", cfg.phase_deg)
 
     # Filter
     daq.setDouble(f"/{d}/demods/{di}/timeconstant", flt.time_constant_s)
@@ -369,7 +453,6 @@ def build_run_metadata(
     demod1_cfg: DemodConfig,
     demod2_cfg: DemodConfig,
     geometry_cfg: Optional[SampleGeometryConfig] = None,
-    demod2_phase_null_1f_deg: Optional[float] = None,
     lockin: Optional[sr830.SR830Read] = None,
 ) -> dict:
     """
@@ -389,18 +472,13 @@ def build_run_metadata(
     frequency, not peak — see demod_output_convention below.
 
     Reference phases are read live from the device (not copied from
-    DemodConfig) because auto_null_phase() can change them after
-    configure_demodulator() ran — this should reflect what was actually
-    programmed at acquisition time, not what was requested initially.
+    DemodConfig) — with DemodConfig.phase_deg None the device keeps
+    whatever LabOne had, so this is the only record of what was actually
+    programmed at acquisition time.
 
     `geometry_cfg` (Hall bar dimensions, external-field angle from the
     out-of-plane axis) is never available from an instrument — pass None
     (the default) to leave those columns blank rather than blocking a run.
-
-    `demod2_phase_null_1f_deg` (from null_follower_reference_via_1f(), run
-    once at phase-calibration time) is the follower path's delay angle at
-    f — recorded so analysis can rotate the 2f X/Y into the current frame
-    (by -2× this). Left blank when no follower calibration was done.
 
     `lockin` (an SR830 pair, see run_measurement()) swaps the phase / filter
     reads and the output convention for the SR830's own; None = the MFLIs.
@@ -418,7 +496,6 @@ def build_run_metadata(
         phase1, phase2 = lockin.phase_deg(0), lockin.phase_deg(1)
         convention = sr830.DEMOD_OUTPUT_CONVENTION
     return {
-        "demod2_phase_null_1f_deg": demod2_phase_null_1f_deg,
         "excitation_frequency_Hz":       out_cfg.frequency_Hz,
         "excitation_current_A_peak":     I_peak_A,
         "excitation_current_A_rms":      I_peak_A / math.sqrt(2.0),
@@ -453,21 +530,13 @@ def auto_null_phase(
     Null the Y quadrature of `cfg`'s demodulator by adjusting its reference
     phaseshift node — equivalent to LabOne's "Auto" phase button.
 
-    Why this is the right calibration target: at 1st harmonic, a Hall bar's
-    transverse voltage is dominated by the planar/anomalous/ordinary Hall
-    effect, a purely resistive response (V ∝ R·I(t)) that must be exactly
-    in phase with the drive current. Any measured Y at 1f is therefore
-    instrumental delay — cabling, contact impedance, source/ADC — not
-    physics. Calibrating against the device's own signal (rather than a
-    separate standard resistor) captures that real, in-situ delay. Run
-    this with the sample actually driven, ideally at a saturated field
-    point where the PHE/AHE signal is large and well-behaved.
-
-    Note this only calibrates `cfg`'s own device/demod. In a dual-MFLI
-    setup where 1f and 2f are measured on different physical devices, this
-    does NOT establish the 2f device's phase — that needs its own check
-    (see the module docstring / TUI hint on verifying which of X2f/Y2f
-    actually carries the field-dependent signal).
+    Only meaningful at harmonic 1 on a purely resistive voltage of known
+    polarity (c-e, V+ on the I+ side, or a series resistor): that signal is
+    exactly in phase with the drive current, so the nulled phase is phi_I —
+    see measure_phi_I(). Never run it on the Hall pair: its dominant 1f
+    signal is the misalignment offset, whose sign is arbitrary, so the null
+    can land 180° off. auto_null_phase() drives atan2(Y, X) to 0, so X ends
+    positive. It only calibrates `cfg`'s own device/demod.
 
     Iterates because a single large correction can interact with the
     filter's own delay/settling; each round re-measures before deciding
@@ -535,150 +604,67 @@ def auto_null_phase(
     return result
 
 
-def null_follower_reference_via_1f(
-    daq: zi.ziDAQServer,
-    demod2_cfg: DemodConfig,
-    n_averages: int = 20,
-    max_iterations: int = 5,
-    tol_deg: float = 0.02,
-    settle_time_s: Optional[float] = None,
-) -> float:
-    """
-    Measure the follower signal chain's own delay angle at the excitation
-    frequency f, so a harmonic-Hall analysis can put the recorded 2f X/Y
-    into the drive current's reference frame.
-
-    MDS aligns the two devices' sample clocks and start trigger but leaves
-    each demodulator's reference phase alone, and auto_null_phase() only
-    ever touches the leader's 1f demod — so 2f_X_V / 2f_Y_V are otherwise
-    recorded in an arbitrary rotated frame and the damping-like (in-phase)
-    and thermal (quadrature) 2ω terms can't be separated.
-
-    This switches the follower demod to the 1st harmonic, nulls its Y
-    against the same (split) transverse voltage — purely resistive PHE/AHE
-    at 1f, in phase with the drive current — and reads back the phaseshift.
-    That angle is the follower path's electrical delay at f; for a pure
-    delay the 2f delay is twice it, so analysis rotates the recorded 2f X/Y
-    by -2× this value.
-
-    It then restores the follower demod to the 2nd harmonic and its
-    phaseshift to where it started: this only *measures* the anchor, it
-    does not rotate the acquired data. Whether writing phaseshift on a
-    harmonic=2 demod rotates the 2ω reference by that angle or by twice it
-    is a LabOne-node-semantics question kept out of the acquisition path on
-    purpose. The return value is saved as the run-metadata column
-    demod2_phase_null_1f_deg (see build_run_metadata()).
-
-    Returns the nulled 1f phaseshift in degrees.
-    """
-    d, di = demod2_cfg.device, demod2_cfg.demod_index
-    if settle_time_s is None:
-        settle_time_s = 5.0 * demod2_cfg.filter.time_constant_s
-    original_phase = get_demod_phase_deg(daq, demod2_cfg)
-
-    daq.setInt(f"/{d}/demods/{di}/harmonic", 1)
-    daq.sync()
-    time.sleep(settle_time_s)
-    try:
-        result = auto_null_phase(daq, demod2_cfg, n_averages=n_averages,
-                                  max_iterations=max_iterations, tol_deg=tol_deg,
-                                  settle_time_s=settle_time_s)
-        delay_angle_deg = result.phase_after_deg
-        if not result.converged:
-            log.warning(
-                "Follower 1f null did not converge (|Y|/R=%.2e) — the 2f reference "
-                "anchor demod2_phase_null_1f_deg may be unreliable.", result.residual_ratio,
-            )
-    finally:
-        set_demod_phase_deg(daq, demod2_cfg, original_phase)
-        daq.setInt(f"/{d}/demods/{di}/harmonic", demod2_cfg.harmonic)
-        daq.sync()
-        time.sleep(settle_time_s)
-
-    log.info("Follower 2f reference anchor: 1f delay angle = %.4f° at f "
-             "(analysis rotates recorded 2f X/Y by -2× this).", delay_angle_deg)
-    return delay_angle_deg
+# Whether a demod's phase setting is applied to the reference at the
+# demodulation (harmonic) frequency — ZI: demods/n/phaseshift "Applies phase
+# shift to the reference input of the demodulator". True: a 2f demod needs
+# 2 x phi_I. Bench check in the module docstring ("Reference phase"); flip
+# this only if that check says a 2f demod's Theta moves by twice the step.
+PHASE_APPLIED_AT_HARMONIC = True
 
 
-def auto_null_phase_sr830(lockin, cfg: "sr830.LockinConfig", n_averages: int = 20,
-                          tol_deg: float = 0.02) -> PhaseCalibrationResult:
-    """auto_null_phase() for an SR830: the unit's own APHS (the manual's
-    auto-phase, sr830.auto_phase() waits out the filter settle) instead of
-    the measure/adjust loop, then one acquire to report the residual."""
-    phase_before = lockin.phase
-    phase_after = sr830.auto_phase(lockin, cfg)
-    d = sr830.acquire_averaged(lockin, cfg, n_averages)
-    if d["r_mean"] <= 0:
-        raise RuntimeError(f"No signal on SR830 {cfg.visa_resource} (R=0) — "
-                           "can't null a phase against zero amplitude.")
-    residual_deg = math.degrees(math.atan2(d["y_mean"], d["x_mean"]))
-    return PhaseCalibrationResult(
-        phase_before_deg=phase_before, phase_after_deg=phase_after, iterations=1,
-        x_V=d["x_mean"], y_V=d["y_mean"], r_V=d["r_mean"],
-        residual_ratio=abs(d["y_mean"]) / d["r_mean"], converged=abs(residual_deg) < tol_deg,
-    )
+def harmonic_phase_deg(phi_I_deg: float, harmonic: int) -> float:
+    """The demod phase that references a `harmonic` demod to the current:
+    harmonic x phi_I (phi_I = the current's phase at that input, measured
+    at 1f), wrapped to (-180, 180] — the MFLI node's range."""
+    phase = phi_I_deg * harmonic if PHASE_APPLIED_AT_HARMONIC else phi_I_deg
+    return 180.0 - (180.0 - phase) % 360.0
 
 
-def null_follower_reference_via_1f_sr830(lockin, cfg: "sr830.LockinConfig",
-                                         n_averages: int = 20) -> float:
-    """null_follower_reference_via_1f() for an SR830: HARM 1, APHS against
-    the same (split) V_xy, read the phase, then restore the phase and the
-    harmonic — measures the anchor only, never rotates the acquired data."""
-    cfg_1f = replace(cfg, harmonic=1)
-    original_phase = lockin.phase
-    lockin.write("HARM 1")
-    time.sleep(sr830.settle_time_s(cfg_1f))
-    try:
-        result = auto_null_phase_sr830(lockin, cfg_1f, n_averages)
-        delay_angle_deg = result.phase_after_deg
-        if not result.converged:
-            log.warning("Follower 1f null did not converge (|Y|/R=%.2e) — the 2f reference "
-                        "anchor demod2_phase_null_1f_deg may be unreliable.", result.residual_ratio)
-    finally:
-        lockin.phase = original_phase
-        lockin.write(f"HARM {cfg.harmonic}")
-        time.sleep(sr830.settle_time_s(cfg))
-    log.info("Follower 2f reference anchor (SR830): 1f delay angle = %.4f° at f.", delay_angle_deg)
-    return delay_angle_deg
+def measure_phi_I(daq: zi.ziDAQServer, demod_cfgs: List[DemodConfig], n_averages: int = 20,
+                  max_iterations: int = 5) -> List[PhaseCalibrationResult]:
+    """The form's "Measure phi_I" mode, MFLI: with a purely resistive voltage
+    (c-e, V+ on the I+ side) on every demod's input, put each demod at
+    harmonic 1 / phase 0, settle, and auto_null_phase() it. The nulled
+    phase (result.phase_after_deg) is phi_I for that input: the current's
+    phase there. auto_null_phase() drives atan2(Y, X) to 0, so X ends up
+    positive — in phase with the current, given the V+ polarity. Leaves
+    the demods at harmonic 1 (the caller is done with them)."""
+    for cfg in demod_cfgs:
+        daq.setInt(f"/{cfg.device}/demods/{cfg.demod_index}/harmonic", 1)
+        set_demod_phase_deg(daq, cfg, 0.0)
+    time.sleep(max(5.0 * c.filter.time_constant_s for c in demod_cfgs))
+    results = [auto_null_phase(daq, cfg, n_averages=n_averages, max_iterations=max_iterations)
+               for cfg in demod_cfgs]
+    for cfg, r in zip(demod_cfgs, results):
+        log.info("phi_I on %s/demod%d: %.3f°  (%s, |Y|/R=%.2e, R=%.4g V)", cfg.device,
+                 cfg.demod_index, r.phase_after_deg,
+                 "converged" if r.converged else "NOT converged", r.residual_ratio, r.r_V)
+    return results
 
 
-def phase_cal_sr830(lockin: sr830.SR830Read, n_averages: int,
-                    follower_display: str = "2f") -> float:
-    """The TUIs' phase-calibration block (HARM and HARM6) for an SR830 pair:
-    APHS-null the leader's Y, log a follower snapshot, then measure the
-    follower's 1f anchor. Returns demod2_phase_null_1f_deg."""
-    (la, ca), (lb, cb) = lockin.units
-    result = auto_null_phase_sr830(la, ca, n_averages)
-    if not result.converged:
-        log.warning("SR830 auto-phase left |Y|/R=%.2e on the leader — check cabling/"
-                    "contacts before trusting the %s data.", result.residual_ratio,
-                    follower_display)
-    d2 = sr830.acquire_averaged(lb, cb, n_averages)
-    log.info("%s snapshot at calibration point: X=%.4e V  Y=%.4e V  R=%.4e V — check "
-             "which channel carries the field dependence before trusting either one.",
-             follower_display, d2["x_mean"], d2["y_mean"], d2["r_mean"])
-    return null_follower_reference_via_1f_sr830(lb, cb, n_averages)
-
-
-def phase_cal_s(time_constant_1f_s: float, time_constant_2f_s: float, n_averages: int,
-                max_iterations: int, sample_rate_Hz: float) -> float:
-    """Modelled wall time of the TUI's phase-calibration block, EXCLUDING its
-    optional magnet ramp + settling sleep (the caller owns those):
-    auto_null_phase() on the leader, one 2f snapshot acquire, then
-    null_follower_reference_via_1f().
-
-    A null of k rounds is k acquire windows + (k-1) x (5 x TC settle sleep +
-    a phase write); k is run_time.PHASE_NULL_ITER_TYP, capped at
-    `max_iterations` (the form only gives the cap). The follower null adds a
-    harmonic switch + a 5 x TC sleep before it and the same after, plus its
-    phase / harmonic restore writes."""
-    def null_s(tc: float) -> float:
-        k = max(1, min(PHASE_NULL_ITER_TYP, max_iterations))
-        return (k * acquire_s(tc, n_averages, sample_rate_Hz)
-                + (k - 1) * (5.0 * tc + GPIB_TXN_S) + 2 * GPIB_TXN_S)
-    snapshot = acquire_s(time_constant_2f_s, n_averages, sample_rate_Hz)
-    follower = null_s(time_constant_2f_s) + 2 * 5.0 * time_constant_2f_s + 6 * GPIB_TXN_S
-    return null_s(time_constant_1f_s) + snapshot + follower
+def measure_phi_I_sr830(lockin: sr830.SR830Read, n_averages: int = 20) -> List[PhaseCalibrationResult]:
+    """measure_phi_I() for an SR830 pair: HARM 1 on each unit, then its own
+    APHS (sr830.auto_phase(), which waits out the filter settle), then one
+    acquire to report the residual."""
+    results = []
+    for lk, cfg in lockin.units:
+        cfg_1f = replace(cfg, harmonic=1)
+        lk.write("HARM 1")
+        lk.phase = 0.0
+        time.sleep(sr830.settle_time_s(cfg_1f))
+        phase = sr830.auto_phase(lk, cfg_1f)
+        d = sr830.acquire_averaged(lk, cfg_1f, n_averages)
+        if d["r_mean"] <= 0:
+            raise RuntimeError(f"No signal on SR830 {cfg.visa_resource} (R=0) — "
+                               "is c-e wired to its input?")
+        residual = abs(math.degrees(math.atan2(d["y_mean"], d["x_mean"])))
+        results.append(PhaseCalibrationResult(
+            phase_before_deg=0.0, phase_after_deg=phase, iterations=1,
+            x_V=d["x_mean"], y_V=d["y_mean"], r_V=d["r_mean"],
+            residual_ratio=abs(d["y_mean"]) / d["r_mean"], converged=residual < 0.5))
+        log.info("phi_I on SR830 %s: %.2f°  (|Y|/R=%.2e)", cfg.visa_resource, phase,
+                 results[-1].residual_ratio)
+    return results
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -772,7 +758,6 @@ def run_measurement(
     temp_ctrl: Optional[MercuryITC] = None,
     temp_cfg:  Optional[TemperatureControllerConfig] = None,
     geometry_cfg: Optional[SampleGeometryConfig] = None,
-    demod2_phase_null_1f_deg: Optional[float] = None,
     mds=None,
     write_csv: Optional[Callable[[List[dict]], None]] = None,
     demod1_label: str = "1f",
@@ -823,10 +808,6 @@ def run_measurement(
     never available from an instrument; pass None (the default) to leave
     those columns blank rather than blocking the run — see
     SampleGeometryConfig.
-
-    `demod2_phase_null_1f_deg`, if given (from null_follower_reference_via_1f()
-    run at phase-calibration time), is written to every row as the follower
-    2f reference anchor — see that function and build_run_metadata().
 
     `demod1_label` / `demod2_label` name the leader's / follower's column
     prefixes — `"1f"` / `"2f"` by default (the classic harmonic-Hall file);
@@ -908,7 +889,7 @@ def run_measurement(
         # Built fresh each point — see build_run_metadata()'s docstring for
         # why this isn't hoisted above the loop.
         run_meta = build_run_metadata(daq, out_cfg, demod1_cfg, demod2_cfg, geometry_cfg,
-                                      demod2_phase_null_1f_deg, lockin=lockin)
+                                      lockin=lockin)
 
         # ── 5. Build record ────────────────────────────────────────────────
         record: dict = {

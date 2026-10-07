@@ -77,16 +77,21 @@ def setup_mds(daq: zi.ziDAQServer, leader: str, follower: str, timeout_s: float 
     "leader" node — the role is inferred from *order* in the comma-separated
     `devices` list (first entry = leader) and must match the physical
     cabling. The MFLI requires BOTH of the following (ZSync is not an MFLI
-    feature — that's UHFQA/SHF-family hardware):
-      - Ref clock: BNC cable from the leader's Ref Out to the follower's
-        Ref In.
-      - Trigger: the leader's Trigger Out 1 fanned out (e.g. via a 1-to-N
-        power divider, equal cable lengths) to Trigger In 1 on *both* the
+    feature — that's UHFQA/SHF-family hardware), per the MFLI manual's
+    Multi Device Sync tab:
+      - Clock: Clock 10 MHz Out of the leader to Clock 10 MHz In of the
+        follower (daisy chain).
+      - Trigger: the leader's Trigger Out 1 fanned out (1-to-N power
+        divider, equal cable lengths) to Trigger In 1 on *both* the
         follower and the leader itself.
 
     NOTE: this synchronizes clocks and the measurement start instant — it
-    does NOT copy oscillator frequency values between devices. See
-    sync_follower_oscillator() below.
+    does NOT copy oscillator frequency values between devices (see
+    sync_follower_oscillator()), and it does not keep the oscillator
+    PHASES aligned across a frequency change: ZI says "the relative
+    oscillator phases between instruments must be manually adjusted each
+    time that the frequencies are changed". Call sync_oscillator_phases()
+    after every frequency write.
 
     Returns the MultiDeviceSync module handle so a caller can poll
     check_mds_status() on it later, mid-measurement, without re-running the
@@ -124,6 +129,31 @@ def setup_mds(daq: zi.ziDAQServer, leader: str, follower: str, timeout_s: float 
         time.sleep(0.2)
     log.info("MDS synchronized: leader=%s, follower=%s", leader, follower)
     return mds
+
+
+def sync_oscillator_phases(mds, daq: zi.ziDAQServer, timeout_s: float = 2.0) -> None:
+    """Reset the phases of all oscillators on all MDS-synchronized devices
+    (the MDS module's `phasesync` parameter) so the leader's and follower's
+    oscillators start from the same phase at the same instant. Without
+    this, a follower demod's phase relative to the leader's drive current
+    is arbitrary after every frequency write, and no fixed follower phase
+    setting can be right. Call it after the LAST frequency write on either
+    device. Never raises; a parameter that doesn't read back 0 within
+    `timeout_s` is logged (the API doc doesn't say whether it self-clears)."""
+    mds.set("phasesync", 1)
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < timeout_s:
+        try:
+            if mds.getInt("phasesync") == 0:
+                break
+        except Exception:
+            log.exception("Could not read MDS phasesync")
+            break
+        time.sleep(0.05)
+    else:
+        log.info("MDS phasesync still reads 1 after %.1f s (may not self-clear)", timeout_s)
+    daq.sync()
+    log.info("MDS: oscillator phases reset on all synchronized devices")
 
 
 def check_mds_status(mds) -> bool:
@@ -240,8 +270,7 @@ def acquire_averaged(daq: zi.ziDAQServer, cfg, n_averages: int) -> dict:
     Two uncertainty flavors, for two different jobs — don't swap them:
       - `x_std`/`y_std`/`r_std`: population stdev (ddof=0) of the raw
         per-sample X/Y/magnitude — the point-to-point scatter, useful as a
-        signal-to-noise-style diagnostic (see
-        mfli_phase_calibration.identify_2f_channel()). `r_std` in
+        signal-to-noise-style diagnostic. `r_std` in
         particular is the spread of the per-sample RECTIFIED magnitude
         `hypot(x_i, y_i)` — a different, positively-biased quantity from
         `r_mean` (see r_mean's own docstring note below) — so it must never
@@ -486,6 +515,11 @@ def configure_external_reference(daq: "zi.ziDAQServer", cfg: ExtRefConfig,
     # run's demod2_cfg reusing the same index) — a stale harmonic here has
     # the PLL searching the wrong frequency entirely and never locking.
     daq.setInt(f"/{d}/demods/{cfg.pll_demod_index}/harmonic", 1)
+    # The PLL drives this demod's phase to zero, so its phaseshift sets the
+    # oscillator's lock point relative to the marker — pin it, rather than
+    # inherit whatever LabOne last held (that would silently move every
+    # signal demod's phase on this device between runs).
+    daq.setDouble(f"/{d}/demods/{cfg.pll_demod_index}/phaseshift", 0.0)
     daq.setDouble(f"/{d}/demods/{cfg.pll_demod_index}/rate", _PLL_DETECTOR_RATE_REQUEST_HZ)
     daq.setInt(f"/{d}/demods/{cfg.pll_demod_index}/enable", 1)
     daq.setInt(f"/{d}/extrefs/{cfg.extref_index}/demodselect", cfg.pll_demod_index)
@@ -498,6 +532,20 @@ def configure_external_reference(daq: "zi.ziDAQServer", cfg: ExtRefConfig,
              "requested %.4g Sa/s -> device applied %.4g Sa/s)", d, cfg.osc_index,
              cfg.aux_input_ch + 1, cfg.extref_index, cfg.pll_demod_index, frequency_Hz,
              _PLL_DETECTOR_RATE_REQUEST_HZ, applied_rate)
+
+def disable_external_references(daq: "zi.ziDAQServer", device: str) -> None:
+    """Turn off every ExtRef channel on `device` (extrefs/0 and /1; a unit
+    without the second one is skipped). A program that drives the device's
+    own oscillator must do this first: a previous 6221-sourced run leaves
+    the oscillator PLL-locked to a marker that is no longer there, which
+    overrides the frequency and phase this program sets."""
+    for i in (0, 1):
+        try:
+            daq.setInt(f"/{device}/extrefs/{i}/enable", 0)
+        except Exception:
+            log.debug("%s has no extrefs/%d", device, i)
+    daq.sync()
+
 
 def wait_for_reference_lock(daq: "zi.ziDAQServer", cfg: ExtRefConfig,
                              timeout_s: float,

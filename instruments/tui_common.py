@@ -487,13 +487,13 @@ class MeasurementRunScreen(Screen):
         if self._measurement_running:
             self.action_abort()
         else:
-            self.app.pop_screen()
+            self.dismiss()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "abort_btn":
             self.action_abort()
         elif event.button.id == "back_btn":
-            self.app.pop_screen()
+            self.dismiss()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -772,8 +772,13 @@ class MeasurementApp(App):
         self.data_root = Path(state["data_dir"]).expanduser()
         ensure_sample(self.data_root, state["sample"], create=True)
         self._save_settings(self.collect_raw())
-        self.push_screen(self.run_screen(self._build_plan(state)))
+        plan = self._build_plan(state)
+        self.push_screen(self.run_screen(plan), lambda _result: self.after_run(plan))
 
     def run_screen(self, plan):
         """The RunScreen for `plan` — the program module's, by default."""
         return self.program.RunScreen(plan)
+
+    def after_run(self, plan) -> None:
+        """Called once the run screen closes, with the form active again —
+        override to copy a run's result back into the form."""

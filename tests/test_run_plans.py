@@ -39,7 +39,6 @@ SINGLE_RUN = [
     ("dc.dc_rt_log_tui", "DCRTLogApp", {}),
     ("mfli.mfli_dual_harmonic_tui", "MFLIDualHarmonicApp", {}),
     ("mfli.mfli_diff_resistance_tui", "MFLIDiffResistanceApp", {}),
-    ("mfli.mfli_phase_calibration_tui", "MFLIPhaseCalibrationApp", {}),
 ]
 PROGRAMS = [(m, a, o, 2) for m, a, o in MULTI_RUN] + [(m, a, o, 1) for m, a, o in SINGLE_RUN]
 _TOGGLES = ("ac_source", "pulse_source", "read_mode")        # a merged program's mode
@@ -64,22 +63,9 @@ def _stub_hardware(mod, monkeypatch) -> list[str]:
     return shut
 
 
-def _fake_phase_calibration(*args, **kwargs):
-    records = []
-    for i in range(2):
-        rec = {"point_index": i, "voltage_V": 1e-3 * (i + 1)}
-        records.append(rec)
-        kwargs["on_point"](rec)
-        kwargs["write_csv"](pd.DataFrame(records))
-    return MagicMock()
-
 
 def _fake_acquisition(mod, monkeypatch, fake=None) -> None:
-    if hasattr(mod, "run_phase_calibration"):
-        monkeypatch.setattr(mod, "run_phase_calibration", fake or _fake_phase_calibration)
-        monkeypatch.setattr(mod, "format_report", lambda report: "report")
-    else:
-        monkeypatch.setattr(mod, "run_measurement", fake or _fake_run_measurement)
+    monkeypatch.setattr(mod, "run_measurement", fake or _fake_run_measurement)
 
 
 def _fake_run_measurement(*args, **kwargs):

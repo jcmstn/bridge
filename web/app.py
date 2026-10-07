@@ -39,7 +39,7 @@ import os
 from nicegui import app, ui
 
 from web.dc import hall, iv_curve, gate_sweep, spin_valve, rt_log
-from web.mfli import dual_harmonic, diff_resistance, phase_calibration
+from web.mfli import dual_harmonic, diff_resistance
 from web.sot import nonlocal_switching, pulsed_switching
 from instruments import run_index
 from web.run_controller import busy_banner
@@ -126,11 +126,6 @@ def _mfli_diff_resistance_page() -> None:
     diff_resistance.page()
 
 
-@ui.page("/mfli/phase-calibration")
-def _mfli_phase_calibration_page() -> None:
-    phase_calibration.page()
-
-
 @ui.page("/sot/pulsed-switching")
 def _sot_pulsed_switching_page() -> None:
     pulsed_switching.page()
@@ -203,8 +198,6 @@ def landing() -> None:
                   dual_harmonic.MFLI_DUAL_HARMONIC_DESCRIPTION, "/mfli/dual-harmonic")
             _card("MFLI Differential Resistance vs. Bias",
                   diff_resistance.MFLI_DIFF_RESISTANCE_DESCRIPTION, "/mfli/diff-resistance")
-            _card("MFLI Phase Calibration",
-                  phase_calibration.MFLI_PHASE_CALIBRATION_DESCRIPTION, "/mfli/phase-calibration")
         with ui.column().classes("flex-1 gap-3"):
             ui.label("SOT Suite").classes("text-xl font-bold")
             _card("SOT Pulsed Switching (4200A or 6221 pulse · DC or lock-in read)",

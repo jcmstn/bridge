@@ -1,8 +1,6 @@
 """
-null_follower_reference_via_1f() measures the follower's 1f delay angle by
-briefly switching its demod to the 1st harmonic. The load-bearing property
-is state restoration: a bug that leaves the follower on harmonic=1, or its
-phaseshift moved, silently corrupts every 2f point in the run that follows.
+Demod reference phase: measure_phi_I() (1f autophase on a resistive pair),
+harmonic_phase_deg() (harmonic x phi_I) and configure_demodulator()'s write.
 
 Hardware-free — a fake DAQ that scripts a clean in-phase phasor (so
 auto_null_phase converges on the first iteration) and records node writes.
@@ -12,7 +10,6 @@ from __future__ import annotations
 
 import numpy as np
 
-from mfli.mfli_dual_harmonic import null_follower_reference_via_1f
 
 
 class _Cfg:
@@ -53,15 +50,24 @@ class _DAQ:
         return {path: {"x": np.full(n, 1e-3), "y": np.zeros(n)}}
 
 
-def test_anchor_switches_to_1f_then_restores_harmonic_and_phaseshift():
+def test_measure_phi_I_nulls_at_1f_and_returns_the_phase():
+    from mfli.mfli_dual_harmonic import measure_phi_I
     daq = _DAQ()
-    angle = null_follower_reference_via_1f(daq, _Cfg(), n_averages=8, max_iterations=3)
-
-    assert isinstance(angle, float)
-    # It went to the 1st harmonic to do the null ...
+    (r,) = measure_phi_I(daq, [_Cfg()], n_averages=8, max_iterations=3)
     assert ("/devf/demods/0/harmonic", 1) in daq.int_writes
-    # ... and the LAST harmonic write puts it back to the cfg value (2f).
-    assert daq.harmonic == 2
-    assert daq.int_writes[-1] == ("/devf/demods/0/harmonic", 2)
-    # Phaseshift ends exactly where it started — the function only measures.
-    assert daq.phaseshift == 3.0
+    assert r.converged and r.x_V > 0 and abs(r.phase_after_deg) < 1e-9
+
+
+def test_harmonic_phase_deg_is_harmonic_times_phi_wrapped():
+    from mfli.mfli_dual_harmonic import harmonic_phase_deg
+    assert [harmonic_phase_deg(p, h) for p, h in ((10, 1), (10, 2), (100, 2), (-100, 2))] \
+        == [10, 20, -160, 160]
+
+
+def test_configure_demodulator_writes_phase_only_when_set():
+    from mfli.mfli_dual_harmonic import DemodConfig, configure_demodulator
+    daq = _DAQ()
+    configure_demodulator(daq, DemodConfig(device="devf", demod_index=0, harmonic=2))
+    assert daq.phaseshift == 3.0                 # None: the device's phase is left alone
+    configure_demodulator(daq, DemodConfig(device="devf", demod_index=0, harmonic=2, phase_deg=-12.5))
+    assert daq.phaseshift == -12.5

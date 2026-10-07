@@ -21,7 +21,6 @@ from instruments.kepco_magnet import MagnetConfig, magnet_move_s
 from instruments.keithley6221 import ac_source_restart_s
 from instruments.lakeshore475 import GaussmeterConfig, read_field_s
 from instruments.mfli_daq import acquire_s
-from mfli.mfli_dual_harmonic import phase_cal_s
 from mfli.mfli_dual_harmonic_6221 import extref_lock_s
 from mfli.mfli_noise_spectrum import AcquisitionConfig
 
@@ -48,8 +47,7 @@ def _hstate(**overrides) -> dict:
         gaussmeter_visa_resource="GPIB0::12::INSTR", gaussmeter_n_averages=10,
         gaussmeter_read_delay_s=0.05, field_settle_tolerance_mT=0.02, enable_temperature=False,
         temperature_visa_resource="", temperature_sensor_uids="",
-        enable_phase_cal=False, phase_cal_current_A=None,
-        phase_cal_n_averages=20, phase_cal_max_iterations=5,
+        leader_phi_I_deg=0.0, follower_phi_I_deg=0.0, measure_phi_I=False, phi_I_context="",
         hall_bar_length_um=None, hall_bar_width_um=None,
         hall_bar_thickness_nm=None, field_theta_deg=None, field_phi_deg=None,
         sample="A",
@@ -60,7 +58,7 @@ def _hstate(**overrides) -> dict:
 
 def _h6state(**overrides) -> dict:
     base = _hstate(
-        ac_visa_resource="GPIB0::20::INSTR", ac_compliance_V=2.0, phasemarker_line=1,
+        ac_visa_resource="GPIB0::20::INSTR", ac_compliance_V=2.0, ac_offset_A=0.0, phasemarker_line=1,
         amplitude_values="1e-7", amplitude_list=[1e-7], amplitude_parse_error=None,
         measure_rxx=False,
         leader_extref_index=0, leader_aux_input_ch=0, leader_osc_index=0, leader_pll_demod_index=1,
@@ -135,17 +133,6 @@ def test_harmonic_multi_row_sweep_matches_plan_length(tmp_path, monkeypatch) -> 
     assert plan.total_points == 37 == len(plan.run_cost.points)
 
 
-def test_harmonic_phase_cal_adds_a_block_and_a_magnet_move() -> None:
-    plain = tharm.run_costs(_hstate())
-    with_cal = tharm.run_costs(_hstate(enable_phase_cal=True))
-    assert with_cal.total_s - plain.total_s == pytest.approx(phase_cal_s(0.3, 0.3, 20, 5, 857.0))
-    assert with_cal.parts["phase cal"] > 2 * 5 * 0.3 + 3 * acquire_s(0.3, 20, 857.0)  # sleeps + windows
-    state = _hstate(enable_sweep=True, enable_phase_cal=True, phase_cal_current_A=20.0)
-    currents = build_segmented_sweep(state["sweep_rows_parsed"], bidirectional=True)
-    assert (tharm.run_costs(state, currents).parts["phase cal"]
-            > tharm.run_costs(_hstate(enable_sweep=True, enable_phase_cal=True), currents).parts["phase cal"])
-
-
 def test_harmonic_summary_and_bad_inputs_do_not_crash(tmp_path) -> None:
     ensure_sample(tmp_path, "A", create=True)
     info, _, errors = tharm.build_summary(_hstate(data_dir=str(tmp_path)))
@@ -204,13 +191,10 @@ def test_6221_summary_lines(tmp_path) -> None:
     t6221.build_summary(_h6state(data_dir=str(tmp_path), sample_rate_Hz=0.0, ramp_step_A=0.0, enable_sweep=True))
 
 
-def test_extref_and_phase_cal_helpers_arithmetic() -> None:
+def test_extref_helpers_arithmetic() -> None:
     typ, worst = extref_lock_s(5.0)
     assert typ == pytest.approx(2 * 12 * rt.GPIB_TXN_S + 2 * rt.LOCK_TYP_S)
     assert worst == pytest.approx(2 * 12 * rt.GPIB_TXN_S + 2 * 5.0)
-    one_round = phase_cal_s(0.3, 0.3, 20, 1, 857.0)         # max_iterations=1 -> no settle sleeps in the null
-    assert phase_cal_s(0.3, 0.3, 20, 5, 857.0) > one_round
-    assert one_round > 3 * acquire_s(0.3, 20, 857.0)         # leader window + snapshot + follower window
 
 
 # ── mfli_noise_spectrum ──────────────────────────────────────────────────────

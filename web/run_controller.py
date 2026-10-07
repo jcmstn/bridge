@@ -597,7 +597,8 @@ def finished_handler(client, controller: dict, status_label, abort_btn, start_bt
                      on_result: Optional[Callable[[Any], None]] = None):
     """RunController.on_finished for a page: final status text, Abort hidden,
     Start re-enabled, summary refreshed, `on_result(result)` if given, then the
-    post-run status/comment dialog for the last run (prompt_last_run)."""
+    post-run status/comment dialog for the last run (prompt_last_run), if any
+    run was recorded."""
     def on_finished(final: "FinalStatus", result) -> None:
         status_label.set_text({"completed": done_text, "aborted": aborted_text,
                                "error": f"ERROR: {final.error}"}[final.status])
@@ -608,9 +609,10 @@ def finished_handler(client, controller: dict, status_label, abort_btn, start_bt
         refresh_summary()
         handle = controller["c"].handle if controller["c"] is not None else None
         records = list(handle.records) if handle is not None else []
-        background_tasks.create(
-            prompt_last_run(client, program, plan, run_contexts, run_extras, records),
-            name="status_comment_prompt")
+        if run_contexts:        # nothing recorded (a measure-only mode, an early abort): no dialog
+            background_tasks.create(
+                prompt_last_run(client, program, plan, run_contexts, run_extras, records),
+                name="status_comment_prompt")
     return on_finished
 
 

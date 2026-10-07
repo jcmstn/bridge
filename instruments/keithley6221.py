@@ -71,6 +71,7 @@ class ACSourceConfig:
     default."""
     visa_resource: str        = "GPIB0::20::INSTR"
     amplitude_A: float        = 1e-4     # AC current amplitude, peak [A]
+    offset_A: float           = 0.0      # DC offset added to the sine [A] (harmonic-Hall 2f sign calibration)
     frequency_Hz: float       = 977.0    # Excitation frequency [Hz] — avoid 50/60 Hz harmonics
     compliance_V: float       = 2.0      # Voltage compliance [V]
     ranging: str              = "best"   # "best" or "fixed"
@@ -87,7 +88,7 @@ def apply_sine_wave(source: Keithley6221, cfg: ACSourceConfig) -> None:
     source.source_compliance = cfg.compliance_V
     source.waveform_function = "sine"
     source.waveform_amplitude = cfg.amplitude_A
-    source.waveform_offset = 0.0
+    source.waveform_offset = cfg.offset_A
     source.waveform_frequency = cfg.frequency_Hz
     source.waveform_ranging = cfg.ranging
     source.waveform_use_phasemarker = True

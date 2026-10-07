@@ -105,7 +105,7 @@ def test_r_sem_is_propagated_from_xy_sem_not_the_std_of_magnitudes():
     assert out["r_sem"] == pytest.approx(1.0 / math.sqrt(3))
     assert out["n_samples"] == 3
     # The old, wrong estimator this replaces — kept only as x_std/y_std/r_std
-    # for mfli_phase_calibration.py's signal-to-noise diagnostic, never as
+    # as a signal-to-noise diagnostic, never as
     # the uncertainty on r_mean.
     assert out["r_std"] != pytest.approx(out["r_sem"])
 

@@ -26,7 +26,9 @@ from plotly.subplots import make_subplots
 from nicegui import ui
 
 import mfli.mfli_dual_harmonic_tui as program
-from mfli.mfli_dual_harmonic_6221_tui import HARMONIC_OPTIONS, migrate_settings, plan_naming
+from mfli.mfli_dual_harmonic_6221_tui import (
+    HARMONIC_OPTIONS, OFFSET_HINT, PHI_I_HINT, migrate_settings, phi_I_context, plan_naming,
+)
 from mfli.mfli_dual_harmonic_tui import (
     AC_SOURCES, DEFAULTS, LOCKINS, MFLI_DUAL_HARMONIC_DESCRIPTION, build_plan, build_summary,
     compute_filename_preview, mode_errors,
@@ -153,6 +155,8 @@ def page(source: str = "") -> None:
                         hint="No series R. Comma-separate for one sweep + file per value.")
                     inputs["ac_compliance_V"] = num_field(
                         "6221 voltage compliance (V)", float(d("ac_compliance_V")))
+                    inputs["ac_offset_A"] = num_field(
+                        "DC offset (A)", float(d("ac_offset_A")), hint=OFFSET_HINT)
                 only_for(ac6221_card, "6221")
 
                 harmonic_selects = {}
@@ -168,6 +172,17 @@ def page(source: str = "") -> None:
                             "R_xx only renames the columns — move the Signal Input cable to the R_xx leads by hand."
                         ).classes("text-xs text-grey-6")
 
+                with param_card("Reference phase (φ_I)"):
+                    switches["measure_phi_I"] = bool_switch(
+                        "Measure φ_I (c–e wired to both lock-in inputs)", d("measure_phi_I"))
+                    inputs["leader_phi_I_deg"] = num_field(
+                        "Leader φ_I — current phase at its input, 1f (°)", float(d("leader_phi_I_deg")))
+                    inputs["follower_phi_I_deg"] = num_field(
+                        "Follower φ_I — current phase at its input, 1f (°)", float(d("follower_phi_I_deg")))
+                    inputs["phi_I_context"] = text_field(
+                        "φ_I measured with", d("phi_I_context"), hint="Set by Measure φ_I.")
+                    ui.label(PHI_I_HINT).classes("text-xs text-grey-6")
+
                 with param_card("Magnet & field sweep"):
                     switches["enable_sweep"] = bool_switch("Sweep magnetic field (Kepco magnet)", d("enable_sweep"))
                     inputs["sweep_rows"] = textarea_field(
@@ -178,13 +193,6 @@ def page(source: str = "") -> None:
                 with param_card("Temperature logging"):
                     switches["enable_temperature"] = bool_switch(
                         "Log temperature (Oxford Instruments MercuryiTC)", d("enable_temperature"))
-
-                with param_card("Phase calibration"):
-                    switches["enable_phase_cal"] = bool_switch(
-                        "Auto-null 1f phase before run (leader demod phaseshift)", d("enable_phase_cal"))
-                    optional_inputs["phase_cal_current_A"] = optional_num_field(
-                        "Calibration magnet current (A)", opt("phase_cal_current_A"),
-                        hint="Blank = present field. Else near saturation; needs the field sweep on.")
 
                 with param_card("Sample geometry & field direction (optional)"):
                     optional_inputs["hall_bar_length_um"] = optional_num_field(
@@ -343,13 +351,6 @@ def page(source: str = "") -> None:
                     with stable_card("Temperature controller"):
                         inputs["temperature_visa_resource"] = text_field("MercuryiTC VISA resource", d("temperature_visa_resource"))
                         inputs["temperature_sensor_uids"] = text_field("Sensor board UID(s)", d("temperature_sensor_uids"))
-
-                    with stable_card("Phase-cal advanced"):
-                        inputs["phase_cal_n_averages"] = num_field("Averages per phase read", float(d("phase_cal_n_averages")), integer=True)
-                        inputs["phase_cal_max_iterations"] = num_field("Max null iterations", float(d("phase_cal_max_iterations")), integer=True)
-                        ui.label(
-                            "Nulls leader 1f Y via demod phase (like LabOne Auto). X2f and Y2f are both recorded."
-                        ).classes("text-xs text-grey-6")
 
         with regions.summary:
             summary_box = ui.column().classes("w-full")
@@ -526,10 +527,28 @@ def page(source: str = "") -> None:
     def on_log(text: str, level: int) -> None:
         log_area.push(text)
 
-    def make_on_finished(plan, run_contexts: list, run_extras: list):
-        return finished_handler(
+    def fill_phi_I(plan, state: dict) -> None:
+        """Measure-phi_I mode: copy each converged phi_I into the form, stamp
+        what it was measured with, turn the mode off, and save."""
+        if not getattr(plan, "phi_I_result", None):
+            return
+        for fid, r in zip(("leader_phi_I_deg", "follower_phi_I_deg"), plan.phi_I_result):
+            if r.converged:
+                inputs[fid].set_value(round(r.phase_after_deg, 3))
+        source = "6221" if state.get("ac_source") == "6221" else "MFLI output"
+        inputs["phi_I_context"].set_value(phi_I_context(state, source))
+        switches["measure_phi_I"].set_value(False)
+        save_settings(_SETTINGS_PATH, collect_raw())
+
+    def make_on_finished(plan, state: dict, run_contexts: list, run_extras: list):
+        done = finished_handler(
             page_client, controller, status_label, abort_btn, start_btn, refresh_summary.refresh,
             program, plan, run_contexts, run_extras,)
+
+        def on_finished(final, result) -> None:
+            fill_phi_I(plan, state)
+            done(final, result)
+        return on_finished
 
     def on_start() -> None:
         state, parse_errors = parse_state()
@@ -564,9 +583,8 @@ def page(source: str = "") -> None:
             parameters=state, data_dir=state["data_dir"], planned_output_paths=[],
             on_tick=lambda: (plot.update(), table.update()),
             on_record=on_record, on_status=on_status, on_run_label=on_run_label, on_log=on_log,
-            on_finished=make_on_finished(plan, run_contexts, run_extras),
-            sample=run_ctx.sample if run_ctx else plan.sample,
-            device=run_ctx.device if run_ctx else plan.device,
+            on_finished=make_on_finished(plan, state, run_contexts, run_extras),
+            sample=state["sample"], device=state["device"],
             run_number=run_ctx.run_number if run_ctx else None, run_cost=plan.run_cost, run_contexts=run_contexts,
         )
         if not rc.try_start():

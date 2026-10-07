@@ -110,6 +110,7 @@ class LockinConfig:
     frequency_Hz: float     = 1000.0
     sine_amplitude_V: float = 0.1            # SINE OUT [V rms], 0.004 … 5 (no "off" on an SR830)
     harmonic: int           = 1              # detection harmonic, 1 … 19999 with harmonic*f <= 102 kHz
+    phase_deg: float        = 0.0            # reference phase PHAS [deg]
     time_constant_s: float  = 0.1            # snapped UP to the next OFLT value
     filter_slope_dB: int    = 24             # 6 / 12 / 18 / 24 dB/oct
     sync_filter: bool       = False          # only acts below 200 Hz detection frequency
@@ -184,6 +185,7 @@ def connect(cfg: LockinConfig) -> SR830:
         lockin.frequency = cfg.frequency_Hz
     lockin.sine_voltage = cfg.sine_amplitude_V
     lockin.write(f"HARM {cfg.harmonic}")
+    lockin.phase = cfg.phase_deg
     lockin.input_config = cfg.input_config
     lockin.input_coupling = cfg.coupling
     lockin.input_grounding = cfg.grounding
@@ -207,9 +209,10 @@ def connect(cfg: LockinConfig) -> SR830:
     cfg.sensitivity_V = lockin.sensitivity
     cfg.sample_rate_Hz = SAMPLE_RATES_HZ[srat]
     log.info("SR830 %s: %s ref, f=%.4f Hz (measured), HARM %d, TC=%g s, %d dB/oct, "
-             "sens=%g V, %s, buffer %g Sa/s", cfg.visa_resource, cfg.reference,
+             "sens=%g V, %s, buffer %g Sa/s, phase %g deg", cfg.visa_resource, cfg.reference,
              lockin.frequency, cfg.harmonic, cfg.time_constant_s,
-             cfg.filter_slope_dB, cfg.sensitivity_V, cfg.input_config, cfg.sample_rate_Hz)
+             cfg.filter_slope_dB, cfg.sensitivity_V, cfg.input_config, cfg.sample_rate_Hz,
+             cfg.phase_deg)
     return lockin
 
 
@@ -462,7 +465,7 @@ def config_from_form(visa_resource: str, *, harmonic: int, frequency_Hz: float,
                      time_constant_s: float, order: int, sinc_filter: bool,
                      differential: bool, ac_coupling: bool, sensitivity_V: float,
                      sample_rate_Hz: float, reference: str = "external",
-                     sine_amplitude_V: float = 0.004) -> LockinConfig:
+                     sine_amplitude_V: float = 0.004, phase_deg: float = 0.0) -> LockinConfig:
     """One SR830's config from the MFLI form's fields: filter order n ->
     6n dB/oct (validate() rejects order 5-8), the sinc switch -> the
     synchronous filter, differential -> "A - B" (else "A"), AC coupling ->
@@ -474,7 +477,7 @@ def config_from_form(visa_resource: str, *, harmonic: int, frequency_Hz: float,
     return LockinConfig(
         visa_resource=visa_resource, reference=reference, ext_slope="ttl_rising",
         frequency_Hz=frequency_Hz, sine_amplitude_V=sine_amplitude_V, harmonic=harmonic,
-        time_constant_s=snap_up(time_constant_s, SR830.TIME_CONSTANTS),
+        phase_deg=phase_deg, time_constant_s=snap_up(time_constant_s, SR830.TIME_CONSTANTS),
         filter_slope_dB=6 * order, sync_filter=sinc_filter,
         sensitivity_V=snap_up(sensitivity_V, SR830.SENSITIVITIES),
         input_config="A - B" if differential else "A",

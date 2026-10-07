@@ -39,8 +39,8 @@ Wiring
     adder (the "offset" node), so the same two wires (Signal Out 1 →
     R_series → DUT) carry both the AC probe signal and the DC bias.
 
-    MDS cabling (see setup_mds() docstring): Ref Out (leader) → Ref In
-    (follower), and Trigger Out 1 (leader) fanned out to Trigger In 1 on
+    MDS cabling (see setup_mds() docstring): Clock 10 MHz Out (leader) →
+    Clock 10 MHz In (follower), and Trigger Out 1 (leader) fanned out to Trigger In 1 on
     BOTH units.
 
     IMPORTANT — oscillator frequency is NOT shared automatically by MDS:

@@ -127,8 +127,7 @@ and estimate see the applied values). The engine's `run_plan` connects an
 `run_measurement(..., lockin=reader)`; the loop swaps only its lock-in
 calls (acquire, lock check, frequency/phase/filter metadata). `lockin=None`
 is the unchanged MFLI path. Same type codes and columns. DIFFR (needs a DC
-offset on the source), NOISE (wideband streaming) and PHCAL have no SR830
-mode.
+offset on the source) and NOISE (wideband streaming) have no SR830 mode.
 
 ### Shared TUI scaffolding (`instruments/tui_common.py`)
 
@@ -195,13 +194,6 @@ Callers (TUI, web, a plain script, a test) build `points`, connect the
 instruments, call `run_measurement`, then run their own
 `shutdown_*` path — the function never connects or disconnects hardware
 itself.
-
-**The one exception:** `mfli/mfli_phase_calibration.py` does not fit the
-`points -> DataFrame` shape. Its orchestrator is
-`run_phase_calibration(...) -> PhaseCalibrationReport`, and it takes a
-third callback `on_status` alongside `stop_event` / `on_point`.
-`format_report(report)` renders it for display.
-
 
 ## 4. Instrument layer (`instruments/`)
 

@@ -29,14 +29,14 @@ _POINT = ["magnet_current_A", "magnet_field_mT", "temperature_1_K", "temperature
 
 HARM_COLUMNS = (["point_index", "timestamp", "mds_synced", *_POINT]
                 + [f"1f_{c}" for c in _DEMOD] + [f"2f_{c}" for c in _DEMOD]
-                + ["demod2_phase_null_1f_deg", *_EXC, *_DEMOD_META, *_GEOM])
+                + [*_EXC, *_DEMOD_META, *_GEOM])
 
 
 def _harm6_columns(follower: str) -> list[str]:
     return (["point_index", "timestamp", "mds_synced",
              "leader_reference_locked", "follower_reference_locked", *_POINT]
             + [f"1f_{c}" for c in _DEMOD] + [f"{follower}_{c}" for c in _DEMOD]
-            + ["measure_rxx", "demod2_phase_null_1f_deg", *_EXC, *_DEMOD_META, *_GEOM])
+            + ["measure_rxx", *_EXC, *_DEMOD_META, *_GEOM])
 
 
 class _DAQ:
