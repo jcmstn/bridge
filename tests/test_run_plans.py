@@ -37,6 +37,7 @@ MULTI_RUN = [
 # single-run programs: the run is allocated at Start (build_plan) as plan.run_ctx
 SINGLE_RUN = [
     ("dc.dc_rt_log_tui", "DCRTLogApp", {}),
+    ("dc.dc_rt_log_tui", "DCRTLogApp", {"enable_field": True, "magnet_current_A": "1"}),
     ("mfli.mfli_dual_harmonic_tui", "MFLIDualHarmonicApp", {}),
     ("mfli.mfli_diff_resistance_tui", "MFLIDiffResistanceApp", {}),
 ]

@@ -12,6 +12,9 @@ validation and the run itself stay identical to the TUI.
 Live view: one R-vs-temperature panel per sensor that is reading (two
 sensors -> two panels), then R vs time — the same layout as the PNG. The table keeps only the latest rows; the full log is in the
 raw file.
+
+Optional fixed field: same card as the TUI (magnet current, θ/φ, plane
+shortcuts, the 3D field-direction diagram from web/field_diagram.py).
 """
 
 from __future__ import annotations
@@ -43,6 +46,7 @@ from web.run_controller import (
     form_state,
 )
 from web.directory_picker import validate_directory
+from web.field_diagram import build_field_diagram_figure
 from web.identity_bar import identity_bar
 from web.sample_picker import NEW_SAMPLE_SENTINEL, prepare_data_root
 
@@ -135,6 +139,28 @@ def page() -> None:
                         "Sensor UID(s)", d("temperature_sensor_uids"),
                         hint="1 or 2, e.g. MB1.T1, DB5.T1 — a missing one is dropped.")
 
+                with param_card("Fixed field (Kepco magnet, optional)"):
+                    switches["enable_field"] = bool_switch("Apply fixed field", d("enable_field"))
+                    inputs["magnet_current_A"] = num_field(
+                        "Magnet current (A)", float(d("magnet_current_A")),
+                        hint="Held for the whole log, ramped to 0 at the end.")
+                    inputs["field_theta_deg"] = optional_num_field(
+                        "θ — tilt from out-of-plane (°)", _opt(d("field_theta_deg")),
+                        hint="0° = out-of-plane, 90° = in-plane.", min=0, max=180)
+                    inputs["field_phi_deg"] = optional_num_field(
+                        "φ — azimuth from current axis (°)", _opt(d("field_phi_deg")),
+                        hint="0° = along current. Ignored when θ=0°.", min=0, max=360)
+                    with ui.row().classes("gap-2 mb-1"):
+                        ui.button("xy", on_click=lambda: (inputs["field_theta_deg"].set_value(90),
+                                                            refresh_summary.refresh())).props("dense outline")
+                        ui.button("zx", on_click=lambda: (inputs["field_phi_deg"].set_value(0),
+                                                            refresh_summary.refresh())).props("dense outline")
+                        ui.button("zy", on_click=lambda: (inputs["field_phi_deg"].set_value(90),
+                                                            refresh_summary.refresh())).props("dense outline")
+                    field_diagram_plot = ui.plotly(build_field_diagram_figure(
+                        _opt(d("field_theta_deg")), _opt(d("field_phi_deg")),
+                    )).classes("w-full").style("height: 220px")
+
             with advanced_section("Acquisition & filter settings"):
                 with stable_grid():
                     with param_card("Source & voltmeter"):
@@ -152,10 +178,30 @@ def page() -> None:
                             "Keithley 2182 (voltage)", d("voltmeter_visa_resource"))
                         inputs["temperature_visa_resource"] = text_field(
                             "MercuryiTC VISA resource", d("temperature_visa_resource"))
+                        inputs["magnet_visa_resource"] = text_field(
+                            "Magnet VISA resource (Kepco)", d("magnet_visa_resource"))
+                        inputs["gaussmeter_visa_resource"] = text_field(
+                            "Gaussmeter VISA resource (Lake Shore 475)", d("gaussmeter_visa_resource"))
                     with stable_card("Source timing"):
                         inputs["source_delay_s"] = num_field(
                             "6221 source delay (s)", float(d("source_delay_s")),
                             hint="Settle after each polarity flip.")
+                    with stable_card("Magnet & gaussmeter"):
+                        inputs["current_limit_A"] = num_field(
+                            "Magnet software current limit (A)", float(d("current_limit_A")),
+                            hint="Hard safety ceiling.")
+                        inputs["voltage_compliance_V"] = num_field(
+                            "Magnet voltage compliance (V)", float(d("voltage_compliance_V")))
+                        inputs["ramp_step_A"] = num_field("Magnet ramp step (A)", float(d("ramp_step_A")))
+                        inputs["ramp_delay_s"] = num_field("Magnet ramp delay (s)", float(d("ramp_delay_s")))
+                        inputs["field_settle_tolerance_mT"] = num_field(
+                            "Field-settle tolerance (mT)", float(d("field_settle_tolerance_mT")),
+                            hint="Before logging starts: settled when readings span less than this.")
+                        inputs["gaussmeter_n_averages"] = num_field(
+                            "Field readings averaged per sample", float(d("gaussmeter_n_averages")),
+                            integer=True)
+                        inputs["gaussmeter_read_delay_s"] = num_field(
+                            "Delay between field readings (s)", float(d("gaussmeter_read_delay_s")))
 
         with regions.summary:
             summary_box = ui.column().classes("w-full")
@@ -181,6 +227,7 @@ def page() -> None:
                 {"name": "T2", "label": "T2 (K)", "field": "T2"},
                 {"name": "R", "label": "R (Ω)", "field": "R"},
                 {"name": "sR", "label": "σR (Ω)", "field": "sR"},
+                {"name": "B", "label": "B (mT)", "field": "B"},
             ]
             table = ui.table(columns=columns, rows=[], row_key="n").classes("w-full").props("dense")
             log_area = ui.log(max_lines=2000).classes("w-full h-48 font-mono text-xs")
@@ -222,6 +269,9 @@ def page() -> None:
             summary_box.clear()
             render_summary([i for i in info if i], warnings, errors)
         start_btn.set_enabled(not errors and not is_busy())
+        theta = None if parse_errors else state.get("field_theta_deg")
+        phi = None if parse_errors else state.get("field_phi_deg")
+        field_diagram_plot.update_figure(build_field_diagram_figure(theta, phi))
 
     for inp in list(inputs.values()) + [
         identity.data_dir_input, identity.sample_dropdown, identity.device_input,
@@ -274,6 +324,7 @@ def page() -> None:
             "T2": f"{record['temperature_2_K']:.3f}" if record.get("temperature_2_K") is not None else "—",
             "R": f"{record['resistance_ohm']:.6g}",
             "sR": f"{record['resistance_sem_ohm']:.2g}",
+            "B": f"{record['magnet_field_mT']:.2f}" if record.get("magnet_field_mT") is not None else "—",
         })
         del table.rows[:-TABLE_ROWS]
 

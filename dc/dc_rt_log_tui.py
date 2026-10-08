@@ -18,6 +18,12 @@ identity, board catalog, and each sensor's exact query + raw reply). If two
 sensors are configured but only one answers, the log continues with that one,
 and the plots show one R-vs-T panel per sensor that is reading.
 
+Optional fixed field ("Apply fixed field" switch, off by default): the Kepco
+is ramped to one magnet current before the log starts, held there for the
+whole log, and ramped to zero on shutdown (Stop, error, or normal end). The
+Lake Shore 475 is read once per sample, after the R/T window, into
+magnet_field_mT; the hand-entered field direction θ/φ goes into every row.
+
 Run with:
     python dc_rt_log_tui.py
 """
@@ -46,24 +52,34 @@ from dc.dc_rt_log import (
     SENSOR_COLUMNS,
     TIME_COLOR,
     AcquisitionConfig,
+    GaussmeterConfig,
+    MagnetConfig,
     SourceConfig,
     TemperatureControllerConfig,
     VoltmeterConfig,
+    connect_gaussmeter,
+    connect_magnet,
     connect_source,
     connect_temperature_controller,
     connect_voltmeter,
     plot_results,
     ramp_current_to_zero,
     run_measurement,
+    set_magnet_current,
+    shutdown_gaussmeter,
+    shutdown_magnet,
     shutdown_source,
     sensors_in,
     shutdown_temperature_controller,
 )
 from dc.dc_sweep_utils import check_sweep_size, safe_shutdown
 from instruments.data_dir import validate_directory
+from instruments.field_geometry import field_direction_summary_line, render_ascii_field_diagram
 from instruments.data_naming import RunContext, allocate_run, preview_raw_filename, record_run
 from instruments.keithley2182 import read_time_s
 from instruments.keithley6221 import reversal_avg_s
+from instruments.kepco_magnet import magnet_move_s
+from instruments.lakeshore475 import read_field_s
 from instruments.run_time import PER_RUN_S, POINT_OVERHEAD_S, TEMP_READ_S, RunCost, format_duration
 from instruments.summary_lines import summary_markup
 from instruments.tui_common import (
@@ -89,7 +105,8 @@ PNG_SUFFIX = "R_vs_T"
 
 DC_RT_LOG_DESCRIPTION = (
     "Continuous ±I reversal resistance log (6221 + 2182) while the temperature drifts "
-    "freely; MercuryiTC read only, before and after every sample (drift saved per point)."
+    "freely; MercuryiTC read only, before and after every sample (drift saved per point). "
+    "Optionally holds a fixed magnet current for the whole log."
 )
 
 DC_RT_LOG_SCHEMATIC = """\
@@ -101,6 +118,10 @@ DC_RT_LOG_SCHEMATIC = """\
 
   MercuryiTC  (optional, read only — no temperature control)
     LAN ──▶ 1 or 2 temperature sensors
+
+  Fixed field  (optional, "Apply fixed field" switch)
+    Kepco BOP-GL  ──GPIB──▶ electromagnet coil (held at one current)
+    Lake Shore 475 ──GPIB──▶ Hall probe at the sample (read after each sample)
 """
 
 DEFAULTS: dict = {
@@ -121,6 +142,19 @@ DEFAULTS: dict = {
     "enable_temperature": True,
     "temperature_visa_resource": "TCPIP0::192.168.1.5::7020::SOCKET",
     "temperature_sensor_uids": "MB1.T1",
+    "enable_field": False,
+    "magnet_current_A": "0",
+    "field_theta_deg": "",
+    "field_phi_deg": "",
+    "magnet_visa_resource": "GPIB0::6::INSTR",
+    "current_limit_A": "35",
+    "voltage_compliance_V": "15.0",
+    "ramp_step_A": "0.1",
+    "ramp_delay_s": "0.05",
+    "field_settle_tolerance_mT": "0.02",
+    "gaussmeter_visa_resource": "GPIB0::12::INSTR",
+    "gaussmeter_n_averages": "1",
+    "gaussmeter_read_delay_s": "0.05",
 }
 
 NUMERIC_FIELDS: dict = {
@@ -131,11 +165,44 @@ NUMERIC_FIELDS: dict = {
     "n_reversals": int,
     "interval_s": float,
     "max_duration_min": float,
+    "magnet_current_A": float,
+    "current_limit_A": float,
+    "voltage_compliance_V": float,
+    "ramp_step_A": float,
+    "ramp_delay_s": float,
+    "field_settle_tolerance_mT": float,
+    "gaussmeter_n_averages": int,
+    "gaussmeter_read_delay_s": float,
 }
 TEXT_FIELDS = ["source_visa_resource", "voltmeter_visa_resource", "device", "cooldown",
-               "temperature_visa_resource", "temperature_sensor_uids", "data_dir"]
-OPTIONAL_NUMERIC_FIELDS = ["temperature_setpoint_K", "T_stop_K"]
+               "temperature_visa_resource", "temperature_sensor_uids",
+               "magnet_visa_resource", "gaussmeter_visa_resource", "data_dir"]
+OPTIONAL_NUMERIC_FIELDS = ["temperature_setpoint_K", "T_stop_K", "field_theta_deg", "field_phi_deg"]
 TEMPERATURE_FIELD_IDS = ["temperature_visa_resource", "temperature_sensor_uids"]
+MAGNET_FIELD_IDS = [
+    "magnet_current_A", "field_theta_deg", "field_phi_deg",
+    "magnet_visa_resource", "current_limit_A", "voltage_compliance_V",
+    "ramp_step_A", "ramp_delay_s", "field_settle_tolerance_mT",
+    "gaussmeter_visa_resource", "gaussmeter_n_averages", "gaussmeter_read_delay_s",
+]
+
+
+def _magnet_cfg(state: dict) -> MagnetConfig:
+    return MagnetConfig(
+        visa_resource=state["magnet_visa_resource"],
+        current_limit_A=state["current_limit_A"],
+        voltage_compliance_V=state["voltage_compliance_V"],
+        ramp_step_A=state["ramp_step_A"],
+        ramp_delay_s=state["ramp_delay_s"],
+    )
+
+
+def _gauss_cfg(state: dict) -> GaussmeterConfig:
+    return GaussmeterConfig(
+        visa_resource=state["gaussmeter_visa_resource"],
+        n_averages=state["gaussmeter_n_averages"],
+        read_delay_s=state["gaussmeter_read_delay_s"],
+    )
 
 
 def _has_temperature(state: dict) -> bool:
@@ -148,21 +215,33 @@ def sample_time_s(state: dict) -> float:
     return t + (2 * TEMP_READ_S if _has_temperature(state) else 0.0)
 
 
+def sample_period_s(state: dict) -> float:
+    """Start-to-start spacing: the sample, plus (fixed field) the field read
+    that follows it outside the R/T window, or `interval_s` if longer."""
+    t = sample_time_s(state) + POINT_OVERHEAD_S
+    if state.get("enable_field"):
+        t += read_field_s(_gauss_cfg(state))
+    return max(state["interval_s"], t)
+
+
 def max_samples(state: dict) -> int:
     """Samples the run takes if it runs to its maximum duration."""
-    period = max(state["interval_s"], sample_time_s(state) + POINT_OVERHEAD_S)
-    return max(1, math.ceil(state["max_duration_min"] * 60.0 / period))
+    return max(1, math.ceil(state["max_duration_min"] * 60.0 / sample_period_s(state)))
 
 
 def run_costs(state: dict) -> RunCost:
     """Upper-bound cost: the run at its maximum duration (Stop or T_stop end it sooner)."""
     n = max_samples(state)
     check_sweep_size(n)
-    period = max(state["interval_s"], sample_time_s(state) + POINT_OVERHEAD_S)
     rc = RunCost(n)
-    rc.each("samples", period)
+    rc.each("samples", sample_period_s(state))
     rc.at("per-run", PER_RUN_S, 0)
     rc.tail("ramp", max(1, int(abs(state["sense_current_A"]) / 1e-4)) * 0.02)
+    if state.get("enable_field"):       # park the magnet before sample 1, ramp it down at the end
+        mcfg = _magnet_cfg(state)
+        typ, worst = magnet_move_s(state["magnet_current_A"], mcfg)
+        rc.at("magnet", typ, 0, worst_extra=worst - typ)
+        rc.tail("ramps", magnet_move_s(state["magnet_current_A"], mcfg, with_field=False)[0])
     return rc
 
 
@@ -185,6 +264,12 @@ class MeasurementPlan:
     run_cost: Optional[RunCost] = None
     total_points: int = 1               # upper bound (max duration) — progress bar only
     series: str = ""
+    magnet_cfg: Optional[MagnetConfig] = None       # None = no fixed field
+    gauss_cfg: Optional[GaussmeterConfig] = None
+    magnet_current_A: Optional[float] = None
+    field_settle_tolerance_mT: Optional[float] = None
+    field_theta_deg: Optional[float] = None
+    field_phi_deg: Optional[float] = None
 
 
 def build_header_fields(plan: MeasurementPlan, ctx: RunContext, records: list[dict], *,
@@ -249,6 +334,14 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         errors.append("Sample interval must be ≥ 0 s.")
     if state["max_duration_min"] <= 0:
         errors.append("Maximum duration must be > 0 min.")
+    if state["enable_field"]:
+        if state["ramp_step_A"] <= 0:
+            errors.append("Magnet ramp step must be > 0 A.")
+        if state["gaussmeter_n_averages"] < 1:
+            errors.append("Field readings averaged must be ≥ 1.")
+        if abs(state["magnet_current_A"]) > state["current_limit_A"]:
+            errors.append(f"Magnet current ({state['magnet_current_A']:g} A) exceeds the "
+                          f"current limit ({state['current_limit_A']:g} A).")
 
     info.append(f"Sense current: ±{format_si(abs(state['sense_current_A']), 'A')}, "
                 f"{state['n_reversals']} ±I pairs per sample")
@@ -282,6 +375,17 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
                         "sensors that don't answer are dropped")
     else:
         warnings.append("Temperature logging is off — the log runs against time only.")
+
+    if state["enable_field"]:
+        if state["magnet_current_A"] == 0:
+            warnings.append("Fixed field is on but the magnet current is 0 A.")
+        info.append(f"Fixed field: magnet held at {state['magnet_current_A']:g} A for the whole log, "
+                    f"ramped to 0 at the end; B read after each sample "
+                    f"(Lake Shore 475, {state['gaussmeter_n_averages']} avg)")
+        info.append(field_direction_summary_line(state.get("field_theta_deg"),
+                                                 state.get("field_phi_deg")))
+    else:
+        info.append("Field: none — magnet untouched")
 
     return info, warnings, errors
 
@@ -405,6 +509,17 @@ def build_plan(state: dict, data_root: Path) -> MeasurementPlan:
         "max_duration_min": state["max_duration_min"],
         "T_stop_K": state.get("T_stop_K"),
     }
+    field_kw: dict = {}
+    if state["enable_field"]:
+        field_kw = dict(
+            magnet_cfg=_magnet_cfg(state), gauss_cfg=_gauss_cfg(state),
+            magnet_current_A=state["magnet_current_A"],
+            field_settle_tolerance_mT=state["field_settle_tolerance_mT"],
+            field_theta_deg=state.get("field_theta_deg"), field_phi_deg=state.get("field_phi_deg"),
+        )
+        header_extra.update(magnet_current_A=state["magnet_current_A"],
+                            field_theta_deg=state.get("field_theta_deg"),
+                            field_phi_deg=state.get("field_phi_deg"))
     run_cost = run_costs(state)
     return MeasurementPlan(
         src_cfg=src_cfg, volt_cfg=volt_cfg, acq_cfg=acq_cfg,
@@ -413,6 +528,7 @@ def build_plan(state: dict, data_root: Path) -> MeasurementPlan:
         cooldown=state["cooldown"], header_extra=header_extra,
         temp_cfg=temp_cfg, data_root=data_root,
         run_cost=run_cost, total_points=len(run_cost.points),
+        **field_kw,
     )
 
 
@@ -427,11 +543,12 @@ def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
              on_run_finished: Optional[Callable[[RunContext, list], None]] = None,
              run_contexts: Optional[list] = None,
              run_extras: Optional[list] = None) -> None:
-    """Connect, probe the iTC sensors, log one run until Stop / max duration
-    / T_stop, finalize it, and always ramp the current down and shut down."""
+    """Connect, probe the iTC sensors, park the magnet (fixed field), log one
+    run until Stop / max duration / T_stop, finalize it, and always ramp the
+    sense current and the magnet down and shut down."""
     run_contexts = [] if run_contexts is None else run_contexts
     run_extras = [] if run_extras is None else run_extras
-    source = temp_ctrl = None
+    source = temp_ctrl = magnet = gaussmeter = None
     try:
         on_status("Connecting to Keithley 6221 & 2182 …")
         source = connect_source(plan.src_cfg)
@@ -441,6 +558,16 @@ def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
             on_status("Connecting to MercuryiTC and probing its sensors (see log) …")
             temp_ctrl = connect_temperature_controller(plan.temp_cfg)   # narrows sensor_uids
         temp_cfg = plan.temp_cfg if temp_ctrl is not None else None
+
+        if plan.magnet_cfg is not None:
+            on_status("Connecting magnet power supply & gaussmeter …")
+            magnet = connect_magnet(plan.magnet_cfg)
+            gaussmeter = connect_gaussmeter(plan.gauss_cfg)
+            on_status(f"Ramping magnet to {plan.magnet_current_A:g} A and waiting for the field to settle …")
+            set_magnet_current(magnet, plan.magnet_cfg, plan.magnet_current_A, gaussmeter,
+                               plan.gauss_cfg, plan.field_settle_tolerance_mT, stop_event)
+            if stop_event.is_set():     # stopped during the ramp: no empty run file
+                return
 
         ctx = allocate_run(plan.data_root, plan.sample, plan.device, MEASUREMENT_TYPE,
                            temperature_setpoint_K=plan.temperature_setpoint_K)
@@ -459,12 +586,19 @@ def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
                                                         comment="", extra=extra),
             lambda point_cb, write_csv: run_measurement(
                 source, voltmeter, plan.src_cfg, plan.acq_cfg, stop_event=stop_event,
-                on_point=point_cb, temp_ctrl=temp_ctrl, temp_cfg=temp_cfg, write_csv=write_csv),
+                on_point=point_cb, temp_ctrl=temp_ctrl, temp_cfg=temp_cfg, write_csv=write_csv,
+                gaussmeter=gaussmeter, gauss_cfg=plan.gauss_cfg,
+                magnet_current_A=plan.magnet_current_A,
+                field_theta_deg=plan.field_theta_deg, field_phi_deg=plan.field_phi_deg),
             None, on_point=on_point, on_finished=on_run_finished)
     finally:
         if source is not None:
             safe_shutdown("source (ramp)", lambda: ramp_current_to_zero(source))
             safe_shutdown("source", lambda: shutdown_source(source))
+        if magnet is not None:
+            safe_shutdown("magnet", lambda: shutdown_magnet(magnet, plan.magnet_cfg))
+        if gaussmeter is not None:
+            safe_shutdown("gaussmeter", lambda: shutdown_gaussmeter(gaussmeter))
         if temp_ctrl is not None:
             safe_shutdown("MercuryiTC", lambda: shutdown_temperature_controller(temp_ctrl))
 
@@ -479,11 +613,11 @@ def _fmt(value: Optional[float], spec: str) -> str:
 
 class RunScreen(MeasurementRunScreen):
     ABORT_LABEL = "Stop logging"
-    ABORT_STATUS = "Stop requested — finishing the current sample, then ramping current to zero …"
+    ABORT_STATUS = "Stop requested — finishing the current sample, then ramping current (and magnet) to zero …"
     DONE_STATUS = "Log finished."
     STOP_IS_NORMAL_END = True      # Stop ends a log normally -> "completed" in the run history
     POINT_STATUS = "Sample {n} (at most {total})."
-    TABLE_COLUMNS = ("#", "t (s)", "T1 (K)", "ΔT1 (mK)", "T2 (K)", "R (Ω)", "σR (Ω)")
+    TABLE_COLUMNS = ("#", "t (s)", "T1 (K)", "ΔT1 (mK)", "T2 (K)", "R (Ω)", "σR (Ω)", "B (mT)")
     MEASUREMENT_TYPE = MEASUREMENT_TYPE
     PNG_SUFFIX = PNG_SUFFIX
 
@@ -500,6 +634,7 @@ class RunScreen(MeasurementRunScreen):
             _fmt(record.get("temperature_2_K"), ".3f"),
             f"{record['resistance_ohm']:.6g}",
             f"{record['resistance_sem_ohm']:.2g}",
+            _fmt(record.get("magnet_field_mT"), ".2f"),
         )
 
 
@@ -513,7 +648,10 @@ class DCRTLogApp(MeasurementApp):
 
     data_root: Path = _DEFAULT_DATA_DIR
 
-    SWITCH_DEPENDENTS = {"enable_temperature": tuple(TEMPERATURE_FIELD_IDS)}
+    SWITCH_DEPENDENTS = {
+        "enable_temperature": tuple(TEMPERATURE_FIELD_IDS),
+        "enable_field": tuple(MAGNET_FIELD_IDS),
+    }
 
     CSS = """
     #body { height: 1fr; }
@@ -546,6 +684,9 @@ class DCRTLogApp(MeasurementApp):
     .hint { text-style: italic; color: $text-muted; width: 100%; }
     .switch-row { height: auto; }
     .switch-row Label { padding-left: 1; content-align: left middle; width: 1fr; height: auto; min-height: 3; }
+    .plane-btn-row { height: 3; margin-bottom: 1; }
+    .plane-btn-row Button { min-width: 5; margin-right: 1; }
+    .field-diagram { color: $text-muted; margin-top: 1; }
     .sidebar-title { text-style: bold underline; margin-bottom: 1; }
     .card-desc { color: $text-muted; margin-bottom: 1; }
     #actionbar { height: 3; align: center middle; }
@@ -587,6 +728,28 @@ class DCRTLogApp(MeasurementApp):
                               DEFAULTS["temperature_sensor_uids"], kind="text",
                               hint="1 or 2, e.g. MB1.T1, DB5.T1 — a missing one is dropped."),
                     )
+                    yield card(
+                        "Fixed field (Kepco magnet, optional)",
+                        switch_field("enable_field", "Apply fixed field", DEFAULTS["enable_field"]),
+                        field("magnet_current_A", "Magnet current (A)", DEFAULTS["magnet_current_A"],
+                              hint="Held for the whole log, ramped to 0 at the end."),
+                        field("field_theta_deg", "θ — tilt from out-of-plane (°)",
+                              DEFAULTS["field_theta_deg"], kind="number", valid_empty=True,
+                              validators=[Number(0, 180, failure_description="0-180°")],
+                              hint="0° = out-of-plane, 90° = in-plane."),
+                        field("field_phi_deg", "φ — azimuth from current axis (°)",
+                              DEFAULTS["field_phi_deg"], kind="number", valid_empty=True,
+                              validators=[Number(0, 360, failure_description="0-360°")],
+                              hint="0° = along current. Ignored when θ=0°."),
+                        Horizontal(
+                            Button("xy", id="plane_xy", classes="plane-btn"),
+                            Button("zx", id="plane_zx", classes="plane-btn"),
+                            Button("zy", id="plane_zy", classes="plane-btn"),
+                            classes="plane-btn-row",
+                        ),
+                        Static(render_ascii_field_diagram(None, None),
+                               id="field_diagram", classes="field-diagram"),
+                    )
 
                 with Collapsible(title="Acquisition & filter settings", collapsed=True):
                     with Vertical(classes="param-grid"):
@@ -610,6 +773,29 @@ class DCRTLogApp(MeasurementApp):
                                   DEFAULTS["voltmeter_visa_resource"], kind="text"),
                             field("temperature_visa_resource", "MercuryiTC",
                                   DEFAULTS["temperature_visa_resource"], kind="text"),
+                            field("magnet_visa_resource", "Magnet (Kepco)",
+                                  DEFAULTS["magnet_visa_resource"], kind="text"),
+                            field("gaussmeter_visa_resource", "Gaussmeter (Lake Shore 475)",
+                                  DEFAULTS["gaussmeter_visa_resource"], kind="text"),
+                            muted=True,
+                        )
+                        yield card(
+                            "Magnet & gaussmeter",
+                            field("current_limit_A", "Magnet software current limit (A)",
+                                  DEFAULTS["current_limit_A"], hint="Hard safety ceiling."),
+                            field("voltage_compliance_V", "Magnet voltage compliance (V)",
+                                  DEFAULTS["voltage_compliance_V"]),
+                            field("ramp_step_A", "Magnet ramp step (A)", DEFAULTS["ramp_step_A"]),
+                            field("ramp_delay_s", "Magnet ramp delay (s)", DEFAULTS["ramp_delay_s"]),
+                            field("field_settle_tolerance_mT", "Field-settle tolerance (mT)",
+                                  DEFAULTS["field_settle_tolerance_mT"],
+                                  hint="Before logging starts: settled when readings span less than this.",
+                                  validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
+                            field("gaussmeter_n_averages", "Field readings averaged per sample",
+                                  DEFAULTS["gaussmeter_n_averages"], kind="integer",
+                                  validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
+                            field("gaussmeter_read_delay_s", "Delay between field readings (s)",
+                                  DEFAULTS["gaussmeter_read_delay_s"]),
                             muted=True,
                         )
                         yield card(
@@ -642,6 +828,9 @@ class DCRTLogApp(MeasurementApp):
             else "[dim]File:  (choose a sample and device to preview the filename)[/dim]")
         self.query_one("#summary", Static).update(summary_markup(info, warnings, errors))
         self.query_one("#start", Button).disabled = bool(errors)
+        theta = None if parse_errors else state.get("field_theta_deg")
+        phi = None if parse_errors else state.get("field_phi_deg")
+        self.query_one("#field_diagram", Static).update(render_ascii_field_diagram(theta, phi))
 
     def _build_plan(self, state: dict) -> MeasurementPlan:
         return build_plan(state, self.data_root)

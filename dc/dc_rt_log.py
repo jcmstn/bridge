@@ -21,6 +21,10 @@ Wiring
     Oxford Instruments MercuryiTC (optional, read only)
       LAN ──▶ 1 or 2 temperature sensors, read before and after every sample
 
+    Kepco BOP-GL + Lake Shore 475 (optional, "fixed field")
+      Kepco ──▶ electromagnet coil, parked at one magnet current for the whole log
+      475 probe ──▶ at the sample, read once per sample (after the R/T window)
+
 Method
 ------
 The conventional R(T) technique for a slow, uncontrolled sweep: a FIXED small
@@ -38,7 +42,19 @@ logged back to back for as long as the run lasts:
      moved while that point was measured, over `sample_duration_s`, so the
      validity of each point can be judged afterwards (e.g. discard points
      whose drift exceeds the resolution needed).
-  5. Wait out the rest of `interval_s` (0 = next sample immediately).
+  5. Fixed field only: read the gaussmeter → `magnet_field_mT`. This comes
+     AFTER T_after, outside the timed window, so it never lengthens
+     `sample_duration_s` (it only lengthens the period). It is there to show
+     whether the field stays constant over a long log, not as a precise
+     per-point field.
+  6. Wait out the rest of `interval_s` (0 = next sample immediately).
+
+Fixed field (optional): the caller ramps the magnet to one current before
+the log starts (set_magnet_current, which waits for the field to settle) and
+ramps it to zero in its shutdown. run_measurement() never moves the magnet;
+it only records the current, the measured field, and the hand-entered field
+direction (`field_theta_deg` / `field_phi_deg`, see docs/data_convention.md
+"Field direction convention").
 
 A sample is kept short on purpose: the shorter it is, the less the
 temperature moves during it. The sample time is ≈ 2·n_reversals·(source delay
@@ -75,6 +91,19 @@ from instruments.keithley6221 import (
     shutdown_source,
 )
 from instruments.keithley2182 import VoltmeterConfig, connect_voltmeter
+from instruments.kepco_magnet import (
+    MagnetConfig,
+    connect_magnet,
+    set_magnet_current,
+    shutdown_magnet,
+)
+from instruments.lakeshore475 import (
+    GaussmeterConfig,
+    LakeShore475,
+    connect_gaussmeter,
+    read_field_mT,
+    shutdown_gaussmeter,
+)
 from instruments.mercury_itc import (
     MercuryITC,
     TemperatureControllerConfig,
@@ -97,8 +126,9 @@ log = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Configuration  ── SourceConfig (fixed sense current) / VoltmeterConfig come
-# from instruments/ and are re-exported from here for dc_rt_log_tui.py
+# Configuration  ── SourceConfig (fixed sense current) / VoltmeterConfig /
+# MagnetConfig / GaussmeterConfig come from instruments/ and are re-exported
+# from here for dc_rt_log_tui.py
 # ─────────────────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -143,6 +173,11 @@ def run_measurement(
     temp_ctrl:  Optional[MercuryITC] = None,
     temp_cfg:   Optional[TemperatureControllerConfig] = None,
     write_csv:  Optional[Callable[[List[dict]], None]] = None,
+    gaussmeter: Optional[LakeShore475] = None,
+    gauss_cfg:  Optional[GaussmeterConfig] = None,
+    magnet_current_A: Optional[float] = None,
+    field_theta_deg:  Optional[float] = None,
+    field_phi_deg:    Optional[float] = None,
 ) -> pd.DataFrame:
     """
     Take ±I reversal samples back to back (or every `acq_cfg.interval_s`)
@@ -157,6 +192,11 @@ def run_measurement(
     every `acq_cfg.save_every_s` — the caller (record_run) writes the final
     file once the loop returns. Without it, a plain CSV is written to
     `acq_cfg.output_file` on the same cadence and at the end.
+
+    `gaussmeter`/`gauss_cfg` (fixed-field runs) read the field once per
+    sample, after T_after, so the R/T window is unchanged. The magnet is
+    parked by the caller; `magnet_current_A` and the field direction are
+    only written to every row (blank when None).
     """
     I = src_cfg.sense_current_A
     records: List[dict] = []
@@ -186,6 +226,8 @@ def run_measurement(
             source_delay_s=src_cfg.source_delay_s)
         t1_after, t2_after = _read_T()
         t_end = time.monotonic()
+        field_mT = read_field_mT(gaussmeter, gauss_cfg) \
+            if gaussmeter is not None and gauss_cfg is not None else None
 
         T1 = _mean(t1_before, t1_after)
         record = {
@@ -205,6 +247,11 @@ def run_measurement(
             "resistance_ohm":        v["mean"] / I,
             "resistance_sem_ohm":    v["sem"] / abs(I),
             "n_reversals":           v["n_reversals"],
+            "magnet_current_A":      magnet_current_A,
+            "magnet_field_mT":       field_mT,
+            "field_theta_deg":       field_theta_deg,
+            "field_phi_deg":         field_phi_deg,
+            "field_frame":           "RH",  # right-handed (z=normal, x=current, y=z×x); see docs/data_convention.md
         }
         records.append(record)
         log.info("#%d  T1=%s K  R=%.6g Ω  (%.2f s)", record["point_index"] + 1,
@@ -292,6 +339,13 @@ def plot_results(df: pd.DataFrame, out_path: Path, note: str = "") -> None:
 # Entry point  ── configure your devices here ─────────────────────────────────
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Fixed field (optional): None = no magnet. Otherwise the Kepco is parked at
+# this current for the whole log and ramped to zero at the end.
+FIXED_MAGNET_CURRENT_A: Optional[float] = None
+FIELD_THETA_DEG: Optional[float] = None     # from the film normal (0 = OOP, 90 = in-plane)
+FIELD_PHI_DEG:   Optional[float] = None     # azimuth from the current axis
+
+
 def main() -> None:
     src_cfg = SourceConfig(visa_resource="GPIB0::20::INSTR", sense_current_A=1e-4,
                            compliance_V=2.0, source_delay_s=0.05)
@@ -305,19 +359,33 @@ def main() -> None:
         output_file=str(_DATA_DIR / f"dc_rt_log_{datetime.now():%Y%m%d_%H%M%S}.csv"),
     )
 
-    source = voltmeter = temp_ctrl = None
+    magnet_cfg = MagnetConfig(visa_resource="GPIB0::6::INSTR", current_limit_A=35.0)
+    gauss_cfg = GaussmeterConfig(visa_resource="GPIB0::12::INSTR", n_averages=1)
+
+    source = voltmeter = temp_ctrl = magnet = gaussmeter = None
     try:
         source = connect_source(src_cfg)
         voltmeter = connect_voltmeter(volt_cfg)
         temp_ctrl = connect_temperature_controller(temp_cfg)   # probes + narrows sensor_uids
+        if FIXED_MAGNET_CURRENT_A is not None:
+            magnet = connect_magnet(magnet_cfg)
+            gaussmeter = connect_gaussmeter(gauss_cfg)
+            set_magnet_current(magnet, magnet_cfg, FIXED_MAGNET_CURRENT_A, gaussmeter, gauss_cfg)
         df = run_measurement(source, voltmeter, src_cfg, acq_cfg,
-                             temp_ctrl=temp_ctrl, temp_cfg=temp_cfg if temp_ctrl is not None else None)
+                             temp_ctrl=temp_ctrl, temp_cfg=temp_cfg if temp_ctrl is not None else None,
+                             gaussmeter=gaussmeter, gauss_cfg=gauss_cfg,
+                             magnet_current_A=FIXED_MAGNET_CURRENT_A,
+                             field_theta_deg=FIELD_THETA_DEG, field_phi_deg=FIELD_PHI_DEG)
         if not df.empty:
             plot_results(df, Path(acq_cfg.output_file).with_suffix(".png"))
     finally:
         if source is not None:
             safe_shutdown("6221 (ramp)", lambda: ramp_current_to_zero(source))
             safe_shutdown("6221", lambda: shutdown_source(source))
+        if magnet is not None:
+            safe_shutdown("magnet", lambda: shutdown_magnet(magnet, magnet_cfg))
+        if gaussmeter is not None:
+            safe_shutdown("gaussmeter", lambda: shutdown_gaussmeter(gaussmeter))
         safe_shutdown("MercuryiTC", lambda: shutdown_temperature_controller(temp_ctrl))
 
 

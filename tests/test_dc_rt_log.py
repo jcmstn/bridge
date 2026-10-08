@@ -241,3 +241,81 @@ def test_web_run_history_records_a_stopped_log_as_completed(stop_is_normal_end, 
                             on_run_label=lambda t: None))
     assert run_index.recent_runs(1)[0]["status"] == expected
     assert rc._queue.get_nowait()["status"] == expected
+
+
+# ── Fixed field ──────────────────────────────────────────────────────────────
+
+class FakeGaussmeter:
+    def __init__(self, B_T=0.1):
+        self.B_T, self.reads = B_T, 0
+
+    def measure(self, n, delay=0.0):
+        self.reads += 1
+        return self.B_T, 0.0
+
+
+def test_fixed_field_is_read_after_the_timed_window_and_recorded(monkeypatch):
+    """The B read happens after t_end, so sample_duration_s (the R/T window)
+    does not include it; the hold current and θ/φ go into every row."""
+    gm = FakeGaussmeter()
+    clock = [0.0]
+
+    def slow_measure(n, delay=0.0):
+        clock[0] += 100.0              # a very slow field read
+        return 0.1, 0.0
+
+    gm.measure = slow_measure
+    monkeypatch.setattr(rt.time, "monotonic", lambda: clock[0])
+    source = FakeSource()
+    stop = threading.Event()
+    df = rt.run_measurement(
+        source, FakeVoltmeter(source), rt.SourceConfig(sense_current_A=1e-4, source_delay_s=0.0),
+        rt.AcquisitionConfig(n_reversals=2, max_duration_s=1e9), stop,
+        lambda rec: stop.set(), write_csv=lambda recs: None,
+        gaussmeter=gm, gauss_cfg=rt.GaussmeterConfig(unit="T"),
+        magnet_current_A=2.0, field_theta_deg=90.0, field_phi_deg=0.0)
+    row = df.iloc[0]
+    assert row["magnet_field_mT"] == pytest.approx(100.0)
+    assert row["sample_duration_s"] < 100.0
+    assert (row["magnet_current_A"], row["field_theta_deg"], row["field_phi_deg"], row["field_frame"]) \
+        == (2.0, 90.0, 0.0, "RH")
+
+
+def test_no_field_leaves_field_columns_blank():
+    df, _ = _run(stop_after=1)
+    assert df["magnet_field_mT"].isna().all() and df["magnet_current_A"].isna().all()
+
+
+def test_summary_and_cost_with_fixed_field():
+    off = _state(max_duration_min=60.0, interval_s=0.0)
+    on = _state(max_duration_min=60.0, interval_s=0.0, enable_field=True, magnet_current_A=5.0)
+    assert tui.sample_time_s(on) == tui.sample_time_s(off)          # R/T window unchanged
+    assert tui.sample_period_s(on) > tui.sample_period_s(off)       # only the period grows
+    assert tui.build_summary(on)[2] == tui.build_summary(off)[2]       # no field-specific error
+    assert any("exceeds" in e for e in tui.build_summary({**on, "magnet_current_A": 99.0})[2])
+    plan = tui.build_plan(on, "/tmp")
+    assert plan.magnet_current_A == 5.0 and plan.magnet_cfg is not None
+    assert tui.build_plan(off, "/tmp").magnet_cfg is None
+
+
+def test_run_plan_parks_the_magnet_and_always_ramps_it_down(tmp_path, monkeypatch):
+    from unittest.mock import MagicMock
+    from instruments.data_naming import ensure_sample
+    ensure_sample(tmp_path, "A", create=True)
+    plan = tui.build_plan(_state(enable_field=True, magnet_current_A=3.0, enable_temperature=False),
+                          tmp_path)
+    calls: list = []
+    for name in ("connect_source", "connect_voltmeter", "connect_magnet", "connect_gaussmeter",
+                 "ramp_current_to_zero", "shutdown_source", "shutdown_gaussmeter"):
+        monkeypatch.setattr(tui, name, lambda *a, **k: MagicMock())
+    monkeypatch.setattr(tui, "set_magnet_current", lambda m, c, I, *a: calls.append(("set", I)))
+    monkeypatch.setattr(tui, "shutdown_magnet", lambda *a: calls.append(("shutdown",)))
+
+    def boom(*a, **k):
+        assert k["magnet_current_A"] == 3.0 and k["gaussmeter"] is not None
+        raise RuntimeError("2182 timeout")
+
+    monkeypatch.setattr(tui, "run_measurement", boom)
+    with pytest.raises(RuntimeError):
+        tui.run_plan(plan, threading.Event())
+    assert calls == [("set", 3.0), ("shutdown",)]
