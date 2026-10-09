@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """
-DC Gate Sweep — Keithley 2400 (gate) + 6221 (fixed sense current) + 2182
+DC Gate Sweep — Keithley 2400 (gate) + 6221/2182 or 2450 (channel)
 ==========================================================================
 Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
 Created: 2026-08-04
 
-Sweeps the gate voltage at a fixed sense current — the standard
-transfer-curve measurement for a gated device.
+Sweeps the gate voltage at a fixed channel bias — the standard
+transfer-curve measurement for a gated device. Two channel modes:
+
+* 6221 + 2182 (default): fixed sense current, measure the DUT voltage.
+* 2450 (transistor mode): fixed drain-source voltage V_ds, measure I_ds —
+  pass `smu`/`smu_cfg`/`drain_voltage_V` and leave source/voltmeter None.
 
 Wiring
 ------
@@ -17,7 +21,11 @@ Wiring
       Channel 1 (differential) ──▶ across the DUT (2-terminal or
       4-terminal / Kelvin)
 
-    Keithley 2400 (gate source)
+    — or, transistor mode, instead of the 6221 + 2182 —
+    Keithley 2450 (source V_ds, measure I_ds)
+      HI ──▶ drain,  LO ──▶ source (2-wire)
+
+    Keithley 2400 (gate source; also reads the gate leakage I_G)
       Output (voltage) ──▶ gate electrode
 
     Magnet field  (optional — see MagnetConfig/GaussmeterConfig)
@@ -30,8 +38,10 @@ For each gate voltage point:
   1. Set the 2400's gate voltage.
   2. Settle (acq_cfg.settling_time_s — gated 2D systems can be slow to
      re-equilibrate after a gate step).
-  3. Read `n_averages` voltage samples from the 2182 and average them.
-  4. Chord resistance R = V / I_sense is recorded alongside V and Vg.
+  3. Read `n_averages` voltage samples from the 2182 and average them
+     (2450 mode: `n_averages` current samples from the 2450).
+  4. Chord resistance R = V / I_sense (2450 mode: V_ds / I_ds) is recorded
+     alongside V (I_ds), Vg and the gate leakage current I_G.
 
 If a magnet current is given (optional — see GatePlan in the TUI), it is
 parked once before the gate sweep starts (not swept) and the resulting
@@ -64,6 +74,14 @@ from instruments.keithley2400 import (
     connect_gate,
     set_gate_voltage,
     shutdown_gate,
+)
+from instruments.keithley2450 import (
+    Keithley2450,
+    SMUConfig,
+    connect_smu,
+    set_source_level,
+    acquire_measurement,
+    shutdown_smu,
 )
 from instruments.kepco_magnet import (
     MagnetConfig,
@@ -132,10 +150,10 @@ class GatePoint:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_measurement(
-    source:     Keithley6221,
-    voltmeter:  Keithley2182,
+    source:     Optional[Keithley6221],
+    voltmeter:  Optional[Keithley2182],
     gate:       Keithley2400,
-    src_cfg:    SourceConfig,
+    src_cfg:    Optional[SourceConfig],
     gate_cfg:   GateConfig,
     acq_cfg:    AcquisitionConfig,
     points:     List[GatePoint],
@@ -146,6 +164,9 @@ def run_measurement(
     temp_ctrl: Optional[MercuryITC] = None,
     temp_cfg:  Optional[TemperatureControllerConfig] = None,
     write_csv: Optional[Callable[[List[dict]], None]] = None,
+    smu:       Optional[Keithley2450] = None,
+    smu_cfg:   Optional[SMUConfig] = None,
+    drain_voltage_V: Optional[float] = None,
 ) -> pd.DataFrame:
     """
     Iterate over `points`, set each gate voltage, acquire the averaged
@@ -171,6 +192,13 @@ def run_measurement(
     can drift over the course of a sweep. Passing `temp_ctrl=None` (e.g.
     because the MercuryiTC isn't connected) simply leaves those columns
     empty — it's never a reason to stop the measurement.
+
+    `smu`/`smu_cfg`/`drain_voltage_V`, if given, switch to transistor mode:
+    the 2450 (already set to `drain_voltage_V` by the caller) is read for
+    I_ds instead of the 2182, and `source`/`voltmeter`/`src_cfg` may be None.
+    The gate's leakage current is read every point in both modes — the
+    caller must have put the 2400 in measure-current mode
+    (`gate.measure_current()`).
     """
     records: List[dict] = []
 
@@ -190,10 +218,26 @@ def run_measurement(
         if settle > 0:
             time.sleep(settle)
 
-        # ── 3. Acquire voltage ───────────────────────────────────────────────
-        v = acquire_averaged_voltage(voltmeter, acq_cfg.n_averages, stop_event)
-        r_chord = v["mean"] / src_cfg.sense_current_A if src_cfg.sense_current_A != 0 else float("nan")
-        log.info("   V=%.4e V  SEM=%.2e V  R=%.5g Ω", v["mean"], v["sem"], r_chord)
+        # ── 3. Acquire channel (2182 voltage, or 2450 current) + gate leakage ─
+        if smu is not None:
+            i = acquire_measurement(smu, smu_cfg, acq_cfg.n_averages, stop_event)
+            r_chord = drain_voltage_V / i["mean"] if i["mean"] != 0 else float("nan")
+            log.info("   I_ds=%.4e A  SEM=%.2e A  R=%.5g Ω", i["mean"], i["sem"], r_chord)
+            reading = {
+                "drain_voltage_V":     drain_voltage_V,
+                "drain_current_A":     i["mean"],
+                "drain_current_sem_A": i["sem"],
+            }
+        else:
+            v = acquire_averaged_voltage(voltmeter, acq_cfg.n_averages, stop_event)
+            r_chord = v["mean"] / src_cfg.sense_current_A if src_cfg.sense_current_A != 0 else float("nan")
+            log.info("   V=%.4e V  SEM=%.2e V  R=%.5g Ω", v["mean"], v["sem"], r_chord)
+            reading = {
+                "sense_current_A": src_cfg.sense_current_A,
+                "voltage_V":       v["mean"],
+                "voltage_sem_V":   v["sem"],
+            }
+        i_gate = float(gate.current)
 
         # ── 3b. Read temperature (MercuryiTC, optional) ─────────────────────
         temp_1_K, temp_2_K = read_temperature(temp_ctrl, temp_cfg) \
@@ -204,10 +248,9 @@ def run_measurement(
             "point_index":     idx,
             "timestamp":       time.strftime("%Y-%m-%dT%H:%M:%S"),
             "gate_voltage_V":  pt.gate_voltage_V,
-            "sense_current_A": src_cfg.sense_current_A,
-            "voltage_V":       v["mean"],
-            "voltage_sem_V":   v["sem"],
+            **reading,
             "resistance_ohm":  r_chord,
+            "gate_current_A":  i_gate,
             "magnet_current_A": magnet_current_A,
             "magnet_field_mT":  magnet_field_mT,
             "temperature_1_K": temp_1_K,
@@ -256,6 +299,7 @@ def main() -> None:
         compliance_current_A = 1e-6,
     )
     gate = connect_gate(gate_cfg)
+    gate.measure_current(nplc=1)       # run_measurement() logs the gate leakage
 
     # ── Temperature (Oxford Instruments MercuryiTC, optional) ────────────────
     # Not every rig has one, and not every MercuryiTC has two probes wired up

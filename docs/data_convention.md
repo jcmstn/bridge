@@ -74,7 +74,7 @@ Example: `A_0001_HB3_NOISE_T293K_20260811T143022.csv`
 |---------|-----------------------------------------------|
 | `IV`    | I–V curve (`dc_iv_curve`)                     |
 | `HALL`  | Hall measurement (`dc_hall_measurement`)      |
-| `GSWP`  | Gate sweep (`dc_gate_sweep`)                  |
+| `GSWP`  | Gate sweep (`dc_gate_sweep`) — 6221/2182 (`voltage_V`) or 2450 transistor mode (`drain_current_A` at fixed `drain_voltage_V`; header `channel_source`); `gate_current_A` = 2400 leakage |
 | `BSWP`  | Field/spin-valve sweep (`dc_spin_valve`)      |
 | `HARM`  | Dual-harmonic lock-in (`mfli_dual_harmonic`)  |
 | `HARM6` | Dual-harmonic lock-in, 6221-sourced AC current (`mfli_dual_harmonic_6221`) |

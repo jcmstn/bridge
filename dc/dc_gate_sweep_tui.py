@@ -16,6 +16,11 @@ live via the Lake Shore 475 and logged on every row. A list runs one
 complete gate sweep per value, each saved to its own file and plotted
 together in the same window with a different color.
 
+The "Use Keithley 2450" switch swaps the 6221 + 2182 channel for a 2450 that
+sources a fixed drain-source voltage and measures I_ds (transistor transfer
+curve I_ds vs V_G); V_ds takes a comma list the same way the sense current
+does. The 2400's gate leakage current I_G is logged in both modes.
+
 Run with:
     python dc_gate_sweep_tui.py
 
@@ -55,21 +60,25 @@ from dc.dc_gate_sweep import (
     GatePoint,
     GaussmeterConfig,
     MagnetConfig,
+    SMUConfig,
     SourceConfig,
     TemperatureControllerConfig,
     VoltmeterConfig,
     connect_gate,
     connect_gaussmeter,
     connect_magnet,
+    connect_smu,
     connect_source,
     connect_temperature_controller,
     connect_voltmeter,
     read_field_mT,
     run_measurement,
     set_magnet_current,
+    set_source_level,
     shutdown_gate,
     shutdown_gaussmeter,
     shutdown_magnet,
+    shutdown_smu,
     shutdown_source,
     shutdown_temperature_controller,
 )
@@ -115,7 +124,8 @@ SETTINGS_PATH = _DEFAULT_DATA_DIR / "dc_gate_sweep_tui_settings.json"
 MEASUREMENT_TYPE = "GSWP"
 
 DC_GATE_SWEEP_DESCRIPTION = (
-    "6221 fixed current · 2400 gate sweep · 2182 voltage. Optional Kepco field "
+    "6221 fixed current · 2400 gate sweep · 2182 voltage — or 2450 fixed V_ds, "
+    "measuring I_ds (transistor). Gate leakage logged. Optional Kepco field "
     "parked per value, read by Lake Shore 475."
 )
 
@@ -127,7 +137,11 @@ DC_GATE_SWEEP_SCHEMATIC = """\
   KEITHLEY 2182  (nanovoltmeter)
     Channel 1 (differential) ──▶ across the DUT
 
-  KEITHLEY 2400  (gate source — the swept axis)
+  — or, "Use Keithley 2450" on (transistor I_ds vs V_G) —
+  KEITHLEY 2450  (fixed V_ds, measures I_ds)
+    HI ──▶ drain,  LO ──▶ source
+
+  KEITHLEY 2400  (gate source — the swept axis; also reads I_G leakage)
     Output ──▶ gate electrode
 
   Field  (optional, single value or list — parked, not swept)
@@ -160,6 +174,11 @@ DEFAULTS: dict = {
     "gate_max_V": "10.0",
     "step_V": "0.5",
     "bidirectional_sweep": True,
+    "use_2450": False,
+    "drain_voltage_values": "0.1",
+    "smu_visa_resource": "GPIB0::18::INSTR",
+    "smu_compliance_current_A": "0.001",
+    "smu_voltage_limit_V": "21",
     "enable_field": False,
     "magnet_visa_resource": "GPIB0::6::INSTR",
     "current_limit_A": "35",
@@ -188,6 +207,8 @@ NUMERIC_FIELDS: dict = {
     "gate_min_V": float,
     "gate_max_V": float,
     "step_V": float,
+    "smu_compliance_current_A": float,
+    "smu_voltage_limit_V": float,
     "current_limit_A": float,
     "voltage_compliance_V": float,
     "ramp_step_A": float,
@@ -200,7 +221,8 @@ NUMERIC_FIELDS: dict = {
 TEXT_FIELDS = ["source_visa_resource", "voltmeter_visa_resource", "gate_visa_resource",
                "device", "cooldown", "magnet_visa_resource",
                "gaussmeter_visa_resource", "field_current_values", "sense_current_values",
-               "temperature_visa_resource", "temperature_sensor_uids", "data_dir"]
+               "temperature_visa_resource", "temperature_sensor_uids", "data_dir",
+               "smu_visa_resource", "drain_voltage_values"]
 OPTIONAL_NUMERIC_FIELDS = ["temperature_setpoint_K"]
 FIELD_FIELD_IDS = [
     "magnet_visa_resource", "current_limit_A", "voltage_compliance_V",
@@ -209,6 +231,15 @@ FIELD_FIELD_IDS = [
     "field_current_values",
 ]
 TEMPERATURE_FIELD_IDS = ["temperature_visa_resource", "temperature_sensor_uids"]
+SMU_FIELD_IDS = ["drain_voltage_values", "smu_visa_resource", "smu_compliance_current_A",
+                 "smu_voltage_limit_V"]
+
+
+def bias_list(state: dict) -> list[float]:
+    """The per-file channel bias values of the active mode: V_ds (2450) or
+    the sense currents (6221)."""
+    key = "drain_voltage_list" if state.get("use_2450") else "sense_current_list"
+    return state.get(key) or []
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -221,19 +252,22 @@ def run_costs(n_sweep_points: int, state: dict) -> RunCost:
     (series-major: one full gate sweep per magnet park x sense current,
     field outer / sense inner). Also drives the run screen's progress bar,
     so estimate and live ETA cannot disagree."""
-    n_sense = max(1, len(state.get("sense_current_list") or []))
+    n_sense = max(1, len(bias_list(state)))
     fields = (state.get("field_current_list") or [None]) if state["enable_field"] else [None]
     n_series = len(fields) * n_sense
     has_temp = state["enable_temperature"] and bool(parse_sensor_uids(state["temperature_sensor_uids"]))
 
     rc = RunCost(n_sweep_points * n_series)
     rc.each("settle", state["settling_time_s"])
-    rc.each("2182 reads", state["n_averages"] * read_time_s(state["nplc"]))
+    # ponytail: 2450 reads modelled with the 2182's NPLC timing -- unmeasured, like the other knobs
+    rc.each("2450 reads" if state.get("use_2450") else "2182 reads",
+            state["n_averages"] * read_time_s(state["nplc"]))
+    rc.each("gate I_G read", read_time_s(1.0))       # 2400 at NPLC 1, see run_plan()
     rc.each("overhead", GPIB_TXN_S + POINT_OVERHEAD_S + (TEMP_READ_S if has_temp else 0.0))
     for k in range(n_series):
         rc.at("per-file", PER_FILE_S, k * n_sweep_points)
     rc.at("per-run", PER_RUN_S, 0)
-    teardown = 2 * GPIB_TXN_S + GATE_RAMP_S          # 6221 off + gate ramp-down
+    teardown = 2 * GPIB_TXN_S + GATE_RAMP_S          # 6221 off (or 2450 ramp) + gate ramp-down
     if state["enable_field"]:
         mcfg = MagnetConfig(ramp_step_A=state["ramp_step_A"], ramp_delay_s=state["ramp_delay_s"])
         gcfg = GaussmeterConfig(n_averages=state["gaussmeter_n_averages"],
@@ -261,7 +295,7 @@ def run_costs(n_sweep_points: int, state: dict) -> RunCost:
 
 @dataclass
 class MeasurementPlan:
-    src_cfg: SourceConfig
+    src_cfg: Optional[SourceConfig]                 # None in 2450 mode
     volt_cfg: VoltmeterConfig
     gate_cfg: GateConfig
     acq_cfg: AcquisitionConfig
@@ -281,16 +315,23 @@ class MeasurementPlan:
     temp_cfg: Optional[TemperatureControllerConfig] = None
     data_root: Path = _DEFAULT_DATA_DIR
     run_cost: Optional[RunCost] = None      # modelled seconds per point (progress bar + ETA)
+    smu_cfg: Optional[SMUConfig] = None      # set -> 2450 mode (fixed V_ds, measure I_ds)
+    drain_voltages_V: Optional[List[float]] = None
+
+    @property
+    def bias_values(self) -> List[float]:
+        """Per-file channel bias: V_ds (2450 mode) or sense currents (6221)."""
+        return list(self.drain_voltages_V) if self.smu_cfg is not None else list(self.sense_currents_A)
 
     @property
     def series_values(self) -> List[tuple[Optional[float], float]]:
-        """Cross product of field (magnet-park) currents x sense currents --
-        one complete gate sweep per pair, each saved to its own file. Field
-        is outer (a physical ramp+settle) and sense is inner (an instant
-        config mutation) -- see dc_spin_valve_tui.py for the same
-        nested-product pattern."""
+        """Cross product of field (magnet-park) currents x channel bias
+        (sense current, or V_ds in 2450 mode) -- one complete gate sweep per
+        pair, each saved to its own file. Field is outer (a physical
+        ramp+settle) and bias is inner (an instant setpoint change) -- see
+        dc_spin_valve_tui.py for the same nested-product pattern."""
         field_values = list(self.field_currents_A) if self.field_currents_A else [None]
-        return list(itertools.product(field_values, self.sense_currents_A))
+        return list(itertools.product(field_values, self.bias_values))
 
     @property
     def total_points(self) -> int:
@@ -339,6 +380,8 @@ def resolve_state(state: dict) -> dict:
     state["field_current_list"], state["field_parse_error"] = \
         try_parse(state["field_current_values"]) if state["enable_field"] else ([], None)
     state["sense_current_list"], state["sense_current_parse_error"] = try_parse(state["sense_current_values"])
+    state["drain_voltage_list"], state["drain_voltage_parse_error"] = \
+        try_parse(state["drain_voltage_values"]) if state.get("use_2450") else ([], None)
     return state
 
 
@@ -357,29 +400,52 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     if not state.get("device"):
         errors.append("Device is required (e.g. HB3, SV2).")
 
-    resources = [state["source_visa_resource"], state["voltmeter_visa_resource"], state["gate_visa_resource"]]
-    if len(set(resources)) < len(resources):
-        errors.append("Source (6221), voltmeter (2182), and gate (2400) VISA resources must all be different.")
-
     sense_list: list[float] = []
-    if state.get("sense_current_parse_error"):
-        errors.append(f"Sense current list: {state['sense_current_parse_error']}")
+    if state.get("use_2450"):
+        if state["smu_visa_resource"] == state["gate_visa_resource"]:
+            errors.append("2450 (channel) and 2400 (gate) VISA resources must be different.")
+        if state.get("drain_voltage_parse_error"):
+            errors.append(f"V_ds list: {state['drain_voltage_parse_error']}")
+        else:
+            sense_list = state.get("drain_voltage_list", [])
+            limit = state["smu_voltage_limit_V"]
+            if not sense_list:
+                errors.append("V_ds list is empty.")
+            elif over := [v for v in sense_list if abs(v) > limit]:
+                errors.append(f"V_ds {over} exceed the 2450 voltage limit ±{limit:g} V.")
+            elif len(sense_list) > 1:
+                info.append(f"V_ds: {', '.join(format_si(v, 'V') for v in sense_list)} — "
+                            f"{len(sense_list)} sweeps per field value, one file each")
+            else:
+                info.append(f"V_ds: {format_si(sense_list[0], 'V')} (2450 sources V, measures I_ds)")
+        if state["smu_compliance_current_A"] <= 0:
+            errors.append("2450 current compliance must be > 0 A.")
+        if state["nplc"] > 10:
+            errors.append("2450 NPLC must be ≤ 10.")
     else:
-        sense_list = state.get("sense_current_list", [])
-        zero = [i for i in sense_list if i == 0]
-        if zero:
-            errors.append("Sense current must be nonzero (resistance divides by it).")
-        elif len(sense_list) > 1:
-            info.append(f"Sense currents: {', '.join(format_si(i, 'A') for i in sense_list)} — "
-                        f"{len(sense_list)} sweeps per field value, one file each")
-        elif sense_list:
-            info.append(f"Sense current: {format_si(sense_list[0], 'A')}")
+        resources = [state["source_visa_resource"], state["voltmeter_visa_resource"], state["gate_visa_resource"]]
+        if len(set(resources)) < len(resources):
+            errors.append("Source (6221), voltmeter (2182), and gate (2400) VISA resources must all be different.")
 
-    if state["compliance_V"] <= 0:
-        errors.append("Compliance voltage must be > 0 V.")
+        if state.get("sense_current_parse_error"):
+            errors.append(f"Sense current list: {state['sense_current_parse_error']}")
+        else:
+            sense_list = state.get("sense_current_list", [])
+            zero = [i for i in sense_list if i == 0]
+            if zero:
+                errors.append("Sense current must be nonzero (resistance divides by it).")
+            elif len(sense_list) > 1:
+                info.append(f"Sense currents: {', '.join(format_si(i, 'A') for i in sense_list)} — "
+                            f"{len(sense_list)} sweeps per field value, one file each")
+            elif sense_list:
+                info.append(f"Sense current: {format_si(sense_list[0], 'A')}")
+
+        if state["compliance_V"] <= 0:
+            errors.append("Compliance voltage must be > 0 V.")
 
     read_s = read_time_s(state["nplc"])
-    info.append(f"2182 read: ≈ {read_s * 1000:.0f} ms — NPLC {state['nplc']:g}")
+    meter = "2450" if state.get("use_2450") else "2182"
+    info.append(f"{meter} read: ≈ {read_s * 1000:.0f} ms — NPLC {state['nplc']:g}")
 
     max_abs_Vg = max(abs(state["gate_min_V"]), abs(state["gate_max_V"]))
     if max_abs_Vg > state["gate_voltage_limit_V"]:
@@ -425,7 +491,7 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         elif n_series == 1:
             info.append(f"Magnet current: {field_list[0]:g} A — parked, field read by 475")
         if n_files > max(1, n_series):
-            info.append(f"Files: {n_files} — {n_sense} sense current(s) × "
+            info.append(f"Files: {n_files} — {n_sense} {'V_ds' if state.get('use_2450') else 'sense current(s)'} × "
                         f"{max(1, n_series)} field value(s)")
         tol_mT = state["field_settle_tolerance_mT"]
         if tol_mT <= 0:
@@ -439,7 +505,7 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         n_sense = max(1, len(sense_list))
         info.append("Field: none — magnet untouched")
         if n_sense > 1:
-            info.append(f"Files: {n_sense} — one per sense current")
+            info.append(f"Files: {n_sense} — one per {'V_ds' if state.get('use_2450') else 'sense current'}")
         info.extend(run_costs(n_sweep_points, state).lines())
 
     if state["enable_temperature"]:
@@ -465,7 +531,7 @@ def compute_filename_preview(state: dict) -> Optional[str]:
         temperature_setpoint_K=state.get("temperature_setpoint_K"),
     )
     n_field = len(state.get("field_current_list", [])) if state.get("enable_field") else 0
-    n_sense = len(state.get("sense_current_list", []))
+    n_sense = len(bias_list(state))
     n_files = max(1, n_field) * max(1, n_sense)
     suffix = f" (one file per run — {n_files} files)" if n_files > 1 else ""
     return f"{preview}_<timestamp>.csv{suffix}"
@@ -474,6 +540,11 @@ def compute_filename_preview(state: dict) -> Optional[str]:
 # ─────────────────────────────────────────────────────────────────────────────
 # Live plot  ── runs in its own OS process, well away from the TUI
 # ─────────────────────────────────────────────────────────────────────────────
+
+def channel_signal(record: dict) -> float:
+    """The plotted y value: I_ds (2450 mode) or the DUT voltage (6221)."""
+    return record["drain_current_A"] if "drain_current_A" in record else record["voltage_V"]
+
 
 def _live_plot_worker(queue: "mp.Queue") -> None:
     import matplotlib.pyplot as plt
@@ -509,9 +580,11 @@ def _live_plot_worker(queue: "mp.Queue") -> None:
                 lines[idx] = line
                 series_data[idx] = ([], [])
                 new_series = True
+            if "drain_current_A" in record:
+                ax.set_ylabel("I_ds (A)")
             xs, ys = series_data[idx]
             xs.append(record["gate_voltage_V"])
-            ys.append(record["voltage_V"])
+            ys.append(channel_signal(record))
             updated.add(idx)
         if updated:
             for idx in updated:
@@ -544,11 +617,11 @@ def _save_measurement_png(records: list[dict], png_path: Path,
     import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots(figsize=(7, 5))
-    ax.plot([r["gate_voltage_V"] for r in records], [r["voltage_V"] for r in records],
+    ax.plot([r["gate_voltage_V"] for r in records], [channel_signal(r) for r in records],
             ".-", color="tab:blue")
 
     ax.set_xlabel("Gate voltage (V)")
-    ax.set_ylabel("Voltage (V)")
+    ax.set_ylabel("I_ds (A)" if "drain_current_A" in records[0] else "Voltage (V)")
     ax.set_title("Measurement result")
     ax.grid(alpha=0.3)
     fig.tight_layout()
@@ -557,6 +630,9 @@ def _save_measurement_png(records: list[dict], png_path: Path,
     sense_currents = sorted({r["sense_current_A"] for r in records if r.get("sense_current_A") is not None})
     if len(sense_currents) == 1:
         lines.append(f"Sense current: {format_si(sense_currents[0], 'A')}")
+    drain_voltages = sorted({r["drain_voltage_V"] for r in records if r.get("drain_voltage_V") is not None})
+    if len(drain_voltages) == 1:
+        lines.append(f"V_ds: {format_si(drain_voltages[0], 'V')}")
     if comment:
         lines.append(f"Comment: {textwrap.shorten(comment, width=90, placeholder='…')}")
     if lines:
@@ -580,12 +656,24 @@ def _save_measurement_png(records: list[dict], png_path: Path,
 def build_plan(state: dict, data_root: Path) -> MeasurementPlan:
     """One parsed, validated run request from a state dict. Pure — shared by
     the TUI and the web page."""
-    src_cfg = SourceConfig(
-        visa_resource=state["source_visa_resource"],
-        sense_current_A=state["sense_current_list"][0],
-        compliance_V=state["compliance_V"],
-        source_delay_s=state["source_delay_s"],
-    )
+    use_2450 = state.get("use_2450", False)
+    src_cfg = smu_cfg = None
+    if use_2450:
+        smu_cfg = SMUConfig(
+            visa_resource=state["smu_visa_resource"],
+            source_function="voltage",
+            sense_function="current",
+            compliance_current_A=state["smu_compliance_current_A"],
+            nplc=state["nplc"],
+            source_limit_V=state["smu_voltage_limit_V"],
+        )
+    else:
+        src_cfg = SourceConfig(
+            visa_resource=state["source_visa_resource"],
+            sense_current_A=state["sense_current_list"][0],
+            compliance_V=state["compliance_V"],
+            source_delay_s=state["source_delay_s"],
+        )
     volt_cfg = VoltmeterConfig(
         visa_resource=state["voltmeter_visa_resource"],
         nplc=state["nplc"],
@@ -634,15 +722,18 @@ def build_plan(state: dict, data_root: Path) -> MeasurementPlan:
                 sensor_uids=uids,
             )
 
+    channel = ({"channel_source": "2450", "drain_voltage_V": state["drain_voltage_list"][0],
+                "smu_compliance_current_A": state["smu_compliance_current_A"]} if use_2450
+               else {"channel_source": "6221", "sense_current_A": state["sense_current_list"][0],
+                     "compliance_V": state["compliance_V"]})
     header_extra = {
-        "sense_current_A": state["sense_current_list"][0],
-        "compliance_V": state["compliance_V"],
+        **channel,
         "n_averages": state["n_averages"],
         "settling_time_s": state["settling_time_s"],
         "gate_sweep_V": [state["gate_min_V"], state["gate_max_V"], state["step_V"]],
     }
     series = ""
-    if len(field_currents_A or [None]) * len(state["sense_current_list"]) > 1:
+    if len(field_currents_A or [None]) * len(bias_list(state)) > 1:
         series = (f"{state['sample']}_{state['device']}_{MEASUREMENT_TYPE}_"
                   f"{datetime.now():%Y%m%dT%H%M%S}")
 
@@ -652,7 +743,8 @@ def build_plan(state: dict, data_root: Path) -> MeasurementPlan:
         sample=state["sample"], device=state["device"],
         temperature_setpoint_K=state["temperature_setpoint_K"],
         cooldown=state["cooldown"], header_extra=header_extra, series=series,
-        sense_currents_A=state["sense_current_list"],
+        sense_currents_A=[] if use_2450 else state["sense_current_list"],
+        smu_cfg=smu_cfg, drain_voltages_V=state["drain_voltage_list"] if use_2450 else None,
         magnet_cfg=magnet_cfg, gauss_cfg=gauss_cfg, field_currents_A=field_currents_A,
         field_settle_s=state["field_settle_s"],
         field_settle_tolerance_mT=state["field_settle_tolerance_mT"],
@@ -676,12 +768,18 @@ def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
     the TUI's RunScreen and the web page each pass their own callbacks."""
     run_contexts = [] if run_contexts is None else run_contexts
     run_extras = [] if run_extras is None else run_extras
-    source = voltmeter = gate = magnet = gaussmeter = temp_ctrl = None
+    source = voltmeter = smu = gate = magnet = gaussmeter = temp_ctrl = None
+    use_2450 = plan.smu_cfg is not None
     try:
-        on_status("Connecting to Keithley 6221, 2182 & 2400 …")
-        source = connect_source(plan.src_cfg)
-        voltmeter = connect_voltmeter(plan.volt_cfg)
+        if use_2450:
+            on_status("Connecting to Keithley 2450 & 2400 …")
+            smu = connect_smu(plan.smu_cfg)
+        else:
+            on_status("Connecting to Keithley 6221, 2182 & 2400 …")
+            source = connect_source(plan.src_cfg)
+            voltmeter = connect_voltmeter(plan.volt_cfg)
         gate = connect_gate(plan.gate_cfg)
+        gate.measure_current(nplc=1)       # run_measurement() logs the gate leakage I_G
 
         if plan.temp_cfg is not None:
             on_status("Connecting to MercuryiTC (temperature) …")
@@ -696,10 +794,13 @@ def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
         _unset = object()
         parked_field_A = _unset
         field_mT = None
-        for series_idx, (field_current_A, sense_current_A) in enumerate(plan.series_values):
+        for series_idx, (field_current_A, bias) in enumerate(plan.series_values):
             if stop_event.is_set():
                 break
-            plan.src_cfg.sense_current_A = sense_current_A
+            if use_2450:
+                set_source_level(smu, plan.smu_cfg, bias)
+            else:
+                plan.src_cfg.sense_current_A = bias
 
             label_parts = []
             key_axis = None
@@ -716,8 +817,8 @@ def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
                     log.info("Field parked: I_magnet=%.4f A  B=%.4f mT (measured)",
                              field_current_A, field_mT)
                     parked_field_A = field_current_A
-            if len(plan.sense_currents_A) > 1:
-                label_parts.append(f"I_sense={sense_current_A:g}A")
+            if len(plan.bias_values) > 1:
+                label_parts.append(f"V_ds={bias:g}V" if use_2450 else f"I_sense={bias:g}A")
             label = ", ".join(label_parts) or None
 
             # A fresh RunContext (own run number, own file) EVERY iteration --
@@ -727,9 +828,9 @@ def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
                 temperature_setpoint_K=plan.temperature_setpoint_K,
                 key_axis=key_axis, series=plan.series,
             )
-            extra = {"sense_current_A": sense_current_A, "magnet_current_A": field_current_A,
-                     "magnet_field_mT": field_mT} if field_current_A is not None \
-                else {"sense_current_A": sense_current_A}
+            extra = {"drain_voltage_V" if use_2450 else "sense_current_A": bias}
+            if field_current_A is not None:
+                extra.update(magnet_current_A=field_current_A, magnet_field_mT=field_mT)
             run_contexts.append(ctx)
             run_extras.append(extra)
             on_run_label(f"Run #{ctx.run_str}")
@@ -746,15 +847,18 @@ def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
                     source, voltmeter, gate, plan.src_cfg, plan.gate_cfg, plan.acq_cfg, _points,
                     stop_event=stop_event, on_point=point_cb,
                     magnet_current_A=_i, magnet_field_mT=_b,
-                    temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg, write_csv=write_csv),
+                    temp_ctrl=temp_ctrl, temp_cfg=plan.temp_cfg, write_csv=write_csv,
+                    smu=smu, smu_cfg=plan.smu_cfg, drain_voltage_V=bias if use_2450 else None),
                 stop_event, on_point=on_point,
                 tags={"series_index": series_idx, "series_label": label},
                 on_finished=on_run_finished)
     finally:
-        # 6221 output off first (immediate, no current into the DUT), so the
+        # 6221 output off / 2450 ramped to 0 V first (no bias on the DUT), so the
         # magnet can start its ramp-down right away rather than waiting behind it.
         if source is not None:
             safe_shutdown("source", lambda: shutdown_source(source))
+        if smu is not None:
+            safe_shutdown("2450", lambda: shutdown_smu(smu))
         if gate is not None:
             safe_shutdown("gate", lambda: shutdown_gate(gate))
         if magnet is not None:
@@ -775,7 +879,8 @@ def save_run_png(plan: MeasurementPlan, records: list[dict], png_path: Path, com
 # ─────────────────────────────────────────────────────────────────────────────
 
 class RunScreen(MeasurementRunScreen):
-    TABLE_COLUMNS = ("#", "I_mag (A)", "B (mT)", "Vg (V)", "V (V)", "R (Ω)", "T1 (K)", "T2 (K)")
+    TABLE_COLUMNS = ("#", "I_mag (A)", "B (mT)", "Vg (V)", "V (V) / I_ds (A)", "R (Ω)", "I_G (A)",
+                     "T1 (K)", "T2 (K)")
     MEASUREMENT_TYPE = MEASUREMENT_TYPE
 
     def live_plot_args(self):
@@ -791,8 +896,9 @@ class RunScreen(MeasurementRunScreen):
             f"{I_mag:.4f}" if I_mag is not None else "—",
             f"{B:.2f}" if B is not None else "—",
             f"{record['gate_voltage_V']:.4g}",
-            f"{record['voltage_V']:.4e}",
+            f"{channel_signal(record):.4e}",
             f"{record['resistance_ohm']:.5g}",
+            f"{record['gate_current_A']:.3e}",
             f"{T1:.3f}" if T1 is not None else "—",
             f"{T2:.3f}" if T2 is not None else "—",
         )
@@ -804,7 +910,7 @@ class RunScreen(MeasurementRunScreen):
 
 class DCGateSweepApp(MeasurementApp):
     TITLE = "DC Gate Sweep"
-    SUB_TITLE = "Keithley 6221 + 2182 + 2400 · gate voltage sweep"
+    SUB_TITLE = "Keithley 6221 + 2182 (or 2450) + 2400 · gate voltage sweep"
 
     # Session data root — fallback until _load_settings()/the identity bar's
     # "Data root" field replaces it. Read in compose(), so it must exist here.
@@ -813,6 +919,7 @@ class DCGateSweepApp(MeasurementApp):
     SWITCH_DEPENDENTS = {
         "enable_field": tuple(FIELD_FIELD_IDS),
         "enable_temperature": tuple(TEMPERATURE_FIELD_IDS),
+        "use_2450": tuple(SMU_FIELD_IDS),
     }
 
     CSS = """
@@ -878,6 +985,14 @@ class DCGateSweepApp(MeasurementApp):
                               hint="Comma-separate for one sweep + file per value."),
                     )
                     yield card(
+                        "Transistor mode (Keithley 2450)",
+                        switch_field("use_2450", "Use 2450: source V_ds, measure I_ds",
+                                     DEFAULTS["use_2450"]),
+                        field("drain_voltage_values", "V_ds (V)",
+                              DEFAULTS["drain_voltage_values"], kind="text",
+                              hint="Replaces 6221 + 2182. Comma-separate for one sweep + file per value."),
+                    )
+                    yield card(
                         "Field (Kepco magnet, optional)",
                         switch_field("enable_field", "Park field (Kepco magnet)",
                                      DEFAULTS["enable_field"]),
@@ -904,6 +1019,8 @@ class DCGateSweepApp(MeasurementApp):
                                   hint="Bigger = quieter but slower.",
                                   validators=[Number(minimum=0.01, failure_description="must be > 0")]),
                             switch_field("auto_range", "Auto-range", DEFAULTS["auto_range"]),
+                            field("smu_compliance_current_A", "2450 current compliance (A)",
+                                  DEFAULTS["smu_compliance_current_A"]),
                         )
                         yield card(
                             "Acquisition timing",
@@ -926,6 +1043,8 @@ class DCGateSweepApp(MeasurementApp):
                                   DEFAULTS["voltmeter_visa_resource"], kind="text"),
                             field("gate_visa_resource", "2400 (gate)",
                                   DEFAULTS["gate_visa_resource"], kind="text"),
+                            field("smu_visa_resource", "2450 (transistor mode)",
+                                  DEFAULTS["smu_visa_resource"], kind="text"),
                             field("magnet_visa_resource", "Magnet (Kepco)",
                                   DEFAULTS["magnet_visa_resource"], kind="text"),
                             field("gaussmeter_visa_resource", "Gaussmeter (Lake Shore 475)",
@@ -942,6 +1061,9 @@ class DCGateSweepApp(MeasurementApp):
                                   hint="Hard safety ceiling."),
                             field("gate_compliance_current_A", "Gate leakage compliance (A)",
                                   DEFAULTS["gate_compliance_current_A"]),
+                            field("smu_voltage_limit_V", "2450 V_ds software limit (V)",
+                                  DEFAULTS["smu_voltage_limit_V"],
+                                  hint="Hard safety ceiling."),
                             muted=True,
                         )
                         yield card(

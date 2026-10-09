@@ -8,7 +8,8 @@ Created: 2026-08-07
 Web equivalent of dc_gate_sweep_tui.py. Reuses that TUI module's pure
 DEFAULTS/NUMERIC_FIELDS/TEXT_FIELDS/build_summary()/parse_sensor_uids().
 Optional magnet-current list means multiple complete gate sweeps run per
-Start click (field parked once per value, not swept).
+Start click (field parked once per value, not swept). The "Use 2450" switch
+swaps the 6221 + 2182 channel for a 2450 sourcing V_ds and measuring I_ds.
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ import dc.dc_gate_sweep_tui as program
 from dc.dc_gate_sweep_tui import (
     build_plan,
     DEFAULTS, DC_GATE_SWEEP_DESCRIPTION, build_summary,
-    compute_filename_preview,
+    channel_signal, compute_filename_preview,
 )
 from instruments.data_naming import (
     TEST_SAMPLE, RunContext,
@@ -50,12 +51,13 @@ SUITE = "DC"
 log = logging.getLogger("web.dc.gate_sweep")
 
 
-def series_label(field_current_A: Optional[float], sense_current_A: float, n_sense: int) -> Optional[str]:
+def series_label(field_current_A: Optional[float], bias: float, n_bias: int,
+                 use_2450: bool = False) -> Optional[str]:
     parts = []
     if field_current_A is not None:
         parts.append(f"I_mag={field_current_A:g}A")
-    if n_sense > 1:
-        parts.append(f"I_sense={sense_current_A:g}A")
+    if n_bias > 1:
+        parts.append(f"V_ds={bias:g}V" if use_2450 else f"I_sense={bias:g}A")
     return ", ".join(parts) or None
 
 
@@ -102,6 +104,12 @@ def page() -> None:
                         "Sense current (A)", d("sense_current_values"),
                         hint="Comma-separate for one sweep + file per value.")
 
+                with param_card("Transistor mode (Keithley 2450)"):
+                    switches["use_2450"] = bool_switch("Use 2450: source V_ds, measure I_ds", d("use_2450"))
+                    inputs["drain_voltage_values"] = text_field(
+                        "V_ds (V)", d("drain_voltage_values"),
+                        hint="Replaces 6221 + 2182. Comma-separate for one sweep + file per value.")
+
                 with param_card("Field (Kepco magnet, optional)"):
                     switches["enable_field"] = bool_switch("Park field (Kepco magnet)", d("enable_field"))
                     inputs["field_current_values"] = text_field(
@@ -119,6 +127,8 @@ def page() -> None:
                         inputs["compliance_V"] = num_field("Compliance voltage (V)", float(d("compliance_V")))
                         inputs["nplc"] = num_field("NPLC (integration time)", float(d("nplc")))
                         switches["auto_range"] = bool_switch("Auto-range", d("auto_range"))
+                        inputs["smu_compliance_current_A"] = num_field(
+                            "2450 current compliance (A)", float(d("smu_compliance_current_A")))
 
                     with param_card("Acquisition timing"):
                         inputs["settling_time_s"] = num_field("Settling time per gate step (s)", float(d("settling_time_s")))
@@ -131,6 +141,7 @@ def page() -> None:
                         inputs["source_visa_resource"] = text_field("Keithley 6221 (sense current)", d("source_visa_resource"))
                         inputs["voltmeter_visa_resource"] = text_field("Keithley 2182 (DUT voltage)", d("voltmeter_visa_resource"))
                         inputs["gate_visa_resource"] = text_field("Keithley 2400 (gate)", d("gate_visa_resource"))
+                        inputs["smu_visa_resource"] = text_field("Keithley 2450 (transistor mode)", d("smu_visa_resource"))
                         inputs["magnet_visa_resource"] = text_field("Magnet VISA resource", d("magnet_visa_resource"))
                         inputs["gaussmeter_visa_resource"] = text_field(
                             "Gaussmeter VISA resource", d("gaussmeter_visa_resource"),
@@ -143,6 +154,9 @@ def page() -> None:
                             "Gate voltage software limit (V)", float(d("gate_voltage_limit_V")),
                             hint="Hard safety ceiling.")
                         inputs["gate_compliance_current_A"] = num_field("Gate leakage compliance (A)", float(d("gate_compliance_current_A")))
+                        inputs["smu_voltage_limit_V"] = num_field(
+                            "2450 V_ds software limit (V)", float(d("smu_voltage_limit_V")),
+                            hint="Hard safety ceiling.")
 
                     with stable_card("Magnet ramp safety"):
                         inputs["current_limit_A"] = num_field("Software current limit (A)", float(d("current_limit_A")))
@@ -181,8 +195,9 @@ def page() -> None:
                 {"name": "Imag", "label": "I_mag (A)", "field": "Imag"},
                 {"name": "B", "label": "B (mT)", "field": "B"},
                 {"name": "Vg", "label": "Vg (V)", "field": "Vg"},
-                {"name": "V", "label": "V (V)", "field": "V"},
+                {"name": "V", "label": "V (V) / I_ds (A)", "field": "V"},
                 {"name": "R", "label": "R (Ω)", "field": "R"},
+                {"name": "IG", "label": "I_G (A)", "field": "IG"},
                 {"name": "T1", "label": "T1 (K)", "field": "T1"},
                 {"name": "T2", "label": "T2 (K)", "field": "T2"},
             ]
@@ -252,14 +267,15 @@ def page() -> None:
         idx = record.get("series_index", 0)
         ti = series_state["traces"][idx]
         fig.data[ti].x = fig.data[ti].x + (record["gate_voltage_V"],)
-        fig.data[ti].y = fig.data[ti].y + (record["voltage_V"],)
+        fig.data[ti].y = fig.data[ti].y + (channel_signal(record),)
         table.rows.append({
             "n": record["point_index"] + 1,
             "Imag": f"{record['magnet_current_A']:.4f}" if record.get("magnet_current_A") is not None else "—",
             "B": f"{record['magnet_field_mT']:.2f}" if record.get("magnet_field_mT") is not None else "—",
             "Vg": f"{record['gate_voltage_V']:.4g}",
-            "V": f"{record['voltage_V']:.4e}",
+            "V": f"{channel_signal(record):.4e}",
             "R": f"{record['resistance_ohm']:.5g}",
+            "IG": f"{record['gate_current_A']:.3e}",
             "T1": f"{record['temperature_1_K']:.3f}" if record.get("temperature_1_K") is not None else "—",
             "T2": f"{record['temperature_2_K']:.3f}" if record.get("temperature_2_K") is not None else "—",
         })
@@ -293,8 +309,8 @@ def page() -> None:
         save_settings(_SETTINGS_PATH, collect_raw())
 
         plan = build_plan(state, Path(state["data_dir"]))
-        n_sense = len(plan.sense_currents_A)
-        labels = [series_label(f, s, n_sense) for f, s in plan.series_values]
+        use_2450 = plan.smu_cfg is not None
+        labels = [series_label(f, b, len(plan.bias_values), use_2450) for f, b in plan.series_values]
         run_contexts: list[RunContext] = []
         run_extras: list[dict] = []
 
@@ -314,6 +330,7 @@ def page() -> None:
         controller["c"] = rc
 
         init_series(len(plan.series_values), labels)
+        fig.update_layout(yaxis_title="I_ds (A)" if use_2450 else "Voltage (V)")
         plot.update()
         table.rows.clear()
         table.update()

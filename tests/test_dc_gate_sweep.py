@@ -24,7 +24,9 @@ def _state(**overrides) -> dict:
         gaussmeter_visa_resource="GPIB0::12::INSTR", gaussmeter_n_averages=10,
         gaussmeter_read_delay_s=0.05, field_settle_tolerance_mT=0.02, field_current_values="0, 1", field_current_list=[0.0, 1.0],
         enable_temperature=False, temperature_visa_resource="", temperature_sensor_uids="",
-        sample="A",
+        sample="A", data_dir="",
+        use_2450=False, drain_voltage_values="0.1", drain_voltage_list=[], drain_voltage_parse_error=None,
+        smu_visa_resource="GPIB0::18::INSTR", smu_compliance_current_A=1e-3, smu_voltage_limit_V=21.0,
     )
     base.update(overrides)
     return base
@@ -64,3 +66,31 @@ def test_tui_build_plan_nests_sense_and_field_lists(tmp_path: Path, monkeypatch)
                                     sense_current_list=[1e-6, 2e-6]))
     assert plan.series_values == [(0.0, 1e-6), (0.0, 2e-6), (1.0, 1e-6), (1.0, 2e-6)]
     assert plan.src_cfg.sense_current_A == 1e-6
+
+
+def _state_2450(**overrides) -> dict:
+    return _state(**{"use_2450": True, "drain_voltage_values": "0.1, 0.5",
+                      "drain_voltage_list": [0.1, 0.5], "sense_current_values": "",
+                      "sense_current_list": [], **overrides})
+
+
+def test_2450_mode_plan_crosses_field_and_drain_voltage(tmp_path: Path) -> None:
+    plan = build_plan(_state_2450(), tmp_path)
+    assert plan.src_cfg is None
+    assert plan.smu_cfg.source_function == "voltage" and plan.smu_cfg.sense_function == "current"
+    assert plan.smu_cfg.source_limit_V == 21.0
+    assert plan.series_values == [(0.0, 0.1), (0.0, 0.5), (1.0, 0.1), (1.0, 0.5)]
+    assert plan.header_extra["channel_source"] == "2450"
+
+
+def test_2450_mode_summary_ignores_sense_current_and_enforces_vds_limit() -> None:
+    _, _, errors = tui.build_summary(_state_2450())
+    assert not [e for e in errors if "ense current" in e]
+    _, _, errors = tui.build_summary(_state_2450(drain_voltage_list=[0.1, 30.0]))
+    assert any("2450 voltage limit" in e for e in errors)
+
+
+def test_resolve_state_parses_vds_only_in_2450_mode() -> None:
+    off = tui.resolve_state(_state(drain_voltage_values="1, 2"))
+    on = tui.resolve_state(_state(use_2450=True, drain_voltage_values="1, 2"))
+    assert off["drain_voltage_list"] == [] and on["drain_voltage_list"] == [1.0, 2.0]
