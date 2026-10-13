@@ -1,13 +1,12 @@
 """
-SQLite run index — shared by the web and TUI front ends
-=========================================================
+SQLite run index — the run history every TUI writes
+===================================================
 Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
 Created: 2026-08-07 (moved from web/ 2026-09-23 so the TUIs can record too)
 
-Records every run (start, finish, status, parameters, output paths) from
-either front end, to drive the run-history tables on the web landing page
-and the bridge_tui.py menu. Pure sqlite — no NiceGUI/Textual import, so it
-sits in instruments/ below both front ends.
+Records every run (start, finish, status, parameters, output paths) to drive
+the bridge_tui.py "Recent runs" table. Pure sqlite — no Textual import, so
+it sits in instruments/ below the TUIs.
 
 Lives at a fixed location (_DATA_DIR / "runs.db", the sibling-of-bridge
 data/ directory) — deliberately independent of any given run's user-chosen
@@ -119,7 +118,7 @@ def start_run(suite: str, measurement: str, parameters: dict, data_dir: str,
 
 def update_point_count(run_id: int, point_count: int) -> None:
     """Live point count of a running run — called once per UI tick that
-    brought new points (web drain tick / TUI point callback), not per point."""
+    brought new points (TUI point callback), not per point."""
     if run_id < 0:
         return
     with _connect() as conn:

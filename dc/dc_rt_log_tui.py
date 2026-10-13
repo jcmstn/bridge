@@ -458,7 +458,7 @@ def _live_plot_worker(queue: "mp.Queue") -> None:
 
 
 def save_run_png(plan: MeasurementPlan, records: list[dict], png_path: Path, comment: str = "") -> None:
-    """One run's PNG (RunScreen and the web page both call this)."""
+    """One run's PNG (RunScreen calls this)."""
     if not records:
         return
     import matplotlib
@@ -468,7 +468,7 @@ def save_run_png(plan: MeasurementPlan, records: list[dict], png_path: Path, com
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Plan + run  ── pure, shared by the TUI RunScreen and web/dc/rt_log.py
+# Plan + run  ── pure, used by the TUI RunScreen
 # ─────────────────────────────────────────────────────────────────────────────
 
 def build_plan(state: dict, data_root: Path) -> MeasurementPlan:

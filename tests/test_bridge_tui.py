@@ -1,7 +1,7 @@
 """
 bridge_tui.py — the unified menu: every program App is reachable, one launch
 button per program, each exits the menu with its key, and the Recent-runs
-table shows what both front ends wrote to runs.db.
+table shows what the TUIs wrote to runs.db.
 """
 
 from __future__ import annotations

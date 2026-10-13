@@ -17,9 +17,8 @@ diagram -- convert with phi_RH = (-phi) % 360 (docs/data_convention.md).
     phi_deg    azimuth from +x, in the xy-plane, 0-360 deg.
                 Meaningless when theta==0 (any phi is the same OOP point).
 
-Pure module -- no Textual/nicegui/plotly import -- reused verbatim by every
-`*_tui.py`'s Static diagram and by `web/field_diagram.py`'s plotly figure
-(which imports `field_unit_vector` for its own 3D trace).
+Pure module -- no Textual import -- reused verbatim by every `*_tui.py`'s
+Static diagram.
 
     >>> field_unit_vector(0, 0)
     (0.0, 0.0, 1.0)
@@ -139,7 +138,7 @@ def render_ascii_field_diagram(theta_deg: Optional[float], phi_deg: Optional[flo
 
 
 def field_direction_summary_line(theta_deg: Optional[float], phi_deg: Optional[float]) -> str:
-    """One-line, human-readable field direction, for both front ends' live
+    """One-line, human-readable field direction, for the TUI's live
     summary panel. Shared here so the wording doesn't drift across the six
     measurement modules that carry these fields."""
     if theta_deg is None:

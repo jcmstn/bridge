@@ -1,9 +1,9 @@
 """
-Every program's pure run_plan() — the one both the TUI RunScreen and the web
-page run — end to end with the hardware faked: the form's default state
+Every program's pure run_plan() — the one the TUI RunScreen runs — end to
+end with the hardware faked: the form's default state
 (parsed by the real App, headless) -> build_plan() -> run_plan() with every
 connect/shutdown/instrument call stubbed and run_measurement() replaced by a
-fake that emits two records. Checks the orchestration both front ends rely on:
+fake that emits two records. Checks the orchestration the RunScreen relies on:
 one allocated + finalized run per series value, its header extras recorded,
 records tagged with their series, the per-run PNG callback, and teardown.
 """

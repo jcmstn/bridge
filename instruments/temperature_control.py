@@ -4,9 +4,8 @@ MercuryiTC temperature control — setpoints as the outer loop of a program
 Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
 Created: 2026-10-13
 
-Pure (no Textual / NiceGUI): the form fields, summary lines, config and the
-step runner every series program shares, so the TUI (tui_common) and the
-web pages (web/run_controller) run the very same thing.
+Pure (no Textual): the form fields, summary lines, config and the step
+runner every series program shares, driven by the TUI (tui_common).
 
 What a step is: the iTC is told to go to T (its own PID does the rest —
 `set_temperature`: TSET + heater auto; PID values stay on the touch
@@ -203,7 +202,7 @@ def temperature_summary(state: dict, info: list, warnings: list, errors: list, *
 def repeat_run_cost(rc: Optional[RunCost], steps: Optional[TemperatureSteps]) -> Optional[RunCost]:
     """The run's cost model repeated once per temperature step (each step is
     a full run), with the minimum settle hold charged before each step's
-    first point — for the progress bar and the web ETA."""
+    first point — for the progress bar."""
     if rc is None or steps is None:
         return rc
     n = len(steps.setpoints_K)

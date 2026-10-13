@@ -238,7 +238,7 @@ def _resolve_init_currents(state: dict) -> tuple[list[Optional[float]], Optional
 def resolve_state(state: dict) -> dict:
     """Add the derived keys build_summary() reads — the pulse-current sweep and
     the init-current list, each with its parse error — to a state built from the
-    raw field values. Shared by the TUI's and the web page's parse_state()."""
+    raw field values. Used by the TUI's parse_state()."""
     state["pulse_current_list"], state["pulse_current_parse_error"] = _resolve_pulse_currents(state)
     state["init_currents_A"], state["init_currents_parse_error"] = _resolve_init_currents(state)
     return state
@@ -634,7 +634,7 @@ def _save_measurement_png(records: list[dict], png_path: Path, comment: str = ""
 
 def build_plan(state: dict, data_root: Path) -> MeasurementPlan:
     """One parsed, validated run request from a state dict (see resolve_state()).
-    Pure — shared by the TUI and the web page."""
+    Pure."""
     pulse_cfg = WritePulseConfig(
         width_s=state["pulse_width_s"], compliance_V=state["pulse_compliance_V"])
     read_cfg = ReadConfig(
@@ -691,7 +691,7 @@ PNG_SUFFIX = "NL_vs_pulse"
 
 
 def save_run_png(plan: MeasurementPlan, records: list[dict], png_path: Path, comment: str = "") -> None:
-    """One run's PNG (RunScreen and the web page both call this)."""
+    """One run's PNG (RunScreen calls this)."""
     _save_measurement_png(records, png_path, comment=comment)
 
 
@@ -709,9 +709,8 @@ def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
     """Connect, then per initial state (or once, if none): initialize the magnet
     with the field, `allocate_run()` a fresh run, sweep, and finalize that run's
     raw file + index row UNCONDITIONALLY before moving on; always shut the
-    instruments down. Shared by the TUI's RunScreen and the web page — each
-    passes its own callbacks. `on_point` gets each record already tagged with
-    series_index / series_label / init_magnet_current_A; `on_run_finished(ctx,
+    instruments down. The TUI's RunScreen passes its own callbacks. `on_point`
+    gets each record already tagged with series_index / series_label / init_magnet_current_A; `on_run_finished(ctx,
     records)` is where a caller saves its per-run PNG; `run_contexts` /
     `run_extras` (if given) collect each run's RunContext and header extras for
     the caller's end-of-session status/comment step. A failed run is finalized

@@ -531,7 +531,7 @@ def save_results(
     unconditionally so a failed session never loses already-recorded spectra.
 
     `data_root` defaults to this module's own `_DATA_DIR` fallback (the
-    plain main() usage); a TUI/web front end must pass its own identity
+    plain main() usage); a TUI front end must pass its own identity
     bar's "Data root" — see docs/architecture.md's hard rule on this.
 
     `key_axis`, when given (e.g. `("current_A", amplitude)`), is passed
@@ -572,7 +572,7 @@ def plot_results(results: Dict[Tuple[str, str], dict], demod_cfgs: List[NoiseDem
                   ref_cfg: ReferenceConfig, out_path: Path) -> Path:
     """One log-log subplot per demodulator channel, one colored trace per condition.
 
-    matplotlib.pyplot is imported here, not at module top -- a TUI/web
+    matplotlib.pyplot is imported here, not at module top -- a TUI
     caller needs to force the Agg backend (matplotlib.use("Agg")) *before*
     pyplot's first import anywhere in the process; importing it eagerly at
     module load time would lock in whatever GUI backend is default first,
@@ -659,7 +659,7 @@ def main() -> None:
     USE_MDS  = True
 
     # ── Sample / run identity (see instruments/data_naming.py) ───────────────
-    # No TUI/web front end needed to use this module directly — set these by
+    # No TUI front end needed to use this module directly — set these by
     # hand. See mfli_noise_spectrum_tui.py for a form-based front end.
     SAMPLE = "_test"                  # ← real sample name, or "_test" for a smoke test
     DEVICE = "noise_check"            # ← e.g. HB3, SV2

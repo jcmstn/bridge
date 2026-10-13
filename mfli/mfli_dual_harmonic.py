@@ -193,7 +193,7 @@ class OutputConfig:
     amplitude_V: float  = 0.1         # Output amplitude      [V, peak)
     series_R_ohm: float = 10000       # Series resistor       [Ω]
                                       #   → I_exc ≈ amplitude_V / series_R_ohm
-                                      #   Matches the TUI/web default; a bare
+                                      #   Matches the TUI default; a bare
                                       #   OutputConfig() must give the same
                                       #   current a form-driven run would.
 

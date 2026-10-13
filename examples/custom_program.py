@@ -2,8 +2,7 @@
 """
 Custom standalone measurement — resistance vs. temperature (copy-me template)
 ============================================================================
-A single script that runs a bespoke measurement loop with NO TUI and NO web
-app, while still saving into the standard per-sample data convention
+A single script that runs a bespoke measurement loop with NO TUI, while still saving into the standard per-sample data convention
 (instruments/data_naming.py + docs/data_convention.md). Meant to be copied
 to a scratch file and edited for a one-off measurement (e.g. on a visit to
 another lab that has the same instruments).
@@ -45,7 +44,7 @@ Adding a NEW instrument
 Drop `instruments/my_instr.py` with a `MyInstrConfig` dataclass +
 `connect_my_instr()` / `shutdown_my_instr()` (+ optional `set_*` / `read_*`
 / `acquire_*`), mirroring any existing instruments/*.py. Nothing else needs
-to know it exists — no TUI, no web, no menu registration. Import it
+to know it exists — no TUI, no menu registration. Import it
 here directly. Full function contract + skeleton + the load-bearing vs
 nice-to-have failure policy: docs/architecture.md §4 "Adding an instrument".
 """

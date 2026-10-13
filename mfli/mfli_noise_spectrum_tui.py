@@ -240,7 +240,7 @@ def run_costs(state: dict) -> RunCost:
 def resolve_state(state: dict) -> dict:
     """Add the derived keys build_summary() / build_plan() read — the parsed
     lists/sweeps, each with its parse error — to a state of raw field values.
-    Pure: shared by the TUI's and the web page's parse_state()."""
+    Pure: used by the TUI's parse_state()."""
     state["amplitude_list"], state["amplitude_parse_error"] = try_parse(state["amplitude_values"])
     return state
 

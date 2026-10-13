@@ -1,4 +1,4 @@
-"""Plan-purity tests for dc_gate_sweep_tui.py and web/dc/gate_sweep.py."""
+"""Plan-purity tests for dc_gate_sweep_tui.py."""
 
 from __future__ import annotations
 

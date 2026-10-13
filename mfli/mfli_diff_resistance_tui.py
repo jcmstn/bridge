@@ -107,7 +107,7 @@ log = logging.getLogger("mfli_diff_resistance_tui")
 # mfli_diff_resistance_vs_bias.py, so nothing generated at runtime ends up
 # in the git-tracked source tree. _DEFAULT_DATA_DIR is the fallback data
 # root; the real one is chosen per run in the identity bar's "Data root"
-# field (mirrors the web app) and persisted in the settings file.
+# field and persisted in the settings file.
 _DEFAULT_DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 SETTINGS_PATH = _DEFAULT_DATA_DIR / "mfli_diff_resistance_tui_settings.json"
 
@@ -116,7 +116,7 @@ SETTINGS_PATH = _DEFAULT_DATA_DIR / "mfli_diff_resistance_tui_settings.json"
 MEASUREMENT_TYPE = "DIFFR"
 
 # One-paragraph blurb + wiring schematic — shown on this program's card in
-# bridge_tui.py, and the description also on its web page.
+# bridge_tui.py.
 MFLI_DIFF_RESISTANCE_DESCRIPTION = (
     "MFLI: AC excitation on a swept DC bias → dV/dI. No magnet."
 )
@@ -507,12 +507,11 @@ def _save_measurement_png(records: list[dict], png_path: Path,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Plan + run  ── pure, shared by the TUI RunScreen and web/mfli/diff_resistance.py
+# Plan + run  ── pure, used by the TUI RunScreen
 # ─────────────────────────────────────────────────────────────────────────────
 
 def build_plan(state: dict, data_root: Path) -> MeasurementPlan:
-    """One parsed, validated run request from a state dict. Pure — shared by
-    the TUI and the web page."""
+    """One parsed, validated run request from a state dict. Pure."""
     out_cfg = OutputConfig(
         device=state["leader_device"],
         frequency_Hz=state["frequency_Hz"],
@@ -590,8 +589,8 @@ def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
     """Record the plan's single run (plan.run_ctx, allocated at Start): connect,
     sweep the bias, finalize the run the instant it ends — even if connecting
     failed — then ramp the bias to zero and shut down, and only then save the
-    PNG (nothing left biased while it renders). Pure — the TUI's RunScreen and
-    the web page each pass their own callbacks."""
+    PNG (nothing left biased while it renders). Pure — the TUI's RunScreen
+    passes its own callbacks."""
     run_contexts = [] if run_contexts is None else run_contexts
     run_extras = [] if run_extras is None else run_extras
     ctx = plan.run_ctx
@@ -649,7 +648,7 @@ def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
 
 
 def save_run_png(plan: MeasurementPlan, records: list[dict], png_path: Path, comment: str = "") -> None:
-    """The run's PNG (RunScreen and the web page both call this)."""
+    """The run's PNG (RunScreen calls this)."""
     _save_measurement_png(records, png_path, plan=plan, comment=comment)
 
 

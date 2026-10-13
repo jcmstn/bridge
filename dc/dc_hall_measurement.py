@@ -124,7 +124,7 @@ class AcquisitionConfig:
     field_settle_tolerance_mT: float = 0.02  # Passed to set_magnet_current(): the field
                                       # counts as settled once a short window of
                                       # gaussmeter readings spans no more than this.
-                                      # Exposed in the TUI/web "Advanced" section.
+                                      # Exposed in the TUI "Advanced" section.
     n_reversals: int       = 5        # +I/-I reversal pairs averaged per point
     output_file: str       = "dc_hall.csv"
 
@@ -215,7 +215,7 @@ def run_measurement(
     `write_csv`, if given, replaces the plain
     `pd.DataFrame(records).to_csv(acq_cfg.output_file, index=False)` write
     with a caller-supplied writer (see instruments.data_naming) — used by
-    the TUI/web layer to write the sample-convention header alongside the
+    the TUI layer to write the sample-convention header alongside the
     data. Omit it (the default) to keep writing a plain headerless CSV to
     acq_cfg.output_file, unchanged from before.
 

@@ -4,7 +4,7 @@ Run-time model — the numbers behind every program's "Run time" estimate
 Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
 Created: 2026-09-21
 
-Pure (no hardware, no Textual/NiceGUI). Each program's ``build_summary()``
+Pure (no hardware, no Textual). Each program's ``build_summary()``
 builds a `RunCost` — modelled seconds per point plus a labelled breakdown —
 and shows ``RunCost.lines()``; the run screen feeds the *same* per-point
 list to its progress bar (`progress_total` / `progress_step`), so the
@@ -131,14 +131,3 @@ def progress_step(rc: Optional[RunCost], index: int) -> float:
     return rc.points[index]
 
 
-def eta_s(rc: Optional[RunCost], n_done: int, elapsed_s: float) -> Optional[float]:
-    """Seconds left: the model's remaining cost scaled by the observed pace
-    (elapsed wall time / modelled cost of the points done so far). Before the
-    first point it is just the modelled total; None if there is no cost model.
-    The shutdown tail is added at face value (it is not paced)."""
-    if rc is None or rc.total_s <= 0:
-        return None
-    done = sum(rc.points[:max(0, n_done)])
-    if done <= 0 or elapsed_s <= 0:
-        return rc.total_s
-    return max(0.0, sum(rc.points) - done) * (elapsed_s / done) + rc.tail_s

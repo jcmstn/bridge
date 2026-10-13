@@ -1,5 +1,5 @@
 """
-instruments/run_index.py — the SQLite run history both front ends write:
+instruments/run_index.py — the SQLite run history every TUI writes:
 a start/update/finish round trip, and connections are always closed.
 """
 

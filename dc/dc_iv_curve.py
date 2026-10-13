@@ -106,8 +106,8 @@ log = logging.getLogger(__name__)
 # Configuration dataclasses  ── change all your parameters here ──────────────
 # ─────────────────────────────────────────────────────────────────────────────
 # VoltmeterConfig and GateConfig live in instruments/ (see the imports
-# above -- GateConfig etc. are re-exported from here for dc_iv_curve_tui.py
-# / web/dc/iv_curve.py, which import instrument helpers through this
+# above -- GateConfig etc. are re-exported from here for dc_iv_curve_tui.py,
+# which imports instrument helpers through this
 # module rather than instruments/ directly). SourceConfig stays local:
 # unlike the other DC programs (which source a fixed sense current), this
 # one sweeps the current itself, so it needs sweep bounds instead of a

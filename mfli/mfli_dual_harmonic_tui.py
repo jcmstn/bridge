@@ -126,7 +126,7 @@ log = logging.getLogger("mfli_dual_harmonic_tui")
 # mfli_dual_harmonic.py, so nothing generated at runtime ends up in the
 # git-tracked source tree. _DEFAULT_DATA_DIR is the fallback data-convention
 # "data root"; the real root is chosen per run in the identity bar's "Data
-# root" field (mirrors the web app) and persisted in the settings file.
+# root" field and persisted in the settings file.
 _DEFAULT_DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 SETTINGS_PATH = _DEFAULT_DATA_DIR / "mfli_dual_harmonic_tui_settings.json"
 
@@ -135,7 +135,7 @@ SETTINGS_PATH = _DEFAULT_DATA_DIR / "mfli_dual_harmonic_tui_settings.json"
 MEASUREMENT_TYPE = "HARM"
 
 # One-paragraph blurb + wiring schematic — shown on this program's card in
-# bridge_tui.py, and the description also on its web page.
+# bridge_tui.py.
 MFLI_DUAL_HARMONIC_DESCRIPTION = (
     "Leader 1f · follower 2f lock-in: two MDS-synced MFLIs or two SR830s. AC source: "
     "leader's sine output via series R, or 6221 (phase marker to both lock-ins). "
@@ -387,7 +387,7 @@ def build_header_fields(plan: "MeasurementPlan", ctx: RunContext, records: list[
 def _resolve_state_mfli(state: dict) -> dict:
     """Add the derived keys build_summary() / build_plan() read — the parsed
     lists/sweeps, each with its parse error — to a state of raw field values.
-    Pure: shared by the TUI's and the web page's parse_state()."""
+    Pure: used by the TUI's parse_state()."""
     state["sweep_rows_parsed"], state["sweep_rows_parse_error"] = try_parse(state["sweep_rows"], parse_sweep_rows)
     return state
 
@@ -672,12 +672,11 @@ def _save_measurement_png(records: list[dict], png_path: Path,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Plan + run  ── pure, shared by the TUI RunScreen and web/mfli/dual_harmonic.py
+# Plan + run  ── pure, used by the TUI RunScreen
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _build_plan_mfli(state: dict, data_root: Path) -> MeasurementPlan:
-    """One parsed, validated run request from a state dict. Pure — shared by
-    the TUI and the web page."""
+    """One parsed, validated run request from a state dict. Pure."""
     out_cfg = OutputConfig(
         device=state["leader_device"],
         frequency_Hz=state["frequency_Hz"],
@@ -796,8 +795,8 @@ def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
     sweep, finalize the run the instant it ends — even if connecting failed —
     then shut down, and only then save the PNG. In the measure-phi_I mode:
     connect and configure exactly the same way, autophase both lock-ins at 1f
-    (plan.phi_I_result), record nothing. Pure — the TUI's RunScreen and the
-    web page each pass their own callbacks."""
+    (plan.phi_I_result), record nothing. Pure — the TUI's RunScreen
+    passes its own callbacks."""
     run_contexts = [] if run_contexts is None else run_contexts
     run_extras = [] if run_extras is None else run_extras
     daq = lockin = magnet = gaussmeter = temp_ctrl = mds = None
@@ -910,7 +909,7 @@ def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
 
 
 def save_run_png(plan: MeasurementPlan, records: list[dict], png_path: Path, comment: str = "") -> None:
-    """The run's PNG (RunScreen and the web page both call this)."""
+    """The run's PNG (RunScreen calls this)."""
     _save_measurement_png(records, png_path, plan=plan, comment=comment)
 
 
@@ -1065,7 +1064,7 @@ def build_plan(state: dict, data_root: Path):
 
 def engine(plan):
     """The module that runs `plan` — its run_plan / header / PNG / type code
-    (both front ends take them from here, never from the toggle)."""
+    (the TUI takes them from here, never from the toggle)."""
     return six if isinstance(plan, six.MeasurementPlan) else sys.modules[__name__]
 
 

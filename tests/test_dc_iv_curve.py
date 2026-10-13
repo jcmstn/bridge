@@ -1,4 +1,4 @@
-"""Plan-purity tests for the I-V build_plan() the TUI and web/dc/iv_curve.py share."""
+"""Plan-purity tests for the I-V build_plan() in dc_iv_curve_tui.py."""
 
 from __future__ import annotations
 

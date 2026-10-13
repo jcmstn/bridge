@@ -379,7 +379,7 @@ def _near_multiple(f: float, m: float) -> bool:
 def resolve_state(state: dict) -> dict:
     """Add the derived keys build_summary() / build_plan() read — the parsed
     lists/sweeps, each with its parse error — to a state of raw field values.
-    Pure: shared by the TUI's and the web page's parse_state()."""
+    Pure: used by the TUI's parse_state()."""
     state["pulse_current_list"], state["pulse_current_parse_error"] = _resolve_pulse_currents(state)
     state["magnet_currents_A"], state["magnet_currents_parse_error"] = _resolve_magnet_currents(state)
     state["sense_currents_A"], state["sense_currents_parse_error"] = _resolve_sense_currents(state)
@@ -629,11 +629,10 @@ def _save_measurement_png(records: list[dict], png_path: Path, harmonic: int,
     log.info("Saved plot to '%s'", png_path)
 
 
-# ── plan + run (pure, shared by the TUI RunScreen and (no web page yet)) ──────────────
+# ── plan + run (pure, used by the TUI RunScreen) ──────────────
 
 def build_plan(state: dict, data_root: Path) -> MeasurementPlan:
-    """One parsed, validated run request from a state dict. Pure — shared by
-    the TUI and the web page."""
+    """One parsed, validated run request from a state dict. Pure."""
     pulse_cfg = WritePulseConfig(
         width_s=state["pulse_width_s"], compliance_V=state["pulse_compliance_V"],
     )

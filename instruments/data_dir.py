@@ -4,11 +4,8 @@ Shared data-root directory chooser for the Textual TUIs
 Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
 Created: 2026-09-03
 
-The web app lets a run's data root be chosen anywhere on disk
-(web/directory_picker.py); this is the Textual equivalent every
-dc/*_tui.py and mfli/*_tui.py uses. `validate_directory()` is the shared
-pure check — web/directory_picker.py re-exports it from here so the rule
-lives in one place and isn't tied to NiceGUI being installed.
+Lets a run's data root be chosen anywhere on disk; every dc/*_tui.py and
+mfli/*_tui.py uses it. `validate_directory()` is the pure check behind it.
 """
 
 from __future__ import annotations

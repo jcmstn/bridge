@@ -125,7 +125,7 @@ log = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────────────────
 # SourceConfig, VoltmeterConfig, GateConfig, MagnetConfig and GaussmeterConfig
 # live in instruments/ (see the imports above -- re-exported from here for
-# dc_gate_sweep_tui.py / web/dc/gate_sweep.py, which import instrument
+# dc_gate_sweep_tui.py, which imports instrument
 # helpers through this module rather than instruments/ directly). Only
 # what's specific to this sweep (the gate points and acquisition timing)
 # is defined below.

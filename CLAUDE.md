@@ -1,7 +1,7 @@
 # CLAUDE.md
 
 `bridge` — instrument control for DC transport + MFLI lock-in measurements
-in a spintronics lab (Textual TUI and NiceGUI web front ends).
+in a spintronics lab (Textual TUI front end).
 
 ## Read first
 
@@ -15,12 +15,11 @@ in a spintronics lab (Textual TUI and NiceGUI web front ends).
 
 ## Hard rules
 
-- **Import direction is one-way:** `web/{suite}/{name}.py` →
-  `{suite}/{name}_tui.py` → `{suite}/{name}.py` → `instruments/*.py`.
-  Never the other way. A measurement script must not import Textual; a TUI
-  must not import `nicegui`. The web page reuses the TUI module's pure
-  helpers (`DEFAULTS`, `*_FIELDS`, `MeasurementPlan`, `build_summary`, …) —
-  don't re-implement the parameter surface.
+- **Import direction is one-way:** `{suite}/{name}_tui.py` →
+  `{suite}/{name}.py` → `instruments/*.py`. Never the other way. A
+  measurement script must not import Textual. The TUI module's pure helpers
+  (`DEFAULTS`, `*_FIELDS`, `MeasurementPlan`, `build_summary`, `run_plan`, …)
+  are the program's parameter surface — reuse them, don't re-implement it.
 - **Read raw run files with `data_naming.read_raw(path)`**, never
   `pd.read_csv(path, comment="#")` (that eats the units sub-header row).
 - **One `allocate_run()` per output file.** Multi-file sweeps call it once

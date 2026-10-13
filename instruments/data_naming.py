@@ -530,7 +530,7 @@ def make_incremental_writer(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# One run's lifecycle  ── shared by every program's run_plan() (TUI + web)
+# One run's lifecycle  ── shared by every program's run_plan()
 # ─────────────────────────────────────────────────────────────────────────────
 
 def record_run(

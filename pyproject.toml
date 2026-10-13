@@ -21,7 +21,6 @@ dependencies = [
     "zhinst-toolkit>=1.3.0",
     "zhinst-core>=26.7,<26.8",
     "scipy>=1.18.0",
-    "nicegui[plotly]>=3.15.0",
 ]
 
 [dependency-groups]
@@ -32,7 +31,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["dc*", "mfli*", "sot*", "instruments*", "web*"]
+include = ["dc*", "mfli*", "sot*", "instruments*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]   # the repo-root bridge_tui.py isn't in an installed package

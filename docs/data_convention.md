@@ -2,9 +2,8 @@
 
 How every measurement in `bridge` saves its data, and the API a new
 measurement script should use to do the same. The implementation lives in
-`instruments/data_naming.py` (naming/header/index core), plus two thin UI
-helpers, `instruments/tui_sample_picker.py` (Textual) and
-`web/sample_picker.py` (NiceGUI). Read the docstrings in those three files
+`instruments/data_naming.py` (naming/header/index core), plus the thin UI
+helper `instruments/tui_sample_picker.py` (Textual). Read the docstrings in those two files
 for the authoritative details; this document is the narrative overview and
 the "how do I wire up a new script" recipe.
 
@@ -233,11 +232,11 @@ diagram drew a left-handed frame (x lower-right, y lower-left, z up), so any
 φ entered from that diagram has y flipped. Convert with
 `phi_RH = (-phi) % 360` and leave θ as is. Runs with θ = 0, or φ ∈ {0, 180}
 (out-of-plane and the zx plane), are the same in both frames. In the zy
-plane, φ = 90 and 270 swap. The web 3D diagram was always right-handed.
+plane, φ = 90 and 270 swap.
 
 `instruments/field_geometry.py` — `field_unit_vector(theta_deg, phi_deg)`
 converts to a Cartesian unit vector in this frame; `render_ascii_field_diagram`
-draws the small live diagram both front ends show next to these fields.
+draws the small live diagram the TUI shows next to these fields.
 
 ## `index.csv`
 
@@ -416,23 +415,17 @@ if error is not None:
 
 ## Sample-picker UI helpers
 
-Both UI toolkits get the same three affordances, implemented once and
-reused by every `*_tui.py` / `web/**/*.py` page:
+Three affordances, implemented once in `instruments/tui_sample_picker.py`
+and reused by every `*_tui.py`:
 
-- **Textual** (`instruments/tui_sample_picker.py`):
-  `sample_options(data_root)` for a `Select` widget's choices,
+- `sample_options(data_root)` for a `Select` widget's choices,
   `NewSampleScreen` (modal, name → `ensure_sample(..., create=True)`),
   `StatusCommentScreen` (modal, status `Select` from `STATUS_OPTIONS =
   ["good", "open", "short", "noisy"]` + comment `Input`, dismisses with
   `(status, comment)` or `None` if skipped).
-- **NiceGUI** (`web/sample_picker.py`): `sample_select(data_root_getter,
-  default=TEST_SAMPLE)` returns `(select, refresh_options)` for a
-  `ui.select`; `new_sample_dialog(data_root)` and
-  `status_comment_dialog()` are the modal-dialog equivalents, both
-  `async` (`await`ed from a NiceGUI coroutine).
 
-Both share the `NEW_SAMPLE_SENTINEL` pattern: the picker's last option is
-`"+ New sample…"`; selecting it pops the new-sample dialog/screen and,
+The `NEW_SAMPLE_SENTINEL` pattern: the picker's last option is
+`"+ New sample…"`; selecting it pops the new-sample screen and,
 on success, refreshes the options with the new name selected.
 
 ## What NOT to do

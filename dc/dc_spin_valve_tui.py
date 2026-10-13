@@ -338,7 +338,7 @@ def build_header_fields(plan: "MeasurementPlan", ctx: RunContext, records: list[
 def resolve_state(state: dict) -> dict:
     """Add the derived keys build_summary() / build_plan() read — the parsed
     lists/sweeps, each with its parse error — to a state of raw field values.
-    Pure: shared by the TUI's and the web page's parse_state()."""
+    Pure: used by the TUI's parse_state()."""
     state["gate_voltage_list"], state["gate_parse_error"] = \
         try_parse(state["gate_voltage_values"]) if state["enable_gate"] else ([], None)
     state["sense_current_list"], state["sense_current_parse_error"] = try_parse(state["sense_current_values"])
@@ -592,12 +592,11 @@ def _save_measurement_png(records: list[dict], png_path: Path,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Plan + run  ── pure, shared by the TUI RunScreen and web/dc/spin_valve.py
+# Plan + run  ── pure, used by the TUI RunScreen
 # ─────────────────────────────────────────────────────────────────────────────
 
 def build_plan(state: dict, data_root: Path) -> MeasurementPlan:
-    """One parsed, validated run request from a state dict. Pure — shared by
-    the TUI and the web page."""
+    """One parsed, validated run request from a state dict. Pure."""
     src_cfg = SourceConfig(
         visa_resource=state["source_visa_resource"],
         sense_current_A=state["sense_current_list"][0],
@@ -686,7 +685,7 @@ def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
     """Connect, then one field sweep (own run number, own file) per (sense
     current, gate voltage) pair, each recorded + finalized by record_run()
     before the next; always shut the instruments down. Pure — the TUI's
-    RunScreen and the web page each pass their own callbacks."""
+    RunScreen passes its own callbacks."""
     run_contexts = [] if run_contexts is None else run_contexts
     run_extras = [] if run_extras is None else run_extras
     source = voltmeter = gate = magnet = gaussmeter = temp_ctrl = None
@@ -786,7 +785,7 @@ def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
 
 
 def save_run_png(plan: MeasurementPlan, records: list[dict], png_path: Path, comment: str = "") -> None:
-    """One run's PNG (RunScreen and the web page both call this)."""
+    """One run's PNG (RunScreen calls this)."""
     _save_measurement_png(records, png_path, plan=plan, comment=comment)
 
 

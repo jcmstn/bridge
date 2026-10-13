@@ -339,7 +339,7 @@ def test_run_screen_saves_one_run_per_initial_state(tmp_path, monkeypatch, rever
     asyncio.run(go())
 
     assert inits == [5.0, -5.0]
-    # the session is in the shared run history (runs.db), like a web run
+    # the session is in the shared run history (runs.db)
     (hist,) = run_index.recent_runs()
     assert (hist["suite"], hist["status"], hist["point_count"]) == ("SOT", "completed", 8)
     assert hist["sample"] == "A" and hist["finished_at"]

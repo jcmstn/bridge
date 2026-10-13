@@ -99,15 +99,3 @@ def test_mfli_window_is_the_loops_own_function():
     assert poll_window_s(0.001, 200, 857.0) == pytest.approx(300 / 857.0)    # n-sample term wins
     assert acquire_s(0.3, 50, 857.0) == pytest.approx(0.9 + rt.ACQ_OVERHEAD_S)
 
-
-def test_eta_scales_remaining_model_by_observed_pace():
-    rc = rt.RunCost(4)
-    rc.each("x", 10.0)
-    assert rt.eta_s(None, 1, 5.0) is None
-    assert rt.eta_s(rc, 0, 0.0) == 40.0                        # before point 1: the model itself
-    assert rt.eta_s(rc, 1, 10.0) == pytest.approx(30.0)        # on model pace
-    assert rt.eta_s(rc, 2, 40.0) == pytest.approx(40.0)        # running 2x slow -> remaining doubles
-    assert rt.eta_s(rc, 4, 99.0) == 0.0
-    rc.tail("teardown", 6.0)
-    assert rt.eta_s(rc, 4, 99.0) == 6.0                         # only shutdown left, at face value
-    assert rt.eta_s(rc, 1, 10.0) == pytest.approx(36.0)

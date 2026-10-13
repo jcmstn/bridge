@@ -4,8 +4,7 @@ PNG (own run number, never a combined overlay), drawn exactly as a lone run
 would be -- not colored/labelled by its position in the series.
 
 Covers the TUIs of the Hall, gate-sweep, I-V, spin-valve and three SOT
-measurements (RunScreen._save_run_png) and the Hall/gate-sweep/I-V/
-spin-valve web pages' module-level _save_measurement_png. The MFLI 6221
+measurements (RunScreen._save_run_png). The MFLI 6221
 pair has its own tests. No hardware, no Textual app loop: _save_run_png
 only reads `.plan.data_root` (plus `.plan.read_cfg.harmonic` for the 6221
 SOT and `.plan.header_extra` for I-V's annotation), so a SimpleNamespace

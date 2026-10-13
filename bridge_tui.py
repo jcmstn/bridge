@@ -6,11 +6,10 @@ Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
 Created: 2026-09-23 (replaces the per-suite pickers dc/dc_tui.py,
 mfli/mfli_tui.py and sot/sot_tui.py)
 
-Terminal twin of the web landing page (web/app.py): the DC / MFLI / SOT
+The one entry point to every program: the DC / MFLI / SOT
 programs as cards in three columns — each with its description, a
 collapsible wiring schematic and a Launch button — above the shared
-"Recent runs" history (instruments/run_index.py, written by both front
-ends). Launching a program exits this menu, runs that program's own App,
+"Recent runs" history (instruments/run_index.py). Launching a program exits this menu, runs that program's own App,
 and comes back here when it quits.
 
 Run with:
@@ -90,7 +89,6 @@ PROGRAMS: dict[str, list[Program]] = {
 
 _BY_KEY: dict[str, Program] = {p.key: p for programs in PROGRAMS.values() for p in programs}
 
-# Same columns as the web landing page's run-history table.
 RUN_COLUMNS = [
     ("started_at", "Started"), ("sample", "Sample"), ("device", "Device"),
     ("run_number", "Run #"), ("suite", "Suite"), ("measurement", "Measurement"),

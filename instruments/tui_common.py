@@ -24,9 +24,9 @@ is the program MODULE's pure API, read from the subclass's own module at
 call time — SETTINGS_PATH, _DEFAULT_DATA_DIR, the *_FIELDS groups,
 resolve_state, build_summary, run_plan, build_header_fields, save_run_png,
 PNG_SUFFIX, RunScreen — so each module stays their single source of truth
-(the web pages run the same run_plan; tests import and monkeypatch there).
+(tests import and monkeypatch there).
 
-Textual-only (never NiceGUI), and imported only by *_tui.py modules and
+Textual-only, and imported only by *_tui.py modules and
 bridge_tui.py — never by a measurement script (docs/architecture.md §2).
 """
 
@@ -260,7 +260,7 @@ class MeasurementRunScreen(Screen):
 
     do_run() calls the program module's pure `run_plan(plan, stop_event, *,
     on_status, on_run_label, on_point, on_run_finished, run_contexts,
-    run_extras)` — the same function the web page runs — which records every
+    run_extras)`, which records every
     run through data_naming.record_run() (finalized the instant it ends) and
     appends each RunContext + its header extras here. The PNG and header
     hooks default to the module's `save_run_png(plan, records, png_path,
@@ -508,7 +508,7 @@ class MeasurementRunScreen(Screen):
             except Exception:
                 log.exception("Could not re-save measurement plot PNG with comment")
 
-    # ── run history (runs.db, shared with the web front end) ──────────
+    # ── run history (runs.db) ──────────
 
     def _history_start(self) -> None:
         ctx = getattr(self.plan, "run_ctx", None)
@@ -637,7 +637,7 @@ class MeasurementApp(App):
         """The form as a typed state dict: every field Input (_parse_fields),
         every Switch / Select / TextArea by widget id, and the sample — then the
         program module's pure `resolve_state(state)` (the derived lists/sweeps
-        with their parse errors), the same function its web page calls. With
+        with their parse errors). With
         MercuryiTC setpoints on, the first one is the filename setpoint."""
         state, errors = self._parse_fields()
         for switch in self.query(Switch):

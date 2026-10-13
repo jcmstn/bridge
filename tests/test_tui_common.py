@@ -21,7 +21,7 @@ from instruments.data_naming import allocate_run, ensure_sample, read_raw, recor
 
 
 # This test module plays the "program module": the pure API the base
-# RunScreen (and a web page) drive — run_plan / build_header_fields / save_run_png.
+# RunScreen drives — run_plan / build_header_fields / save_run_png.
 PNGS: list = []
 
 

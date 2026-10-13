@@ -128,8 +128,8 @@ log = logging.getLogger("dc_hall_measurement_tui")
 # dc_hall_measurement.py, so nothing generated at runtime ends up in the
 # git-tracked source tree. _DEFAULT_DATA_DIR is the fallback data-convention
 # "data root" (parent of every {sample}/ folder); the real root is chosen
-# per run in the identity bar's "Data root" field (mirrors the web app —
-# see web/directory_picker.py) and persisted in the settings file.
+# per run in the identity bar's "Data root" field (see
+# instruments/data_dir.py) and persisted in the settings file.
 _DEFAULT_DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 SETTINGS_PATH = _DEFAULT_DATA_DIR / "dc_hall_measurement_tui_settings.json"
 
@@ -346,7 +346,7 @@ def build_header_fields(plan: "MeasurementPlan", ctx: RunContext, records: list[
 def resolve_state(state: dict) -> dict:
     """Add the derived keys build_summary() / build_plan() read — the parsed
     lists/sweeps, each with its parse error — to a state of raw field values.
-    Pure: shared by the TUI's and the web page's parse_state()."""
+    Pure: used by the TUI's parse_state()."""
     state["sense_current_list"], state["sense_current_parse_error"] = try_parse(state["sense_current_values"])
     state["sweep_rows_parsed"], state["sweep_rows_parse_error"] = try_parse(state["sweep_rows"], parse_sweep_rows)
     return state
@@ -619,12 +619,11 @@ def _save_measurement_png(records: list[dict], png_path: Path,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Plan + run  ── pure, shared by the TUI RunScreen and web/dc/hall.py
+# Plan + run  ── pure, used by the TUI RunScreen
 # ─────────────────────────────────────────────────────────────────────────────
 
 def build_plan(state: dict, data_root: Path) -> MeasurementPlan:
-    """One parsed, validated run request from a state dict. Pure — shared by
-    the TUI and the web page."""
+    """One parsed, validated run request from a state dict. Pure."""
     src_cfg = SourceConfig(
         visa_resource=state["source_visa_resource"],
         sense_current_A=state["sense_current_list"][0],
@@ -712,8 +711,8 @@ def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
              run_extras: Optional[list] = None) -> None:
     """Connect, then one run (own run number, own file) per sense current,
     each recorded + finalized by record_run() before the next; always shut
-    the instruments down. Pure — the TUI's RunScreen and the web page each
-    pass their own callbacks (see sot_nonlocal_switching_tui.run_plan)."""
+    the instruments down. Pure — the TUI's RunScreen passes its own
+    callbacks (see sot_nonlocal_switching_tui.run_plan)."""
     run_contexts = [] if run_contexts is None else run_contexts
     run_extras = [] if run_extras is None else run_extras
     source = voltmeter = magnet = gaussmeter = temp_ctrl = None
@@ -797,7 +796,7 @@ def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
 
 
 def save_run_png(plan: MeasurementPlan, records: list[dict], png_path: Path, comment: str = "") -> None:
-    """One run's PNG (RunScreen and the web page both call this)."""
+    """One run's PNG (RunScreen calls this)."""
     _save_measurement_png(records, png_path, plan=plan, comment=comment)
 
 

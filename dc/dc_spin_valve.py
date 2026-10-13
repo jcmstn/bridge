@@ -122,7 +122,7 @@ class AcquisitionConfig:
     field_settle_tolerance_mT: float = 0.02  # Passed to set_magnet_current(): the field
                                         # counts as settled once a short window of
                                         # gaussmeter readings spans no more than this.
-                                        # Exposed in the TUI/web "Advanced" section for
+                                        # Exposed in the TUI "Advanced" section for
                                         # rigs where the default is too tight/loose.
     reversal_enabled: bool  = True     # Reverse the sense current each rep (+I/-I) to
                                         # cancel thermal-EMF offsets. Some devices are

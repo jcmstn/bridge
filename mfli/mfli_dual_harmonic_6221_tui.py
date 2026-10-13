@@ -517,7 +517,7 @@ def build_header_fields(plan: "MeasurementPlan", ctx: RunContext, records: list[
 def resolve_state(state: dict) -> dict:
     """Add the derived keys build_summary() / build_plan() read — the parsed
     lists/sweeps, each with its parse error — to a state of raw field values.
-    Pure: shared by the TUI's and the web page's parse_state()."""
+    Pure: used by the TUI's parse_state()."""
     state["sweep_rows_parsed"], state["sweep_rows_parse_error"] = try_parse(state["sweep_rows"], parse_sweep_rows)
     state["amplitude_list"], state["amplitude_parse_error"] = try_parse(state["amplitude_values"])
     return state
@@ -852,12 +852,11 @@ def _save_measurement_png(records: list[dict], png_path: Path,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Plan + run  ── pure, shared by the TUI RunScreen and web/mfli/dual_harmonic_6221.py
+# Plan + run  ── pure, used by the TUI RunScreen
 # ─────────────────────────────────────────────────────────────────────────────
 
 def build_plan(state: dict, data_root: Path) -> MeasurementPlan:
-    """One parsed, validated run request from a state dict. Pure — shared by
-    the TUI and the web page."""
+    """One parsed, validated run request from a state dict. Pure."""
     ac_cfg = ACSourceConfig(
         visa_resource=state["ac_visa_resource"],
         amplitude_A=state["amplitude_list"][0],
@@ -993,8 +992,8 @@ def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
     lock both ExtRef PLLs, and record one run — or, in the measure-phi_I
     mode, autophase both lock-ins at 1f once and record nothing (own
     run number, own file) through record_run() before the next; always shut
-    the instruments down. Pure — the TUI's RunScreen and the web page each pass
-    their own callbacks."""
+    the instruments down. Pure — the TUI's RunScreen passes
+    its own callbacks."""
     run_contexts = [] if run_contexts is None else run_contexts
     run_extras = [] if run_extras is None else run_extras
     daq = lockin = source = magnet = gaussmeter = temp_ctrl = None
@@ -1132,7 +1131,7 @@ def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
 
 
 def save_run_png(plan: MeasurementPlan, records: list[dict], png_path: Path, comment: str = "") -> None:
-    """One run's PNG (RunScreen and the web page both call this)."""
+    """One run's PNG (RunScreen calls this)."""
     _save_measurement_png(records, png_path, plan=plan, comment=comment)
 
 

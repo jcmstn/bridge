@@ -497,9 +497,9 @@ class MagnetConfig:
 # itself: poll MEAS:CURR? until the output reaches the setpoint, then (if a
 # gaussmeter is supplied) poll the field until it stops drifting.
 #
-# These constants are deliberately NOT surfaced in the TUI / web forms -- edit
+# These constants are deliberately NOT surfaced in the TUI forms -- edit
 # them here if a particular rig needs it. The one exception is the field
-# tolerance, which set_magnet_current() takes as an argument so the TUI/web
+# tolerance, which set_magnet_current() takes as an argument so the TUI
 # "Advanced" section can override FIELD_SETTLE_TOLERANCE_MT per system.
 CURRENT_SETTLE_REL        = 0.05    # readback band as a fraction of |setpoint|
 CURRENT_SETTLE_TIMEOUT_S  = 10.0    # give up waiting on MEAS:CURR? after this  [s]

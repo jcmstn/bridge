@@ -25,7 +25,7 @@ log = logging.getLogger(__name__)
 # have twice this). Every sweep a form previews on each keystroke goes through
 # parse_sweep_rows() / build_segmented_sweep() / linear_sweep(), so a mistyped
 # step (1e-12) or span (1e9) used to allocate billions of points and freeze --
-# or OOM-kill -- the TUI/web form. 100 000 points is ~28 h at 1 s/point, far
+# or OOM-kill -- the TUI form. 100 000 points is ~28 h at 1 s/point, far
 # past any real sweep here; raise it if a real sweep ever needs more.
 MAX_SWEEP_POINTS = 100_000
 

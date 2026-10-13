@@ -1,6 +1,6 @@
 """
-Summary-sidebar line format, shared by both front ends
-=======================================================
+Summary-sidebar line format, shared by every program
+====================================================
 Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
 Created: 2026-09-24
 
@@ -9,10 +9,9 @@ Every program's ``build_summary()`` returns ``info`` lines written as
     "Key: value — note"      e.g. "Sense current: 10 µA — reversed ±I each rep"
 
 ``split_info`` cuts one into (key, value, note) so the TUI (``summary_markup``,
-Rich markup) and the web (``web.run_controller.render_summary``) can show the
-value bold and the key/note muted. A line without ": " is all note.
+Rich markup) can show the value bold and the key/note muted. A line without ": " is all note.
 
-Pure (Rich markup strings only, no Textual/NiceGUI).
+Pure (Rich markup strings only, no Textual).
 
 Usage example:
     from instruments.summary_lines import summary_markup
