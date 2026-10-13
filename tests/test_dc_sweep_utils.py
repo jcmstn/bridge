@@ -6,7 +6,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from dc.dc_sweep_utils import build_segmented_sweep, linear_sweep, parse_sweep_rows
+from dc.dc_sweep_utils import (
+    build_segmented_sweep, differential_resistance, linear_sweep, parse_sweep_rows)
 from mfli.mfli_dual_harmonic import bidirectional_current_sweep
 
 
@@ -120,3 +121,27 @@ def test_the_cap_is_per_direction_and_itself_allowed() -> None:
     assert len(build_segmented_sweep([(0.0, 1.0, n)], bidirectional=True)) == 2 * n - 1
     with pytest.raises(ValueError, match="limit"):
         parse_sweep_rows(f"0, 1, {n}\n1, 2, 2")       # rows are checked as they are parsed
+
+
+@pytest.mark.parametrize("currents", [
+    linear_sweep(-1.0, 1.0, 0.25),                  # turn-around not repeated
+    np.r_[np.linspace(-1, 1, 9), np.linspace(1, -1, 9)],  # turn-around repeated
+    build_segmented_sweep([(0, 1, 5), (1, -1, 9), (-1, 0, 5)], bidirectional=True),
+])
+def test_differential_resistance_is_finite_across_turnarounds(currents) -> None:
+    # Ohmic 100 ohm device: plain np.gradient gives inf/nan at the turn-around.
+    r = differential_resistance(currents, 100.0 * currents)
+    assert np.allclose(r, 100.0)
+
+
+def test_differential_resistance_one_point_branch_is_nan() -> None:
+    r = differential_resistance([0.0, 0.0, 1.0], [0.0, 0.0, 2.0])
+    assert np.isnan(r[0]) and np.allclose(r[1:], 2.0)
+
+
+def test_differential_resistance_down_branch_matches_up_branch() -> None:
+    # Quadratic V(I): both legs must give the same dV/dI at the same current.
+    I = linear_sweep(-1.0, 1.0, 0.25)
+    r = differential_resistance(I, I + I ** 2)
+    n = len(I) // 2
+    assert np.allclose(r[:n + 1], r[n:][::-1])

@@ -31,7 +31,8 @@ For each current point:
 The whole sweep is bidirectional (min → max → min) so hysteresis (charge
 traps, self-heating, memristive contacts) shows up directly — the up and
 down traces should sit on top of each other for a clean, purely resistive
-DUT. A numerical differential resistance dV/dI (via np.gradient) is
+DUT. A numerical differential resistance dV/dI (per sweep branch, via
+dc_sweep_utils.differential_resistance) is
 computed once the full sweep is in hand — see plot_results() — since it
 needs neighbouring points and can't be produced incrementally per-point
 the way chord R can.
@@ -85,7 +86,7 @@ from instruments.mercury_itc import (
     shutdown_temperature_controller,
 )
 
-from dc.dc_sweep_utils import linear_sweep, safe_shutdown
+from dc.dc_sweep_utils import differential_resistance, linear_sweep, safe_shutdown
 
 # Data lives outside "bridge" (a sibling of it).
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
@@ -271,12 +272,13 @@ def run_measurement(
 
 def plot_results(df: pd.DataFrame, out_path: Path) -> None:
     """
-    Two-panel summary: the raw I-V curve, and the numerical differential
-    resistance dV/dI (via np.gradient — needs neighbouring points, so it's
-    computed here rather than incrementally during the sweep).
+    Three-panel summary: the raw I-V curve, the chord resistance R = V/I,
+    and the numerical differential resistance dV/dI (per sweep branch, see
+    differential_resistance() — needs neighbouring points, so it's computed here rather than
+    incrementally during the sweep).
     """
     import matplotlib.pyplot as plt     # only the standalone plot needs it — keeps imports light
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(7, 8))
+    fig, (ax1, ax_r, ax2) = plt.subplots(3, 1, figsize=(7, 11))
 
     ax1.plot(df["current_A"], df["voltage_V"], ".-", color="#2E3192")
     ax1.set_xlabel("Current (A)")
@@ -284,7 +286,13 @@ def plot_results(df: pd.DataFrame, out_path: Path) -> None:
     ax1.set_title("I-V curve")
     ax1.grid(alpha=0.4)
 
-    r_diff = np.gradient(df["voltage_V"].to_numpy(), df["current_A"].to_numpy())
+    ax_r.plot(df["current_A"], df["resistance_ohm"], ".-", color="#2E3192")
+    ax_r.set_xlabel("Current (A)")
+    ax_r.set_ylabel("R = V/I (Ω)")
+    ax_r.set_title("Resistance (V/I)")
+    ax_r.grid(alpha=0.4)
+
+    r_diff = differential_resistance(df["current_A"], df["voltage_V"])
     ax2.plot(df["current_A"], r_diff, ".-", color="#e34948")
     ax2.set_xlabel("Current (A)")
     ax2.set_ylabel("dV/dI (Ω)")

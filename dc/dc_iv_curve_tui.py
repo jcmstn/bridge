@@ -69,7 +69,8 @@ from dc.dc_iv_curve import (
     shutdown_source,
     shutdown_temperature_controller,
 )
-from dc.dc_sweep_utils import linear_sweep, safe_shutdown, sweep_point_count, try_parse
+from dc.dc_sweep_utils import (
+    differential_resistance, linear_sweep, safe_shutdown, sweep_point_count, try_parse)
 from instruments.data_dir import validate_directory
 from instruments.data_naming import (
     RunContext,
@@ -394,20 +395,24 @@ def _live_plot_worker(queue: "mp.Queue") -> None:
     import matplotlib.pyplot as plt
     from matplotlib.animation import FuncAnimation
 
-    fig, ax = plt.subplots(figsize=(7, 5))
+    fig, (ax, ax_r) = plt.subplots(2, 1, figsize=(7, 8), sharex=True)
     try:
         fig.canvas.manager.set_window_title("DC I-V live measurement")
     except Exception:
         pass
-    ax.set_xlabel("Current (A)")
     ax.set_ylabel("Voltage (V)")
     ax.set_title("Live measurement — I-V curve")
     ax.grid(True, alpha=0.3)
+    ax_r.set_xlabel("Current (A)")
+    ax_r.set_ylabel("R = V/I (Ω)")
+    ax_r.set_title("Resistance (V/I)")
+    ax_r.grid(True, alpha=0.3)
     fig.tight_layout()
 
     cmap = plt.get_cmap("tab10")
     lines: dict[int, "plt.Line2D"] = {}
-    series_data: dict[int, tuple[list, list]] = {}
+    r_lines: dict[int, "plt.Line2D"] = {}
+    series_data: dict[int, tuple[list, list, list]] = {}
 
     def _drain(_frame=None):
         updated: set[int] = set()
@@ -421,22 +426,27 @@ def _live_plot_worker(queue: "mp.Queue") -> None:
             if idx not in lines:
                 label = record.get("series_label")
                 (line,) = ax.plot([], [], "o-", color=cmap(idx % 10), label=label)
+                (r_line,) = ax_r.plot([], [], "o-", color=cmap(idx % 10))
                 lines[idx] = line
-                series_data[idx] = ([], [])
+                r_lines[idx] = r_line
+                series_data[idx] = ([], [], [])
                 new_series = True
-            xs, ys = series_data[idx]
+            xs, ys, rs = series_data[idx]
             xs.append(record["current_A"])
             ys.append(record["voltage_V"])
+            rs.append(record["resistance_ohm"])
             updated.add(idx)
         if updated:
             for idx in updated:
-                xs, ys = series_data[idx]
+                xs, ys, rs = series_data[idx]
                 lines[idx].set_data(xs, ys)
+                r_lines[idx].set_data(xs, rs)
             if new_series and any(l.get_label() and not l.get_label().startswith("_") for l in lines.values()):
                 ax.legend(loc="best", fontsize=8)
-            ax.relim()
-            ax.autoscale_view()
-        return tuple(lines.values())
+            for a in (ax, ax_r):
+                a.relim()
+                a.autoscale_view()
+        return tuple(lines.values()) + tuple(r_lines.values())
 
     # Keep a reference so it isn't garbage-collected mid-run.
     _ani = FuncAnimation(fig, _drain, interval=300, cache_frame_data=False)
@@ -445,8 +455,8 @@ def _live_plot_worker(queue: "mp.Queue") -> None:
 
 def _save_measurement_png(records: list[dict], png_path: Path,
                            plan: Optional["MeasurementPlan"] = None, comment: str = "") -> None:
-    """I-V + dV/dI PNG of ONE run's points (one PNG per gate voltage, like a
-    manual run).
+    """I-V + R = V/I + dV/dI PNG of ONE run's points (one PNG per gate
+    voltage, like a manual run).
 
     `plan`/`comment` add a small "at a glance" text annotation (compliance
     voltage, the operator's comment) -- see dc_iv_curve_tui.py's
@@ -459,15 +469,19 @@ def _save_measurement_png(records: list[dict], png_path: Path,
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(7, 8))
+    fig, (ax1, ax_r, ax2) = plt.subplots(3, 1, figsize=(7, 11))
     rows = sorted(records, key=lambda r: r["point_index"])
     I = np.array([r["current_A"] for r in rows])
     V = np.array([r["voltage_V"] for r in rows])
+    R = np.array([r["resistance_ohm"] for r in rows], dtype=float)  # NaN at I=0 -> gap
     ax1.plot(I, V, ".-", color="tab:blue")
+    ax_r.plot(I, R, ".-", color="tab:blue")
     if len(I) > 1:
-        ax2.plot(I, np.gradient(V, I), ".-", color="tab:blue")
+        ax2.plot(I, differential_resistance(I, V), ".-", color="tab:blue")
     ax1.set_xlabel("Current (A)"); ax1.set_ylabel("Voltage (V)")
     ax1.set_title("I-V curve"); ax1.grid(alpha=0.4)
+    ax_r.set_xlabel("Current (A)"); ax_r.set_ylabel("R = V/I (Ω)")
+    ax_r.set_title("Resistance (V/I)"); ax_r.grid(alpha=0.4)
     ax2.set_xlabel("Current (A)"); ax2.set_ylabel("dV/dI (Ω)")
     ax2.set_title("Differential resistance (numerical dV/dI)"); ax2.grid(alpha=0.4)
     fig.tight_layout()

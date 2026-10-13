@@ -12,8 +12,8 @@ validation stays identical to the TUI.
 Optional gate-voltage list means multiple complete current sweeps run per
 Start click, one CSV and one PNG per value.
 
-Live view adds a second panel (dV/dI via np.gradient, recomputed on each
-drain tick) alongside the raw I-V trace.
+Live view shows the raw I-V trace, the chord resistance R = V/I, and dV/dI
+(differential_resistance(), per sweep branch, recomputed on each drain tick).
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ from plotly.subplots import make_subplots
 from nicegui import ui
 
 import dc.dc_iv_curve_tui as program
+from dc.dc_sweep_utils import differential_resistance
 from dc.dc_iv_curve_tui import (
     build_plan,
     DEFAULTS, DC_IV_DESCRIPTION, build_summary,
@@ -152,13 +153,13 @@ def page() -> None:
             abort_btn = ui.button("Abort (safe ramp-down)", color="negative").props("outline")
             abort_btn.set_visibility(False)
 
-            fig = make_subplots(rows=2, cols=1, subplot_titles=("I-V curve", "Differential resistance (dV/dI)"))
-            fig.update_xaxes(title_text="Current (A)", row=1, col=1)
-            fig.update_yaxes(title_text="Voltage (V)", row=1, col=1)
-            fig.update_xaxes(title_text="Current (A)", row=2, col=1)
-            fig.update_yaxes(title_text="dV/dI (Ω)", row=2, col=1)
+            fig = make_subplots(rows=3, cols=1, subplot_titles=(
+                "I-V curve", "Resistance (V/I)", "Differential resistance (dV/dI)"))
+            for row, y_title in ((1, "Voltage (V)"), (2, "R = V/I (Ω)"), (3, "dV/dI (Ω)")):
+                fig.update_xaxes(title_text="Current (A)", row=row, col=1)
+                fig.update_yaxes(title_text=y_title, row=row, col=1)
             fig.update_layout(margin=dict(l=60, r=20, t=40, b=50), showlegend=True)
-            with ui.element("div").classes("w-full").style("aspect-ratio: 1 / 2; max-height: 90vh"):
+            with ui.element("div").classes("w-full").style("aspect-ratio: 2 / 5; max-height: 90vh"):
                 plot = ui.plotly(fig).classes("w-full h-full")
 
             columns = [
@@ -223,11 +224,12 @@ def page() -> None:
 
     # ── Run wiring ───────────────────────────────────────────────────────
 
-    series_state: dict[str, dict] = {}  # {"traces_iv": {idx: trace_index}, "traces_dvdi": {...}, "arrays": {idx: (I, V)}}
+    series_state: dict[str, dict] = {}  # {"traces_iv": {idx: trace_index}, "traces_r": {...}, "traces_dvdi": {...}, "arrays": {idx: (I, V, R)}}
 
     def init_series(n_series: int, labels: list[Optional[str]]) -> None:
         fig.data = []
         series_state["traces_iv"] = {}
+        series_state["traces_r"] = {}
         series_state["traces_dvdi"] = {}
         series_state["arrays"] = {}
         cmap = ["#2E3192", "#e34948", "#2ca02c", "#9467bd", "#8c564b", "#17becf", "#ff7f0e", "#7f7f7f"]
@@ -236,22 +238,29 @@ def page() -> None:
             name = labels[i] or "I-V"
             fig.add_trace(go.Scatter(x=[], y=[], mode="lines+markers", name=name,
                                       legendgroup=str(i), line=dict(color=color)), row=1, col=1)
-            fig.add_trace(go.Scatter(x=[], y=[], mode="lines+markers", name=name, showlegend=False,
-                                      legendgroup=str(i), line=dict(color=color)), row=2, col=1)
-            series_state["traces_iv"][i] = 2 * i
-            series_state["traces_dvdi"][i] = 2 * i + 1
-            series_state["arrays"][i] = ([], [])
+            for row in (2, 3):
+                fig.add_trace(go.Scatter(x=[], y=[], mode="lines+markers", name=name, showlegend=False,
+                                          legendgroup=str(i), line=dict(color=color)), row=row, col=1)
+            series_state["traces_iv"][i] = 3 * i
+            series_state["traces_r"][i] = 3 * i + 1
+            series_state["traces_dvdi"][i] = 3 * i + 2
+            series_state["arrays"][i] = ([], [], [])
 
     def on_record(record: dict) -> None:
         idx = record.get("series_index", 0)
-        I_list, V_list = series_state["arrays"][idx]
+        I_list, V_list, R_list = series_state["arrays"][idx]
         I_list.append(record["current_A"])
         V_list.append(record["voltage_V"])
+        r = record["resistance_ohm"]
+        R_list.append(None if np.isnan(r) else r)   # V/I is NaN at I=0; None -> gap, valid JSON
         iv_i = series_state["traces_iv"][idx]
         fig.data[iv_i].x = tuple(I_list)
         fig.data[iv_i].y = tuple(V_list)
+        r_i = series_state["traces_r"][idx]
+        fig.data[r_i].x = tuple(I_list)
+        fig.data[r_i].y = tuple(R_list)
         if len(I_list) > 1:
-            dvdi = np.gradient(np.array(V_list), np.array(I_list))
+            dvdi = [None if np.isnan(r) else r for r in differential_resistance(I_list, V_list)]
             dvdi_i = series_state["traces_dvdi"][idx]
             fig.data[dvdi_i].x = tuple(I_list)
             fig.data[dvdi_i].y = tuple(dvdi)

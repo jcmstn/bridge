@@ -45,7 +45,7 @@ def _gate(i, idx):
 
 def _iv(i, idx):
     return {"point_index": i, "current_A": 1e-6 * i, "voltage_V": 1e-3 * i,
-            "gate_voltage_V": float(idx)}
+            "resistance_ohm": 1e3 if i else float("nan"), "gate_voltage_V": float(idx)}
 
 
 def _spin_valve(i, idx):

@@ -91,6 +91,34 @@ def linear_sweep(start: float, stop: float, step: float, bidirectional: bool = T
     return build_segmented_sweep([(start, stop, n)], bidirectional)
 
 
+def differential_resistance(current_A, voltage_V) -> np.ndarray:
+    """
+    Numerical dV/dI, taken separately on each monotonic branch of the sweep.
+
+    A plain np.gradient over a bidirectional sweep is wrong at every
+    turn-around: the points either side of it share a current, so its
+    central difference divides by zero (and a repeated setpoint does the
+    same). Branches split at a zero step and share the turn-around point
+    at a direction flip (so the first point after it still gets a central
+    difference); a one-point branch gets NaN.
+    """
+    I = np.asarray(current_A, dtype=float)
+    V = np.asarray(voltage_V, dtype=float)
+    dI = np.diff(I)
+    branches, start = [], 0
+    for k, d in enumerate(dI):
+        if d == 0:                          # repeated setpoint: split between the two
+            branches.append((start, k + 1)); start = k + 1
+        elif k and dI[k - 1] * d < 0:       # turn-around at point k: both branches get it
+            branches.append((start, k + 1)); start = k
+    branches.append((start, len(I)))
+    out = np.full(len(I), np.nan)
+    for a, b in branches:
+        if b - a > 1:
+            out[a:b] = np.gradient(V[a:b], I[a:b])
+    return out
+
+
 def _one_way_points(start: float, stop: float, step: float) -> int:
     if not all(math.isfinite(v) for v in (start, stop, step)):
         raise ValueError("Sweep start, stop and step must be finite numbers.")
