@@ -43,7 +43,7 @@ from web.run_controller import (
     param_card, stable_card, param_grid, stable_grid, advanced_section, measurement_layout,
     program_artifacts, program_run_fn, refresh_on_busy_change,
     finished_handler, load_settings, save_settings,
-    form_state,
+    form_state, temperature_card,
 )
 from web.directory_picker import validate_directory
 from web.field_diagram import build_field_diagram_figure
@@ -132,12 +132,7 @@ def page() -> None:
                         "Stop at temperature (K, optional)", _opt(d("T_stop_K")),
                         hint="Stops once sensor 1 crosses it, in either direction.")
 
-                with param_card("Temperature logging"):
-                    switches["enable_temperature"] = bool_switch(
-                        "Log temperature (Oxford Instruments MercuryiTC)", d("enable_temperature"))
-                    inputs["temperature_sensor_uids"] = text_field(
-                        "Sensor UID(s)", d("temperature_sensor_uids"),
-                        hint="1 or 2, e.g. MB1.T1, DB5.T1 — a missing one is dropped.")
+                temperature_card(d, inputs, switches, identity, single_target=True, sensor_uids=True)
 
                 with param_card("Fixed field (Kepco magnet, optional)"):
                     switches["enable_field"] = bool_switch("Apply fixed field", d("enable_field"))

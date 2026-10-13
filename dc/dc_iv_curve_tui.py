@@ -84,6 +84,10 @@ from instruments.run_time import (
     RunCost,
 )
 from instruments.summary_lines import summary_markup
+from instruments.temperature_control import (
+    TEMPERATURE_DEFAULTS, TEMPERATURE_FIELD_IDS, TEMPERATURE_NUMERIC_FIELDS, TEMPERATURE_TEXT_FIELDS,
+    temperature_cfg_from_state, temperature_summary,
+)
 from instruments.tui_common import (
     MeasurementApp,
     MeasurementRunScreen,
@@ -92,6 +96,7 @@ from instruments.tui_common import (
     format_si,
     identity_bar,
     parse_sensor_uids,
+    temperature_card,
     switch_field,
 )
 from instruments.tui_sample_picker import (
@@ -154,9 +159,7 @@ DEFAULTS: dict = {
     "gate_voltage_limit_V": "20.0",
     "gate_compliance_current_A": "1e-6",
     "gate_voltage_values": "0.0",
-    "enable_temperature": True,
-    "temperature_visa_resource": "TCPIP0::192.168.1.5::7020::SOCKET",
-    "temperature_sensor_uids": "MB1.T1",
+    **TEMPERATURE_DEFAULTS,
 }
 
 # id -> caster, for every free-text numeric field (Switch handled separately)
@@ -171,14 +174,14 @@ NUMERIC_FIELDS: dict = {
     "step_A": float,
     "gate_voltage_limit_V": float,
     "gate_compliance_current_A": float,
+    **TEMPERATURE_NUMERIC_FIELDS,
 }
 TEXT_FIELDS = ["source_visa_resource", "voltmeter_visa_resource", "device",
                "cooldown", "gate_visa_resource", "gate_voltage_values",
-               "temperature_visa_resource", "temperature_sensor_uids", "data_dir"]
+               *TEMPERATURE_TEXT_FIELDS, "data_dir"]
 OPTIONAL_NUMERIC_FIELDS = ["temperature_setpoint_K"]
 GATE_FIELD_IDS = ["gate_visa_resource", "gate_voltage_limit_V",
                    "gate_compliance_current_A", "gate_voltage_values"]
-TEMPERATURE_FIELD_IDS = ["temperature_visa_resource", "temperature_sensor_uids"]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -352,15 +355,7 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     else:
         info.extend(run_costs(n_sweep_points, state).lines())
 
-    if state["enable_temperature"]:
-        uids = parse_sensor_uids(state["temperature_sensor_uids"])
-        if not uids:
-            warnings.append("Temperature logging is on but no sensor UID is set — "
-                             "temperature columns will be empty.")
-        else:
-            info.append(f"Temperature: MercuryiTC {', '.join(uids)} — empty if unreachable")
-    else:
-        info.append("Temperature: off")
+    temperature_summary(state, info, warnings, errors)
 
     return info, warnings, errors
 
@@ -547,14 +542,7 @@ def build_plan(state: dict, data_root: Path) -> MeasurementPlan:
         )
         gate_voltages = state["gate_voltage_list"]
 
-    temp_cfg = None
-    if state["enable_temperature"]:
-        uids = parse_sensor_uids(state["temperature_sensor_uids"])
-        if uids:
-            temp_cfg = TemperatureControllerConfig(
-                visa_resource=state["temperature_visa_resource"],
-                sensor_uids=uids,
-            )
+    temp_cfg = temperature_cfg_from_state(state)
 
     header_extra = {
         "compliance_V": state["compliance_V"],
@@ -768,11 +756,7 @@ class DCIVCurveApp(MeasurementApp):
                               DEFAULTS["gate_voltage_values"], kind="text",
                               hint="Comma-separate for one sweep + file per value."),
                     )
-                    yield card(
-                        "Temperature logging",
-                        switch_field("enable_temperature", "Log temperature (MercuryiTC)",
-                                     DEFAULTS["enable_temperature"]),
-                    )
+                    yield temperature_card(DEFAULTS)
 
                 # ── Tier 2: precision / speed knobs — collapsed ─────────────
                 with Collapsible(title="Acquisition & filter settings", collapsed=True):

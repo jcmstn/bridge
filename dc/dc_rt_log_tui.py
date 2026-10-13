@@ -82,6 +82,11 @@ from instruments.kepco_magnet import magnet_move_s
 from instruments.lakeshore475 import read_field_s
 from instruments.run_time import PER_RUN_S, POINT_OVERHEAD_S, TEMP_READ_S, RunCost, format_duration
 from instruments.summary_lines import summary_markup
+from instruments.mercury_itc import normalize_uid, set_temperature
+from instruments.temperature_control import (
+    TEMPERATURE_DEFAULTS, TEMPERATURE_FIELD_IDS, TEMPERATURE_TEXT_FIELDS,
+    steps_from_state, temperature_cfg_from_state, temperature_summary,
+)
 from instruments.tui_common import (
     MeasurementApp,
     MeasurementRunScreen,
@@ -90,6 +95,7 @@ from instruments.tui_common import (
     format_si,
     identity_bar,
     parse_sensor_uids,
+    temperature_card,
     switch_field,
 )
 from instruments.tui_sample_picker import NEW_SAMPLE_SENTINEL
@@ -139,9 +145,7 @@ DEFAULTS: dict = {
     "device": "",
     "cooldown": "",
     "temperature_setpoint_K": "",
-    "enable_temperature": True,
-    "temperature_visa_resource": "TCPIP0::192.168.1.5::7020::SOCKET",
-    "temperature_sensor_uids": "MB1.T1",
+    **TEMPERATURE_DEFAULTS,
     "enable_field": False,
     "magnet_current_A": "0",
     "field_theta_deg": "",
@@ -173,12 +177,12 @@ NUMERIC_FIELDS: dict = {
     "field_settle_tolerance_mT": float,
     "gaussmeter_n_averages": int,
     "gaussmeter_read_delay_s": float,
+    "temperature_max_K": float,         # single target: no margin / hold fields
 }
 TEXT_FIELDS = ["source_visa_resource", "voltmeter_visa_resource", "device", "cooldown",
-               "temperature_visa_resource", "temperature_sensor_uids",
+               *TEMPERATURE_TEXT_FIELDS,
                "magnet_visa_resource", "gaussmeter_visa_resource", "data_dir"]
 OPTIONAL_NUMERIC_FIELDS = ["temperature_setpoint_K", "T_stop_K", "field_theta_deg", "field_phi_deg"]
-TEMPERATURE_FIELD_IDS = ["temperature_visa_resource", "temperature_sensor_uids"]
 MAGNET_FIELD_IDS = [
     "magnet_current_A", "field_theta_deg", "field_phi_deg",
     "magnet_visa_resource", "current_limit_A", "voltage_compliance_V",
@@ -270,6 +274,7 @@ class MeasurementPlan:
     field_settle_tolerance_mT: Optional[float] = None
     field_theta_deg: Optional[float] = None
     field_phi_deg: Optional[float] = None
+    temperature_target_K: Optional[float] = None    # sent to the iTC at start (no wait)
 
 
 def build_header_fields(plan: MeasurementPlan, ctx: RunContext, records: list[dict], *,
@@ -365,16 +370,9 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         else:
             info.append(f"Also stops once sensor 1 crosses {state['T_stop_K']:g} K")
 
-    if state["enable_temperature"]:
-        uids = parse_sensor_uids(state["temperature_sensor_uids"])
-        if not uids:
-            warnings.append("Temperature logging is on but no sensor UID is set — "
-                            "the log runs against time only.")
-        else:
-            info.append(f"Temperature: MercuryiTC {', '.join(uids)} — probed at start, "
-                        "sensors that don't answer are dropped")
-    else:
-        warnings.append("Temperature logging is off — the log runs against time only.")
+    temperature_summary(state, info, warnings, errors, single_target=True)
+    if not _has_temperature(state):
+        warnings.append("No temperature logging — the log runs against time only.")
 
     if state["enable_field"]:
         if state["magnet_current_A"] == 0:
@@ -492,12 +490,10 @@ def build_plan(state: dict, data_root: Path) -> MeasurementPlan:
         T_stop_K=state.get("T_stop_K"),
         output_file="",
     )
-    temp_cfg = None
-    if state["enable_temperature"]:
-        uids = parse_sensor_uids(state["temperature_sensor_uids"])
-        if uids:
-            temp_cfg = TemperatureControllerConfig(
-                visa_resource=state["temperature_visa_resource"], sensor_uids=uids)
+    temp_cfg = temperature_cfg_from_state(state)
+    # "Drive iTC to a target": parse_state/form_state already made the target
+    # the filename setpoint (with_first_setpoint); run_plan sends it, no wait.
+    target_K = state.get("temperature_setpoint_K") if steps_from_state(state) else None
 
     header_extra = {
         "sense_current_A": state["sense_current_A"],
@@ -526,7 +522,7 @@ def build_plan(state: dict, data_root: Path) -> MeasurementPlan:
         sample=state["sample"], device=state["device"],
         temperature_setpoint_K=state.get("temperature_setpoint_K"),
         cooldown=state["cooldown"], header_extra=header_extra,
-        temp_cfg=temp_cfg, data_root=data_root,
+        temp_cfg=temp_cfg, data_root=data_root, temperature_target_K=target_K,
         run_cost=run_cost, total_points=len(run_cost.points),
         **field_kw,
     )
@@ -554,10 +550,19 @@ def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
         source = connect_source(plan.src_cfg)
         voltmeter = connect_voltmeter(plan.volt_cfg)
 
+        loop_uid = normalize_uid(plan.temp_cfg.sensor_uids[0]) if plan.temp_cfg is not None else None
         if plan.temp_cfg is not None:
             on_status("Connecting to MercuryiTC and probing its sensors (see log) …")
             temp_ctrl = connect_temperature_controller(plan.temp_cfg)   # narrows sensor_uids
         temp_cfg = plan.temp_cfg if temp_ctrl is not None else None
+        if plan.temperature_target_K is not None:
+            # load-bearing once asked for: raises if the iTC is unreachable or
+            # the loop's own sensor (the first UID) was dropped by the probe
+            if temp_cfg is None or loop_uid not in temp_cfg.sensor_uids:
+                raise RuntimeError(f"Cannot send the temperature target: MercuryiTC loop sensor "
+                                   f"{loop_uid} is not answering.")
+            set_temperature(temp_ctrl, temp_cfg, plan.temperature_target_K, uid=loop_uid)
+            on_status(f"MercuryiTC target {plan.temperature_target_K:g} K sent — logging while it drifts there …")
 
         if plan.magnet_cfg is not None:
             on_status("Connecting magnet power supply & gaussmeter …")
@@ -647,6 +652,7 @@ class DCRTLogApp(MeasurementApp):
     SUB_TITLE = "Keithley 6221 + 2182 · fixed ±I · temperature read only"
 
     data_root: Path = _DEFAULT_DATA_DIR
+    TEMPERATURE_STEPS = False       # one target, sent by run_plan, no settle wait
 
     SWITCH_DEPENDENTS = {
         "enable_temperature": tuple(TEMPERATURE_FIELD_IDS),
@@ -720,14 +726,12 @@ class DCRTLogApp(MeasurementApp):
                               valid_empty=True,
                               hint="Stops once sensor 1 crosses it, in either direction."),
                     )
-                    yield card(
-                        "Temperature logging",
-                        switch_field("enable_temperature", "Log temperature (MercuryiTC)",
-                                     DEFAULTS["enable_temperature"]),
+                    yield temperature_card(
+                        DEFAULTS,
                         field("temperature_sensor_uids", "Sensor UID(s)",
                               DEFAULTS["temperature_sensor_uids"], kind="text",
                               hint="1 or 2, e.g. MB1.T1, DB5.T1 — a missing one is dropped."),
-                    )
+                        single_target=True)
                     yield card(
                         "Fixed field (Kepco magnet, optional)",
                         switch_field("enable_field", "Apply fixed field", DEFAULTS["enable_field"]),

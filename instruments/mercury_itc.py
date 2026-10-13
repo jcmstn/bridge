@@ -65,12 +65,19 @@ Usage example (setpoint control, for a temperature-dependence sweep):
     wait_for_temperature_stable(mitc, temp_cfg, 4.2,             # optional —
                                  tolerance_K=0.02, hold_time_s=60)  # caller's choice
     ... take data at 4.2 K ...
+    shutdown_temperature_controller(mitc)    # closes only: 4.2 K stays the setpoint
+
+The series programs drive this through instruments/temperature_control.py
+(setpoint list as an outer loop, Skip-wait button). Safety:
+temp_cfg.max_temperature_K (default 320 K) — any reading at/above it, in
+read_temperature() or the wait, forces the heater off (heater_off():
+auto OFF + manual 0 %) and raises TemperatureLimitError.
 """
 
 import logging
 import time
 from dataclasses import dataclass, replace
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 from pymeasure.instruments import Instrument
 
@@ -238,6 +245,19 @@ class MercuryITC(Instrument):
         reply = self.ask(command).strip()
         self._check_set_reply(command, reply)
 
+    def heater_off(self, uid: str) -> None:
+        """
+        Force the heater on sensor `uid`'s loop off: PID to manual
+        (`heater_auto(uid, False)`), then the manual heater output to 0 %
+        (`TEMP:LOOP:HSET:0`) — manual mode alone keeps the last output.
+        Used by the software max-temperature limit. UNVERIFIED reply shape,
+        like every SET here (see `_check_set_reply()`).
+        """
+        self.heater_auto(uid, False)
+        uid = normalize_uid(uid)
+        command = f"SET:DEV:{uid}:TEMP:LOOP:HSET:0"
+        self._check_set_reply(command, self.ask(command).strip())
+
     @staticmethod
     def _check_set_reply(command: str, reply: str) -> None:
         """
@@ -289,10 +309,39 @@ class TemperatureControllerConfig:
     sensor_uids lists 1 or 2 board UIDs, e.g. ("MB1.T1",) for a rig with a
     single probe or ("MB1.T1", "DB5.T1") for one with two. Find the UIDs
     for your own rig via the iTC front panel or MercuryITC(...).catalog.
+
+    max_temperature_K is a software safety limit: any reading at or above
+    it turns the heater off and raises TemperatureLimitError (see
+    enforce_max_temperature()).
     """
     visa_resource: str = "TCPIP0::192.168.1.5::7020::SOCKET"
     sensor_uids: Tuple[str, ...] = ("MB1.T1",)
     timeout_ms: int = 3000
+    max_temperature_K: float = 320.0
+
+
+class TemperatureLimitError(RuntimeError):
+    """A reading reached TemperatureControllerConfig.max_temperature_K."""
+
+
+def enforce_max_temperature(mitc: Optional[MercuryITC], cfg: TemperatureControllerConfig,
+                            *readings: Optional[float]) -> None:
+    """Software over-temperature cutoff: if any reading is at or above
+    cfg.max_temperature_K, force the heater on the primary sensor's loop
+    off (heater_off — logged, never masks the raise) and raise
+    TemperatureLimitError so the run ends with an error."""
+    hot = [t for t in readings if t is not None and t >= cfg.max_temperature_K]
+    if not hot:
+        return
+    msg = (f"MercuryiTC reading {max(hot):.3f} K reached the software limit "
+           f"{cfg.max_temperature_K:g} K — heater forced off")
+    log.error(msg)
+    if mitc is not None:
+        try:
+            mitc.heater_off(cfg.sensor_uids[0])
+        except Exception:
+            log.exception("MercuryiTC: could not turn the heater off — CHECK THE iTC NOW")
+    raise TemperatureLimitError(msg)
 
 
 def connect_temperature_controller(
@@ -346,7 +395,11 @@ def read_temperature(
     """
     Read 1 or 2 temperatures (Kelvin) from the MercuryiTC, per
     cfg.sensor_uids. Always returns a (T1, T2) pair — T2 is None if only
-    one UID is configured. Never raises.
+    one UID is configured. Never raises for a failed read — the ONE
+    exception is the software over-temperature limit: a reading at or above
+    cfg.max_temperature_K turns the heater off and raises
+    TemperatureLimitError (enforce_max_temperature()), on purpose, so every
+    program that logs temperature also stops on it.
 
     If `mitc` is None (connect_temperature_controller() already failed,
     or there's simply no MercuryiTC on this rig), returns (None, None)
@@ -377,6 +430,7 @@ def read_temperature(
         except Exception:
             pass  # no warning — see docstring above
 
+    enforce_max_temperature(mitc, cfg, t1, t2)
     return t1, t2
 
 
@@ -488,65 +542,81 @@ def wait_for_temperature_stable(
     uid: Optional[str] = None,
     tolerance_K: float = 0.05,
     hold_time_s: float = 30.0,
-    timeout_s: float = 1800.0,
+    timeout_s: Optional[float] = 1800.0,
     poll_interval_s: float = 1.0,
-) -> None:
+    *,
+    stop_event=None,
+    skip_event=None,
+    on_progress: Optional[Callable[[float, float], None]] = None,
+) -> str:
     """
     Block until the sensor reads within `tolerance_K` of `target_K`
-    continuously for `hold_time_s`, then return. Raises TimeoutError if
-    `timeout_s` elapses first.
+    continuously for `hold_time_s`, then return "settled". Raises
+    TimeoutError if `timeout_s` elapses first (None = wait forever).
 
     Optional — call this only if a program actually wants to block here.
-    A program with its own settling logic (or one that wants to log
-    points, check other instruments, or update a live plot while
-    waiting) can skip this and poll read_temperature() itself instead;
-    see set_temperature()'s docstring for why no single waiting policy
-    is baked into the setpoint call.
+    A program with its own settling logic can poll read_temperature()
+    itself instead; see set_temperature()'s docstring for why no single
+    waiting policy is baked into the setpoint call.
 
     Any reading outside `tolerance_K` restarts the hold-time clock —
-    deliberately stricter than "was in range at least once", since a
-    reading merely passing through the target on a PID overshoot
-    shouldn't count as "settled".
+    deliberately stricter than "was in range at least once" or "two
+    readings in a row", since a reading merely passing through the target
+    on a PID overshoot shouldn't count as "settled".
 
     Args:
         uid: Which sensor to poll. Defaults to cfg.sensor_uids[0], same
             as set_temperature().
-        tolerance_K: How close counts as "at" the target. Default 0.05 K
-            is a starting point, not a calibrated value for any
-            particular rig/sample — tighten or loosen per measurement.
+        tolerance_K: How close counts as "at" the target.
         hold_time_s: How long the reading must stay in tolerance before
             this returns.
-        timeout_s: Give up and raise after this long regardless.
+        timeout_s: Give up and raise after this long; None = never.
         poll_interval_s: Delay between temperature() reads while waiting.
+        stop_event: set -> return "stopped" (run aborted).
+        skip_event: set -> return "skipped" (operator: start now anyway).
+        on_progress: called every poll with (current_K, seconds in tolerance).
+
+    Every reading is checked against cfg.max_temperature_K
+    (enforce_max_temperature: heater off + TemperatureLimitError).
 
     Raises:
         RuntimeError: `mitc` is None (no MercuryiTC connected).
         TimeoutError: settled reading not achieved within `timeout_s`.
+        TemperatureLimitError: a reading reached the software limit.
     """
     if mitc is None:
         raise RuntimeError("Cannot wait for temperature: no MercuryiTC connected.")
     target_uid = uid if uid is not None else cfg.sensor_uids[0]
 
-    deadline = time.monotonic() + timeout_s
+    deadline = None if timeout_s is None else time.monotonic() + timeout_s
     in_tolerance_since: Optional[float] = None
 
     while True:
+        if stop_event is not None and stop_event.is_set():
+            return "stopped"
+        if skip_event is not None and skip_event.is_set():
+            log.warning("MercuryiTC wait skipped by the operator at %s (target %.4f K)",
+                        target_uid, target_K)
+            return "skipped"
         now = time.monotonic()
         current_K = mitc.temperature(target_uid)
+        enforce_max_temperature(mitc, cfg, current_K)
 
         if abs(current_K - target_K) <= tolerance_K:
             if in_tolerance_since is None:
                 in_tolerance_since = now
-            elif now - in_tolerance_since >= hold_time_s:
+            if now - in_tolerance_since >= hold_time_s:
                 log.info(
-                    "MercuryiTC settled: %s = %.4f K (target %.4f +/- %.4f K)",
-                    target_uid, current_K, target_K, tolerance_K,
+                    "MercuryiTC settled: %s = %.4f K (target %.4f +/- %.4f K for %.0f s)",
+                    target_uid, current_K, target_K, tolerance_K, hold_time_s,
                 )
-                return
+                return "settled"
         else:
             in_tolerance_since = None
+        if on_progress is not None:
+            on_progress(current_K, 0.0 if in_tolerance_since is None else now - in_tolerance_since)
 
-        if now >= deadline:
+        if deadline is not None and now >= deadline:
             raise TimeoutError(
                 f"MercuryiTC did not settle to {target_K:.4f} +/- {tolerance_K:.4f} K "
                 f"within {timeout_s:.0f} s (last reading: {current_K:.4f} K)"

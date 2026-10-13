@@ -41,8 +41,9 @@ from web.run_controller import (
     param_card, stable_card, param_grid, stable_grid, advanced_section, measurement_layout,
     program_artifacts, program_run_fn, refresh_on_busy_change,
     finished_handler, load_settings, save_settings,
-    form_state,
+    form_state, temperature_card, SkipWaitButton,
 )
+from instruments.temperature_control import repeat_run_cost, with_first_setpoint
 from web.directory_picker import validate_directory
 from web.field_diagram import build_field_diagram_figure
 from web.identity_bar import identity_bar
@@ -124,9 +125,7 @@ def page() -> None:
                     switches["bidirectional_sweep"] = bool_switch(
                         "Bidirectional (retrace the merged rows)", d("bidirectional_sweep"))
 
-                with param_card("Temperature logging"):
-                    switches["enable_temperature"] = bool_switch(
-                        "Log temperature (Oxford Instruments MercuryiTC)", d("enable_temperature"))
+                temperature_card(d, inputs, switches, identity)
 
                 with param_card("Field direction"):
                     inputs["field_theta_deg"] = optional_num_field(
@@ -224,6 +223,7 @@ def page() -> None:
                 status_label = ui.label("Idle.").classes("text-sm font-bold")
             abort_btn = ui.button("Abort (safe ramp-down)", color="negative").props("outline")
             abort_btn.set_visibility(False)
+            skip = SkipWaitButton()
 
             fig = go.Figure()
             fig.update_layout(
@@ -341,10 +341,10 @@ def page() -> None:
     def on_log(text: str, level: int) -> None:
         log_area.push(text)
 
-    def make_on_finished(plan, run_contexts: list, run_extras: list):
+    def make_on_finished(plan, run_contexts: list, run_extras: list, plans: list):
         return finished_handler(
             page_client, controller, status_label, abort_btn, start_btn, refresh_summary.refresh,
-            program, plan, run_contexts, run_extras,)
+            program, plan, run_contexts, run_extras, plans=plans, skip=skip)
 
     def on_start() -> None:
         state, parse_errors = parse_state()
@@ -361,19 +361,23 @@ def page() -> None:
         raw = collect_raw()
         save_settings(_SETTINGS_PATH, raw)
 
+        state, steps = with_first_setpoint(state)
         plan = build_plan(state, Path(state["data_dir"]))
         run_contexts: list[RunContext] = []
         run_extras: list[dict] = []
+        plans: list = []
 
         rc = RunController(
             suite=SUITE, measurement=PAGE_TITLE,
-            run_fn=program_run_fn(program, plan, run_contexts, run_extras),
+            run_fn=program_run_fn(program, plan, run_contexts, run_extras,
+                                  steps=steps, state=state, plans=plans),
             save_artifacts=lambda records, result, status: program_artifacts(program, plan, run_contexts),
             parameters=state, data_dir=state["data_dir"], planned_output_paths=[],
             on_tick=lambda: (plot.update(), table.update()),
             on_record=on_record, on_status=on_status, on_run_label=on_run_label, on_log=on_log,
-            on_finished=make_on_finished(plan, run_contexts, run_extras),
-            sample=plan.sample, device=plan.device, run_cost=plan.run_cost, run_contexts=run_contexts,
+            on_finished=make_on_finished(plan, run_contexts, run_extras, plans),
+            sample=plan.sample, device=plan.device, run_cost=repeat_run_cost(plan.run_cost, steps),
+            run_contexts=run_contexts,
         )
         if not rc.try_start():
             ui.notify("Another measurement is already running — see the banner above.", type="warning")
@@ -387,6 +391,7 @@ def page() -> None:
         table.update()
         log_area.clear()
         abort_btn.set_visibility(True)
+        skip.arm(steps)
         start_btn.set_enabled(False)
 
     def on_abort() -> None:

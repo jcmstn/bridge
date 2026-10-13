@@ -32,13 +32,14 @@ from instruments.data_naming import (
     TEST_SAMPLE, RunContext,
 )
 from web.identity_bar import identity_bar
+from instruments.temperature_control import repeat_run_cost, with_first_setpoint
 from web.run_controller import (
     RunController, num_field, text_field, textarea_field,
     bool_switch, render_summary, busy_banner, is_busy,
     param_card, stable_card, param_grid, stable_grid, advanced_section, measurement_layout,
     program_artifacts, program_run_fn, refresh_on_busy_change,
     finished_handler, load_settings, save_settings,
-    form_state,
+    form_state, temperature_card, SkipWaitButton, step_labels,
 )
 from web.directory_picker import validate_directory
 from web.sample_picker import NEW_SAMPLE_SENTINEL, prepare_data_root
@@ -116,9 +117,7 @@ def page() -> None:
                         "Gate voltage (V)", d("gate_voltage_values"),
                         hint="Comma-separate for one sweep + file per value.")
 
-                with param_card("Temperature logging"):
-                    switches["enable_temperature"] = bool_switch(
-                        "Log temperature (Oxford Instruments MercuryiTC)", d("enable_temperature"))
+                temperature_card(d, inputs, switches, identity)
 
             # ── Tier 2: precision / speed knobs — collapsed ─────────────────
             with advanced_section("Acquisition & filter settings"):
@@ -191,6 +190,7 @@ def page() -> None:
                 status_label = ui.label("Idle.").classes("text-sm font-bold")
             abort_btn = ui.button("Abort (safe ramp-down)", color="negative").props("outline")
             abort_btn.set_visibility(False)
+            skip = SkipWaitButton()
 
             fig = go.Figure()
             fig.update_layout(xaxis_title="Magnetic field (mT)", yaxis_title="Voltage (V)",
@@ -326,10 +326,10 @@ def page() -> None:
     def on_log(text: str, level: int) -> None:
         log_area.push(text)
 
-    def make_on_finished(plan, run_contexts: list, run_extras: list):
+    def make_on_finished(plan, run_contexts: list, run_extras: list, plans: list):
         return finished_handler(
             page_client, controller, status_label, abort_btn, start_btn, refresh_summary.refresh,
-            program, plan, run_contexts, run_extras,)
+            program, plan, run_contexts, run_extras, plans=plans, skip=skip)
 
     def on_start() -> None:
         state, parse_errors = parse_state()
@@ -345,7 +345,9 @@ def page() -> None:
 
         save_settings(_SETTINGS_PATH, collect_raw())
 
+        state, steps = with_first_setpoint(state)
         plan = build_plan(state, Path(state["data_dir"]))
+        plans: list = []
         n_currents = len(plan.sense_currents_A)
         n_gates = len(plan.gate_series_values)
         labels = [series_label(I, gv, n_currents, n_gates) for I, gv in plan.series_values]
@@ -354,25 +356,28 @@ def page() -> None:
 
         rc = RunController(
             suite=SUITE, measurement=PAGE_TITLE,
-            run_fn=program_run_fn(program, plan, run_contexts, run_extras),
+            run_fn=program_run_fn(program, plan, run_contexts, run_extras,
+                                  steps=steps, state=state, plans=plans),
             save_artifacts=lambda records, result, status: program_artifacts(program, plan, run_contexts),
             parameters=state, data_dir=state["data_dir"], planned_output_paths=[],
             on_tick=lambda: (plot.update(), table.update()),
             on_record=on_record, on_status=on_status, on_run_label=on_run_label, on_log=on_log,
-            on_finished=make_on_finished(plan, run_contexts, run_extras),
-            sample=plan.sample, device=plan.device, run_cost=plan.run_cost, run_contexts=run_contexts,
+            on_finished=make_on_finished(plan, run_contexts, run_extras, plans),
+            sample=plan.sample, device=plan.device, run_cost=repeat_run_cost(plan.run_cost, steps), run_contexts=run_contexts,
         )
         if not rc.try_start():
             ui.notify("Another measurement is already running — see the banner above.", type="warning")
             return
         controller["c"] = rc
 
-        init_series(len(plan.series_values), labels, state["bidirectional_sweep"])
+        labels = step_labels(labels, steps)
+        init_series(len(labels), labels, state["bidirectional_sweep"])
         plot.update()
         table.rows.clear()
         table.update()
         log_area.clear()
         abort_btn.set_visibility(True)
+        skip.arm(steps)
         start_btn.set_enabled(False)
 
     def on_abort() -> None:

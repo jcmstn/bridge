@@ -99,6 +99,10 @@ from instruments.run_time import (
     RunCost,
 )
 from instruments.summary_lines import summary_markup
+from instruments.temperature_control import (
+    TEMPERATURE_DEFAULTS, TEMPERATURE_FIELD_IDS, TEMPERATURE_NUMERIC_FIELDS, TEMPERATURE_TEXT_FIELDS,
+    temperature_cfg_from_state, temperature_summary,
+)
 from instruments.tui_common import (
     MeasurementApp,
     MeasurementRunScreen,
@@ -107,6 +111,7 @@ from instruments.tui_common import (
     format_si,
     identity_bar,
     parse_sensor_uids,
+    temperature_card,
     select_field,
     switch_field,
     sweep_rows_field,
@@ -206,9 +211,7 @@ DEFAULTS: dict = {
     "gaussmeter_visa_resource": "GPIB0::12::INSTR",
     "gaussmeter_n_averages": "10",
     "gaussmeter_read_delay_s": "0.05",
-    "enable_temperature": True,
-    "temperature_visa_resource": "TCPIP0::192.168.1.5::7020::SOCKET",
-    "temperature_sensor_uids": "MB1.T1",
+    **TEMPERATURE_DEFAULTS,
     "measure_phi_I": False,
     "leader_phi_I_deg": "0",
     "follower_phi_I_deg": "0",
@@ -242,9 +245,10 @@ NUMERIC_FIELDS: dict = {
     "gaussmeter_read_delay_s": float,
     "leader_phi_I_deg": float,
     "follower_phi_I_deg": float,
+    **TEMPERATURE_NUMERIC_FIELDS,
 }
 TEXT_FIELDS = ["leader_device", "follower_device", "daq_host", "device", "cooldown", "visa_resource",
-               "gaussmeter_visa_resource", "temperature_visa_resource", "temperature_sensor_uids",
+               "gaussmeter_visa_resource", *TEMPERATURE_TEXT_FIELDS,
                "data_dir", "phi_I_context"]
 # Free-text, blank-allowed: parsed to Optional[float] by hand in parse_state()
 # rather than going through NUMERIC_FIELDS' "blank is an error" casting.
@@ -259,7 +263,6 @@ MAGNET_FIELD_IDS = [
     "gaussmeter_visa_resource", "gaussmeter_n_averages", "gaussmeter_read_delay_s",
     "field_settle_tolerance_mT",
 ]
-TEMPERATURE_FIELD_IDS = ["temperature_visa_resource", "temperature_sensor_uids"]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -503,15 +506,7 @@ def _build_summary_mfli(state: dict) -> tuple[list[str], list[str], list[str]]:
         info.append("Field: none — single point, magnet untouched")
         info.extend(run_costs(state).lines())
 
-    if state["enable_temperature"]:
-        uids = parse_sensor_uids(state["temperature_sensor_uids"])
-        if not uids:
-            warnings.append("Temperature logging is on but no sensor UID is set — "
-                             "temperature columns will be empty.")
-        else:
-            info.append(f"Temperature: MercuryiTC {', '.join(uids)} — empty if unreachable")
-    else:
-        info.append("Temperature: off")
+    temperature_summary(state, info, warnings, errors)
 
     geom_fields = {
         "Hall bar length": state["hall_bar_length_um"],
@@ -743,14 +738,7 @@ def _build_plan_mfli(state: dict, data_root: Path) -> MeasurementPlan:
         )
         currents_A = build_segmented_sweep(state["sweep_rows_parsed"], bidirectional=True)
 
-    temp_cfg = None
-    if state["enable_temperature"] and not measure:
-        uids = parse_sensor_uids(state["temperature_sensor_uids"])
-        if uids:
-            temp_cfg = TemperatureControllerConfig(
-                visa_resource=state["temperature_visa_resource"],
-                sensor_uids=uids,
-            )
+    temp_cfg = None if measure else temperature_cfg_from_state(state)
 
     geometry_cfg = SampleGeometryConfig(
         hall_bar_length_um=state["hall_bar_length_um"],
@@ -1050,6 +1038,9 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     if sr:
         errors = [e for e in errors if not e.startswith(_MFLI_ONLY_ERRORS)]
         _sr830_checks(state, info, warnings, errors)
+    if state.get("measure_phi_I") and state.get("temperature_control"):
+        errors.append("Measure φ_I leaves the temperature untouched — turn off "
+                      "'Drive iTC to setpoint(s)' (or φ_I measuring) first.")
     return info, warnings, errors
 
 
@@ -1262,12 +1253,7 @@ class MFLIDualHarmonicApp(MeasurementApp):
                                      DEFAULTS["enable_sweep"]),
                         sweep_rows_field("sweep_rows", DEFAULTS["sweep_rows"]),
                     )
-                    yield card(
-                        "Temperature logging",
-                        switch_field("enable_temperature",
-                                     "Log temperature (Oxford Instruments MercuryiTC)",
-                                     DEFAULTS["enable_temperature"]),
-                    )
+                    yield temperature_card(DEFAULTS)
                     yield card(
                         "Sample geometry & field direction (optional)",
                         field("hall_bar_length_um", "Hall bar length (µm)",

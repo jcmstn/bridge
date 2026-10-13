@@ -83,6 +83,10 @@ from instruments.run_time import (
     ARM_S, GPIB_TXN_S, LOCK_TYP_S, PER_FILE_S, PER_RUN_S, POINT_OVERHEAD_S, TEMP_READ_S,
     RunCost,
 )
+from instruments.temperature_control import (
+    TEMPERATURE_DEFAULTS, TEMPERATURE_NUMERIC_FIELDS, TEMPERATURE_TEXT_FIELDS,
+    temperature_cfg_from_state, temperature_summary,
+)
 from instruments.tui_common import (
     MeasurementRunScreen,
     format_si,
@@ -154,9 +158,7 @@ DEFAULTS: dict = {
     "gaussmeter_visa_resource": "GPIB0::12::INSTR",
     "gaussmeter_n_averages": "10",
     "gaussmeter_read_delay_s": "0.05",
-    "enable_temperature": True,
-    "temperature_visa_resource": "TCPIP0::192.168.1.5::7020::SOCKET",
-    "temperature_sensor_uids": "MB1.T1",
+    **TEMPERATURE_DEFAULTS,
 }
 
 # extrefs/N/automode options — see ExtRefConfig.automode's docstring in
@@ -201,20 +203,19 @@ NUMERIC_FIELDS: dict = {
     "ramp_delay_s": float,
     "gaussmeter_n_averages": int,
     "gaussmeter_read_delay_s": float,
+    **TEMPERATURE_NUMERIC_FIELDS,
 }
 TEXT_FIELDS = ["device", "cooldown",
                "source_visa_resource", "mfli_host", "mfli_device",
                "magnet_visa_resource",
-               "gaussmeter_visa_resource", "temperature_visa_resource",
-               "temperature_sensor_uids", "magnet_current_A", "sense_current_values", "data_dir"]
+               "gaussmeter_visa_resource", *TEMPERATURE_TEXT_FIELDS, "magnet_current_A", "sense_current_values", "data_dir"]
 OPTIONAL_NUMERIC_FIELDS = ["temperature_setpoint_K", "field_phi_deg"]
-TEMPERATURE_FIELD_IDS = ["temperature_visa_resource", "temperature_sensor_uids"]
 
 # Every Switch id on the form. Hardcoded in collect_raw / _load_settings /
 # parse_state -- they must move together, and parse_state runs on every
 # keystroke, so a stale entry here is an immediate crash.
 SWITCH_FIELD_IDS = ("differential", "ac_coupling", "filter_sinc",
-                    "enable_temperature", "amplitude_bidirectional")
+                    "enable_temperature", "temperature_control", "amplitude_bidirectional")
 
 
 def _resolve_pulse_currents(state: dict) -> tuple[list[float], Optional[str]]:
@@ -507,12 +508,7 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         info.append(f"Magnet current: {currents[0]:g} A — static, field read by 475")
     info.append(field_direction_summary_line(state["field_theta_deg"], state.get("field_phi_deg")))
 
-    if state["enable_temperature"]:
-        uids = parse_sensor_uids(state["temperature_sensor_uids"])
-        info.append(f"Temperature: MercuryiTC {', '.join(uids)}" if uids
-                    else "Temperature: no sensor UID — columns stay empty")
-    else:
-        info.append("Temperature: off")
+    temperature_summary(state, info, warnings, errors)
 
     return info, warnings, errors
 
@@ -680,12 +676,7 @@ def build_plan(state: dict, data_root: Path) -> MeasurementPlan:
         n_averages=state["gaussmeter_n_averages"], read_delay_s=state["gaussmeter_read_delay_s"],
     )
 
-    temp_cfg = None
-    if state["enable_temperature"]:
-        uids = parse_sensor_uids(state["temperature_sensor_uids"])
-        if uids:
-            temp_cfg = TemperatureControllerConfig(
-                visa_resource=state["temperature_visa_resource"], sensor_uids=uids)
+    temp_cfg = temperature_cfg_from_state(state)
 
     header_extra = {
         "pulse_width_s": state["pulse_width_s"],

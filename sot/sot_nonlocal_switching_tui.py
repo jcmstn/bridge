@@ -83,6 +83,10 @@ from instruments.run_time import (
     RunCost,
 )
 from instruments.summary_lines import summary_markup
+from instruments.temperature_control import (
+    TEMPERATURE_DEFAULTS, TEMPERATURE_NUMERIC_FIELDS, TEMPERATURE_TEXT_FIELDS,
+    temperature_cfg_from_state, temperature_summary,
+)
 from instruments.tui_common import (
     MeasurementApp,
     MeasurementRunScreen,
@@ -91,6 +95,7 @@ from instruments.tui_common import (
     format_si,
     identity_bar,
     parse_sensor_uids,
+    temperature_card,
     run_screen_bindings,
     switch_field,
 )
@@ -165,9 +170,7 @@ DEFAULTS: dict = {
     "gaussmeter_visa_resource": "GPIB0::12::INSTR",
     "gaussmeter_n_averages": "10",
     "gaussmeter_read_delay_s": "0.05",
-    "enable_temperature": True,
-    "temperature_visa_resource": "TCPIP0::192.168.1.5::7020::SOCKET",
-    "temperature_sensor_uids": "MB1.T1",
+    **TEMPERATURE_DEFAULTS,
 }
 
 NUMERIC_FIELDS: dict = {
@@ -191,18 +194,17 @@ NUMERIC_FIELDS: dict = {
     "ramp_delay_s": float,
     "gaussmeter_n_averages": int,
     "gaussmeter_read_delay_s": float,
+    **TEMPERATURE_NUMERIC_FIELDS,
 }
 TEXT_FIELDS = ["device", "cooldown",
                "source_visa_resource", "voltmeter_visa_resource", "magnet_visa_resource",
-               "gaussmeter_visa_resource", "temperature_visa_resource",
-               "temperature_sensor_uids", "init_magnet_currents", "data_dir"]
+               "gaussmeter_visa_resource", *TEMPERATURE_TEXT_FIELDS, "init_magnet_currents", "data_dir"]
 OPTIONAL_NUMERIC_FIELDS = ["temperature_setpoint_K", "R_P_ohm", "R_AP_ohm"]
-TEMPERATURE_FIELD_IDS = ["temperature_visa_resource", "temperature_sensor_uids"]
 
 # Every Switch id on the form. Hardcoded in collect_raw / _load_settings /
 # parse_state -- they must move together, and parse_state runs on every
 # keystroke, so a stale entry here is an immediate crash.
-SWITCH_FIELD_IDS = ("enable_temperature", "amplitude_bidirectional", "reversal_enabled")
+SWITCH_FIELD_IDS = ("enable_temperature", "temperature_control", "amplitude_bidirectional", "reversal_enabled")
 
 
 def _resolve_pulse_currents(state: dict) -> tuple[list[float], Optional[str]]:
@@ -495,12 +497,7 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     info.append("Wiring: 6221 HI → injector — LOW (floating) → return electrode away from the "
                 "detector; 2182A ch1 → detector / reference electrode")
 
-    if state["enable_temperature"]:
-        uids = parse_sensor_uids(state["temperature_sensor_uids"])
-        info.append(f"Temperature: MercuryiTC {', '.join(uids)}" if uids
-                    else "Temperature: no sensor UID — columns stay empty")
-    else:
-        info.append("Temperature: off")
+    temperature_summary(state, info, warnings, errors)
 
     return info, warnings, errors
 
@@ -656,12 +653,7 @@ def build_plan(state: dict, data_root: Path) -> MeasurementPlan:
         visa_resource=state["gaussmeter_visa_resource"], unit="T",
         n_averages=state["gaussmeter_n_averages"], read_delay_s=state["gaussmeter_read_delay_s"])
 
-    temp_cfg = None
-    if state["enable_temperature"]:
-        uids = parse_sensor_uids(state["temperature_sensor_uids"])
-        if uids:
-            temp_cfg = TemperatureControllerConfig(
-                visa_resource=state["temperature_visa_resource"], sensor_uids=uids)
+    temp_cfg = temperature_cfg_from_state(state)
 
     header_extra = {
         "pulse_current_start_A": state["pulse_current_start_A"],
@@ -947,11 +939,7 @@ class NonlocalSwitchingApp(MeasurementApp):
                               valid_empty=True,
                               hint="Enables state_AP_fraction."),
                     )
-                    yield card(
-                        "Temperature logging",
-                        switch_field("enable_temperature", "Log temperature (MercuryiTC)",
-                                     DEFAULTS["enable_temperature"]),
-                    )
+                    yield temperature_card(DEFAULTS)
 
                 with Collapsible(title="Instrument configuration & addresses", collapsed=True):
                     with Vertical(classes="stable-grid"):

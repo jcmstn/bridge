@@ -36,13 +36,14 @@ from mfli.mfli_dual_harmonic_tui import (
 from instruments.data_naming import (
     TEST_SAMPLE, RunContext,
 )
+from instruments.temperature_control import repeat_run_cost, with_first_setpoint
 from web.run_controller import (
     RunController, num_field, text_field, textarea_field, bool_switch,
     optional_num_field, render_summary, busy_banner, is_busy,
     param_card, param_grid, stable_card, stable_grid, advanced_section, measurement_layout,
     program_artifacts, program_run_fn, refresh_on_busy_change,
     finished_handler, save_settings,
-    form_state,
+    form_state, temperature_card, SkipWaitButton, step_labels,
 )
 from web import run_manager
 from web.directory_picker import validate_directory
@@ -190,9 +191,7 @@ def page(source: str = "") -> None:
                         d("sweep_rows"),
                         hint="Shared boundary points are merged.")
 
-                with param_card("Temperature logging"):
-                    switches["enable_temperature"] = bool_switch(
-                        "Log temperature (Oxford Instruments MercuryiTC)", d("enable_temperature"))
+                temperature_card(d, inputs, switches, identity)
 
                 with param_card("Sample geometry & field direction (optional)"):
                     optional_inputs["hall_bar_length_um"] = optional_num_field(
@@ -362,6 +361,7 @@ def page(source: str = "") -> None:
                 status_label = ui.label("Idle.").classes("text-sm font-bold")
             abort_btn = ui.button("Abort (safe ramp-down)", color="negative").props("outline")
             abort_btn.set_visibility(False)
+            skip = SkipWaitButton()
 
             fig = make_subplots(rows=2, cols=1, shared_xaxes=True)
             fig.update_yaxes(title_text="1f  R (V)", row=1, col=1)
@@ -540,10 +540,10 @@ def page(source: str = "") -> None:
         switches["measure_phi_I"].set_value(False)
         save_settings(_SETTINGS_PATH, collect_raw())
 
-    def make_on_finished(plan, state: dict, run_contexts: list, run_extras: list):
+    def make_on_finished(plan, state: dict, run_contexts: list, run_extras: list, plans: list):
         done = finished_handler(
             page_client, controller, status_label, abort_btn, start_btn, refresh_summary.refresh,
-            program, plan, run_contexts, run_extras,)
+            program, plan, run_contexts, run_extras, plans=plans, skip=skip)
 
         def on_finished(final, result) -> None:
             fill_phi_I(plan, state)
@@ -570,7 +570,9 @@ def page(source: str = "") -> None:
         if run_manager.snapshot() is not None:
             ui.notify("Another measurement is already running — see the banner above.", type="warning")
             return
+        state, steps = with_first_setpoint(state)
         plan = build_plan(state, Path(state["data_dir"]))
+        plans: list = []
         amps = getattr(plan, "amplitudes_A", [None])       # the MFLI source: one run
         labels = [f"I={amp:g}A" if len(amps) > 1 else None for amp in amps]
         run_ctx = getattr(plan, "run_ctx", None)            # allocated up front by the MFLI source
@@ -578,27 +580,30 @@ def page(source: str = "") -> None:
         run_extras: list[dict] = []
 
         rc = RunController(
-            suite=SUITE, measurement=PAGE_TITLE, run_fn=program_run_fn(program, plan, run_contexts, run_extras),
+            suite=SUITE, measurement=PAGE_TITLE, run_fn=program_run_fn(program, plan, run_contexts, run_extras,
+                                  steps=steps, state=state, plans=plans),
             save_artifacts=lambda records, result, status: program_artifacts(program, plan, run_contexts),
             parameters=state, data_dir=state["data_dir"], planned_output_paths=[],
             on_tick=lambda: (plot.update(), table.update()),
             on_record=on_record, on_status=on_status, on_run_label=on_run_label, on_log=on_log,
-            on_finished=make_on_finished(plan, state, run_contexts, run_extras),
+            on_finished=make_on_finished(plan, state, run_contexts, run_extras, plans),
             sample=state["sample"], device=state["device"],
-            run_number=run_ctx.run_number if run_ctx else None, run_cost=plan.run_cost, run_contexts=run_contexts,
+            run_number=run_ctx.run_number if run_ctx else None, run_cost=repeat_run_cost(plan.run_cost, steps), run_contexts=run_contexts,
         )
         if not rc.try_start():
             ui.notify("Another measurement is already running — see the banner above.", type="warning")
             return
         controller["c"] = rc
 
-        init_series(len(amps), labels, plan_naming(plan))
+        labels = step_labels(labels, steps)
+        init_series(len(labels), labels, plan_naming(plan))
         run_label.set_text(f"Run #{run_ctx.run_str}" if run_ctx else "")
         plot.update()
         table.rows.clear()
         table.update()
         log_area.clear()
         abort_btn.set_visibility(True)
+        skip.arm(steps)
         start_btn.set_enabled(False)
 
     def on_abort() -> None:

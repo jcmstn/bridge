@@ -25,7 +25,7 @@ reference. This file is the map, not a second copy of them.
 | `uv run python bridge_tui.py` | The TUI menu — every DC / MFLI / SOT program as a card (description, collapsible wiring schematic, Launch) in three suite columns, plus the shared "Recent runs" table; mirrors the web landing page. Quitting a program returns to the menu — Textual |
 | `uv run python sot/sot_pulsed_switching_tui.py` | SOT pulsed switching — one form, two toggles: write pulse = 4200A PMU \| 6221 WAVE, read = DC R_xy (6221 ±I + 2182) \| lock-in harmonic (6221 AC + MFLI). The three valid combinations are the former programs `SOTPS` / `SOT2H` / `SOT1I` (see §2 "Merged programs"). `sot_pulsed_switching_2h_tui.py` / `sot_pulsed_switching_6221_tui.py` still run and open this form on their mode — Textual |
 | `uv run python sot/sot_nonlocal_switching_tui.py` | Nonlocal spin-current switching, 6221 + 2182A only (optional Kepco field initialization, then a sweep of single-lobe 0 → ±I → 0 WAVE write pulses + DC nonlocal read, current-reversal averaged unless switched off; type `NLSW`) — Textual, also a web page. `sot/sot_nonlocal_switching.py` also runs standalone (plain CSV) |
-| `uv run python dc/dc_rt_log_tui.py` | R vs T log — fixed ±I reversal (6221 + 2182) sampled back to back while the temperature drifts freely; MercuryiTC read only, before and after each sample (`temperature_N_drift_K` per point), one R-vs-T panel per reading sensor; stops on Stop / max duration / a T crossing, Stop saves as `completed` (type `RT`) — Textual, also a web page (`/dc/rt-log`) |
+| `uv run python dc/dc_rt_log_tui.py` | R vs T log — fixed ±I reversal (6221 + 2182) sampled back to back while the temperature drifts freely (optionally toward one iTC target sent at start — no wait); MercuryiTC read before and after each sample (`temperature_N_drift_K` per point), one R-vs-T panel per reading sensor; stops on Stop / max duration / a T crossing, Stop saves as `completed` (type `RT`) — Textual, also a web page (`/dc/rt-log`) |
 | `uv run python web/app.py`     | Browser front end — every DC and MFLI measurement plus SOT pulsed switching (`/sot/pulsed-switching`, the same Pulse × Read toggles as the TUI) and nonlocal switching — NiceGUI, `http://localhost:8080`. The dual-harmonic page carries the MFLI \| 6221 AC-source toggle (`/mfli/dual-harmonic?source=6221`; the old `/mfli/dual-harmonic-6221` URL redirects there) |
 | `uv run python tools/curate_sample.py <sample>` | Post-hoc curation TUI: mark runs `paper_include` / `figure_ref` |
 
@@ -75,6 +75,7 @@ verbatim by the matching `web/{suite}/{name}.py`:
 | `build_header_fields(plan, ctx, …) -> dict` | the `# key: value` CSV header for this run |
 | `compute_filename_preview(state) -> str` | placeholder filename for the live preview (calls `preview_raw_filename`, never `allocate_run`) |
 | `parse_sensor_uids(text)` | MercuryiTC sensor-UID parsing, shared |
+| `TEMPERATURE_*` field groups, `temperature_summary`, `temperature_cfg_from_state` | the MercuryiTC log + setpoint-control fields, merged into the module's own groups from `instruments/temperature_control.py` (see §3a) |
 | `{NAME}_DESCRIPTION` | one- or two-line blurb — instruments + anything non-obvious, not what the measurement is — shown on the program's `bridge_tui.py` card, its web page and (DC/SOT) its sidebar |
 | `{NAME}_SCHEMATIC` | the wiring schematic shown on the program's `bridge_tui.py` card |
 
@@ -195,6 +196,38 @@ instruments, call `run_measurement`, then run their own
 `shutdown_*` path — the function never connects or disconnects hardware
 itself.
 
+### 3a. MercuryiTC setpoints — an outer loop around the whole program
+
+Every series program (Hall, IV, gate sweep, spin valve, DIFFR, HARM/HARM6,
+SOTPS/SOT2H/SOT1I, NLSW) has the shared temperature card
+(`tui_common.temperature_card` / `web/run_controller.temperature_card`):
+log switch, software max T, and optionally "Drive iTC to setpoint(s)" with a
+setpoint list, settle margin (mK) and hold time (s). With setpoints on,
+`instruments/temperature_control.run_temperature_steps` repeats the **whole
+program** once per setpoint, as if Start had been pressed at each T:
+
+1. `go_to_temperature`: own short iTC session → `set_temperature` (TSET +
+   heater auto — the iTC's own PID; PID values stay on its touch screen) →
+   `wait_for_temperature_stable` (within ±margin for `hold_s` *unbroken*,
+   no timeout; the run screen's **Skip T wait** button / `s` key starts now)
+   → close.
+2. `build_plan({**state, "temperature_setpoint_K": T})` (step 0: the plan
+   Start already built — `with_first_setpoint` makes the first setpoint the
+   form's filename setpoint), then that engine's own `run_plan` — its
+   connect / series loop / teardown are untouched, so between steps the
+   sources are off and the magnet is at 0.
+3. Records are re-tagged: `series_index` unique across the session
+   (`finish_last_run` relies on it), `series_label` prefixed `T=…K`.
+
+Nothing ever turns the heater off at the end — the last setpoint stays on
+the iTC. The one exception is the software max
+(`TemperatureControllerConfig.max_temperature_K`, default 320 K): every
+`read_temperature` / wait reading at or above it calls `heater_off` (auto
+off + manual 0 %) and raises `TemperatureLimitError`, ending the run with
+an error. R vs T (`MeasurementApp.TEMPERATURE_STEPS = False`) takes one
+target, sent by its `run_plan` at start, no wait. NOISE has no control.
+
+
 ## 4. Instrument layer (`instruments/`)
 
 Each module wraps one instrument as a `*Config` dataclass plus
@@ -210,7 +243,7 @@ raw driver classes.
 | `keithley2450.py` | Keithley 2450 SourceMeter | `Keithley2450` class (native-2450 SCPI + `defbuffer1` stats, private `_Keithley2450Buffer` mixin in-file); general SMU wrapper — same `SMUConfig` / `connect_smu` / … surface as `keithley2400.py`, swap by import | **hand-written** (pymeasure's 2450 lacks native buffer support) |
 | `kepco_magnet.py` | Kepco BOP-GL bipolar supply → electromagnet | `KepkoBOPGL` class; `MagnetConfig`, `connect_magnet`, `set_magnet_current`, `shutdown_magnet` | **hand-written** on pymeasure `Instrument`/`SCPIMixin` |
 | `lakeshore475.py` | Lake Shore 475 DSP Gaussmeter | `LakeShore475` class; `GaussmeterConfig`, `connect_gaussmeter`, `read_field_mT`, `shutdown_gaussmeter` | **hand-written** (pymeasure has 421/425, not 475) |
-| `mercury_itc.py` | Oxford MercuryiTC temperature controller | `MercuryITC` class; `TemperatureControllerConfig`, `connect_temperature_controller`, `read_temperature`, `shutdown_temperature_controller` | **hand-written** (pymeasure has ITC 503 only) |
+| `mercury_itc.py` | Oxford MercuryiTC temperature controller | `MercuryITC` class; `TemperatureControllerConfig` (+ `max_temperature_K`), `connect_temperature_controller`, `read_temperature`, `set_temperature`, `wait_for_temperature_stable`, `enforce_max_temperature`, `shutdown_temperature_controller` (closes only — the setpoint stays) | **hand-written** (pymeasure has ITC 503 only) |
 | `keithley4200a.py` | Keithley 4200A-SCS — the 4225-PMU behind a 4225-RPM, over KXCI (the SMU cards are not driven; a general SMU wrapper existed until 2026-09-23 and is in git history) | `Keithley4200AConfig`, `connect_4200a`, `shutdown_4200a`, `PMUPulseConfig`, `configure_pmu_pulse`, `pulse_once`, `list_user_libraries` | **hand-written** KXCI line protocol (not SCPI); runs the KULT module in `instruments/kult/` |
 | `mfli_daq.py` | Zurich Instruments MFLI (dual, via MDS) | `connect`, `connect_device`, `setup_mds`, `sync_follower_oscillator`, `acquire_averaged` | wraps `zhinst-core` |
 | `sr830.py` | SRS SR830 lock-in (MFLI alternative; one input + one demod per unit, so two units for 1f/2f or Rxy/Rxx) | `LockinConfig`, `connect`, `acquire_averaged`, `acquire_averaged_pair` (internal data buffer), `wait_for_reference_lock` / `check_reference_locked` (LIAS bit 3), `auto_gain` / `auto_reserve` / `auto_phase`, `settle_time_s`, `acquire_s`, `shutdown` | thin wrapper over pymeasure + raw manual commands |
@@ -223,7 +256,10 @@ raw driver classes.
   `read_temperature()` never raise for "not connected" or "only one probe
   wired" — a measurement that doesn't otherwise need the iTC is never
   interrupted by it. Passing `temp_ctrl=None` just leaves the temperature
-  columns blank.
+  columns blank. Two deliberate exceptions: driving a setpoint is
+  load-bearing (an unreachable iTC is an error once setpoints are on), and
+  a reading at/above the software max T raises `TemperatureLimitError`
+  after forcing the heater off.
 
 ### Adding an instrument — the driver contract
 
@@ -478,6 +514,7 @@ units sub-header row as data. Use `read_raw()`.
 | How a program runs (connect, series loop, teardown, per-run finalize) | its `run_plan()` in `{suite}/{name}_tui.py` — both front ends call it; the per-run record/finalize block is `data_naming.record_run()` |
 | A mode of a merged program (HARM/HARM6, SOTPS/SOT2H/SOT1I) | its engine module for the run itself; the toggle, card visibility and settings fallback in the merged form's module (+ its web page for HARM) |
 | The SR830 lock-in mode (HARM/HARM6/SOT2H/SOT1I) | form → `sr830_cfgs()` / `_sr830_checks()` in `mfli/mfli_dual_harmonic_tui.py` or `sot/sot_pulsed_switching_tui.py` (+ web pages); connect/teardown in the engine `*_tui.py` `run_plan`; per-point reads at the `lockin` branches in the engine `run_measurement`; instrument side `instruments/sr830.py` (`SR830Read`, `config_from_form`) |
+| MercuryiTC setpoint control (outer loop, settle wait, Skip, max T) | `instruments/temperature_control.py` (fields, summary, step runner) + `instruments/mercury_itc.py` (commands, wait, max-T cutoff); front ends: `tui_common` (`temperature_card`, `do_run`, Skip button) and `web/run_controller.py` (`temperature_card`, `program_run_fn(steps=…)`, `SkipWaitButton`, `step_labels`) |
 | The sweep-size cap (a form error instead of a frozen form) | `dc/dc_sweep_utils.py` `MAX_SWEEP_POINTS` / `check_sweep_size` |
 
 

@@ -88,6 +88,10 @@ from instruments.run_time import (
     RunCost,
 )
 from instruments.summary_lines import summary_markup
+from instruments.temperature_control import (
+    TEMPERATURE_DEFAULTS, TEMPERATURE_NUMERIC_FIELDS, TEMPERATURE_TEXT_FIELDS,
+    temperature_cfg_from_state, temperature_summary,
+)
 from instruments.tui_common import (
     MeasurementApp,
     MeasurementRunScreen,
@@ -96,6 +100,7 @@ from instruments.tui_common import (
     format_si,
     identity_bar,
     parse_sensor_uids,
+    temperature_card,
     select_field,
     switch_field,
 )
@@ -198,9 +203,7 @@ DEFAULTS: dict = {
     "gaussmeter_visa_resource": "GPIB0::12::INSTR",
     "gaussmeter_n_averages": "10",
     "gaussmeter_read_delay_s": "0.05",
-    "enable_temperature": True,
-    "temperature_visa_resource": "TCPIP0::192.168.1.5::7020::SOCKET",
-    "temperature_sensor_uids": "MB1.T1",
+    **TEMPERATURE_DEFAULTS,
 }
 
 NUMERIC_FIELDS: dict = {
@@ -235,19 +238,18 @@ NUMERIC_FIELDS: dict = {
     "ramp_delay_s": float,
     "gaussmeter_n_averages": int,
     "gaussmeter_read_delay_s": float,
+    **TEMPERATURE_NUMERIC_FIELDS,
 }
 TEXT_FIELDS = ["k4200_visa_resource", "pmu_library", "pmu_module",
                "pmu_id", "pmu_return_names", "device", "cooldown",
                "source_visa_resource", "voltmeter_visa_resource", "magnet_visa_resource",
-               "gaussmeter_visa_resource", "temperature_visa_resource",
-               "temperature_sensor_uids", "magnet_current_A", "sense_current_values", "data_dir"]
+               "gaussmeter_visa_resource", *TEMPERATURE_TEXT_FIELDS, "magnet_current_A", "sense_current_values", "data_dir"]
 OPTIONAL_NUMERIC_FIELDS = ["temperature_setpoint_K", "field_phi_deg"]
-TEMPERATURE_FIELD_IDS = ["temperature_visa_resource", "temperature_sensor_uids"]
 
 # Every Switch id on the form. Hardcoded in collect_raw / _load_settings /
 # parse_state -- they must move together, and parse_state runs on every
 # keystroke, so a stale entry here is an immediate crash.
-SWITCH_FIELD_IDS = ("auto_range", "enable_temperature", "amplitude_bidirectional")
+SWITCH_FIELD_IDS = ("auto_range", "enable_temperature", "temperature_control", "amplitude_bidirectional")
 
 
 def parse_return_names(raw: str) -> tuple:
@@ -565,12 +567,7 @@ def _build_summary_ps(state: dict) -> tuple[list[str], list[str], list[str]]:
         info.append(f"Magnet current: {currents[0]:g} A — static, field read by 475")
     info.append(field_direction_summary_line(state["field_theta_deg"], state.get("field_phi_deg")))
 
-    if state["enable_temperature"]:
-        uids = parse_sensor_uids(state["temperature_sensor_uids"])
-        info.append(f"Temperature: MercuryiTC {', '.join(uids)}" if uids
-                    else "Temperature: no sensor UID — columns stay empty")
-    else:
-        info.append("Temperature: off")
+    temperature_summary(state, info, warnings, errors)
 
     return info, warnings, errors
 
@@ -739,12 +736,7 @@ def _build_plan_ps(state: dict, data_root: Path) -> MeasurementPlan:
         n_averages=state["gaussmeter_n_averages"], read_delay_s=state["gaussmeter_read_delay_s"],
     )
 
-    temp_cfg = None
-    if state["enable_temperature"]:
-        uids = parse_sensor_uids(state["temperature_sensor_uids"])
-        if uids:
-            temp_cfg = TemperatureControllerConfig(
-                visa_resource=state["temperature_visa_resource"], sensor_uids=uids)
+    temp_cfg = temperature_cfg_from_state(state)
 
     # pmu_dut_res_ohm is a real pulse parameter (PMU load-line correction),
     # so it is recorded; the sidebar's per-amplitude current estimate is
@@ -1289,11 +1281,7 @@ class SOTPulsedSwitchingApp(MeasurementApp):
                         field("field_settle_tolerance_mT", "Field settle tolerance (mT)",
                               DEFAULTS["field_settle_tolerance_mT"]),
                     )
-                    yield card(
-                        "Temperature logging",
-                        switch_field("enable_temperature", "Log temperature (MercuryiTC)",
-                                     DEFAULTS["enable_temperature"]),
-                    )
+                    yield temperature_card(DEFAULTS)
 
                 with Collapsible(title="Instrument configuration & addresses", collapsed=True):
                     with Vertical(classes="stable-grid"):

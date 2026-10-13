@@ -58,7 +58,10 @@ it beyond being excluded from `list_samples()`'s normal listing.
 - **`type`** — a fixed abbreviation from the locked set below. Never
   invent a new one without adding it to this table.
 - **`T`** — nominal *setpoint* only (`T010K`), never the measured
-  temperature. Omitted entirely if no setpoint was given for the run.
+  temperature. Omitted entirely if no setpoint was given for the run. With
+  "Drive iTC to setpoint(s)" on, it is the setpoint the program commanded
+  for that run (one run per setpoint × series value); otherwise the
+  hand-typed identity-bar value.
 - **`key_axis`** — the one *fixed* secondary parameter that distinguishes
   this run within a family, e.g. a fixed field angle while sweeping
   current. Omitted when not applicable. See "Key-axis tokens" below.
@@ -181,7 +184,8 @@ status, comment, series`. A caller's additional (measurement-specific)
 keys are appended after these, in first-seen order, and the same union
 happens automatically in `index.csv`.
 
-- `T_setpoint_K` — the nominal target, or blank if none.
+- `T_setpoint_K` — the nominal target (the commanded iTC setpoint when the
+  program drives the iTC), or blank if none.
 - `T_K` — the actual measured temperature (e.g. averaged from logged
   readings over the run), filled in at finalize time, not necessarily at
   allocation time.

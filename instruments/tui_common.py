@@ -9,6 +9,8 @@ What all 13 {suite}/*_tui.py programs used to carry as verbatim copies:
 - form widgets: field / switch_field / select_field / sweep_rows_field / card,
   plus identity_bar() (data root + sample + device + cooldown + setpoint);
 - format_si / parse_sensor_uids, and LogRelay (root logging -> RichLog);
+- temperature_card() + the MercuryiTC setpoint steps (Skip T wait button,
+  progress over every step) — instruments/temperature_control.py;
 - MeasurementRunScreen — status line, run label + progress bar, results
   table, log, Abort/Back, live-plot window, per-run PNG, the post-run
   status/comment rewrite of the LAST run, and the run's runs.db history row;
@@ -34,7 +36,6 @@ import json
 import logging
 import math
 import multiprocessing as mp
-import re
 import sys
 import threading
 import time
@@ -60,6 +61,10 @@ from instruments.data_naming import (
 )
 from instruments.live_plot import start_live_plot
 from instruments.run_time import progress_step, progress_total
+from instruments.temperature_control import (  # noqa: F401 (parse_sensor_uids re-exported)
+    TEMPERATURE_CONTROL_FIELD_IDS, TEMPERATURE_DEFAULTS, TEMPERATURE_FIELD_IDS,
+    parse_sensor_uids, repeat_run_cost, run_temperature_steps, with_first_setpoint,
+)
 from instruments.tui_sample_picker import (
     NEW_SAMPLE_SENTINEL, NewSampleScreen, StatusCommentScreen, sample_options,
 )
@@ -80,14 +85,6 @@ def format_si(value: float, unit: str) -> str:
         if float(f"{av / scale:.4g}") < 1000:      # 1e-6 is '1 µA', not '1000 nA'
             return f"{value / scale:.4g} {prefix}{unit}"
     return f"{value:.3e} {unit}"
-
-
-def parse_sensor_uids(raw: str) -> tuple:
-    """Parse a "MB1.T1, DB5.T1" field into a 1- or 2-tuple of UIDs. Commas,
-    semicolons and whitespace all separate — "MB1.T1 DB5.T1" is two UIDs,
-    not one bogus one the iTC would reject on every read."""
-    uids = [u for u in re.split(r"[,;\s]+", raw) if u]
-    return tuple(uids[:2])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -152,6 +149,37 @@ def card(title: str, *groups, muted: bool = False, id: Optional[str] = None) -> 
     for group in groups:
         children.extend(group) if isinstance(group, list) else children.append(group)
     return Vertical(*children, classes="stable-card" if muted else "param-card", id=id)
+
+
+def temperature_card(defaults: dict = TEMPERATURE_DEFAULTS, *extra, single_target: bool = False,
+                     title: str = "Temperature (MercuryiTC)") -> Vertical:
+    """Log switch (+ `extra` field groups) + software max T, then the
+    optional setpoint control: the iTC's own PID is sent each setpoint
+    (outer loop over the whole run, see instruments/temperature_control.py).
+    `single_target` (R vs T log): one target, sent at start, no settle
+    wait — no margin/hold fields."""
+    groups = [
+        switch_field("enable_temperature", "Log temperature (MercuryiTC)",
+                     defaults["enable_temperature"]),
+        *extra,
+        field("temperature_max_K", "Software max T (K)", defaults["temperature_max_K"],
+              hint="Any reading ≥ this: heater off, run stops."),
+        switch_field("temperature_control",
+                     "Drive iTC to a target" if single_target else "Drive iTC to setpoint(s)",
+                     defaults["temperature_control"]),
+        field("temperature_setpoints_K", "Target (K)" if single_target
+              else "Setpoints (K, comma list — outer loop)",
+              defaults["temperature_setpoints_K"], kind="text",
+              hint="Sent at start, logged while T drifts." if single_target
+              else "Whole run repeated at each, in order."),
+    ]
+    if not single_target:
+        groups += [
+            field("temperature_margin_mK", "Settle margin ± (mK)", defaults["temperature_margin_mK"]),
+            field("temperature_hold_s", "Settle hold (s)", defaults["temperature_hold_s"],
+                  hint="Must stay in margin this long, unbroken."),
+        ]
+    return card(title, *groups)
 
 
 def identity_bar(defaults: dict, data_dir: Path, data_root: Path, *,
@@ -223,7 +251,8 @@ RUN_SCREEN_CSS = """
 
 def run_screen_bindings(abort_label: str) -> list:
     return [Binding("a", "abort", abort_label, show=True),
-            Binding("q", "back_or_abort", "Abort / Back", show=True)]
+            Binding("q", "back_or_abort", "Abort / Back", show=True),
+            Binding("s", "skip_wait", "Skip T wait", show=False)]
 
 
 class MeasurementRunScreen(Screen):
@@ -263,6 +292,12 @@ class MeasurementRunScreen(Screen):
         self._png_path: Optional[Path] = None
         self._history_id = -1
         self._started = time.monotonic()
+        # MercuryiTC setpoint steps (set by MeasurementApp.action_start):
+        # the whole run_plan is repeated once per setpoint.
+        self.temp_steps = None
+        self.temp_state: Optional[dict] = None
+        self.temp_build_plan = None
+        self.temp_engine = None
 
     @property
     def program(self):
@@ -296,6 +331,15 @@ class MeasurementRunScreen(Screen):
         """0-based index of the point that just arrived, for the progress bar."""
         return len(self._records) - 1
 
+    @property
+    def run_cost(self):
+        """The cost model behind the progress bar — repeated per T step."""
+        return repeat_run_cost(self.plan.run_cost, self.temp_steps)
+
+    def _progress_total_points(self) -> int:
+        n = len(self.temp_steps.setpoints_K) if self.temp_steps is not None else 1
+        return self.progress_points() * n
+
     def initial_run_label(self) -> str:
         ctx = getattr(self.plan, "run_ctx", None)
         return f"Run #{ctx.run_str}" if ctx is not None else ""
@@ -307,12 +351,16 @@ class MeasurementRunScreen(Screen):
         yield Static("Starting …", id="status_line")
         with Horizontal(id="progress_row"):
             yield Static(self.initial_run_label(), id="run_label")
-            yield ProgressBar(id="progress", total=progress_total(self.plan.run_cost, self.progress_points()),
+            yield ProgressBar(id="progress", total=progress_total(self.run_cost,
+                                                                  self._progress_total_points()),
                               show_eta=True)
         yield DataTable(id="results_table", zebra_stripes=True, cursor_type="row")
         yield RichLog(id="log", max_lines=5000, markup=False, wrap=True)
         with Horizontal(id="runactionbar"):
             yield Button(self.ABORT_LABEL, id="abort_btn", variant="error")
+            skip = Button("Skip T wait (start now)", id="skip_btn", variant="warning")
+            skip.display = self.temp_steps is not None
+            yield skip
             yield Button("Back", id="back_btn", disabled=True)
         yield Footer()
 
@@ -339,13 +387,19 @@ class MeasurementRunScreen(Screen):
     @work(thread=True, exclusive=True)
     def do_run(self) -> None:
         try:
-            self.program.run_plan(
-                self.plan, self._stop_event,
+            callbacks = dict(
                 on_status=self._set_status_threadsafe,
                 on_run_label=self._set_run_label_threadsafe,
                 on_point=lambda record: self.app.call_from_thread(self._on_point, record),
                 on_run_finished=self._save_run_png,
                 run_contexts=self._run_contexts, run_extras=self._run_extras)
+            if self.temp_steps is not None:
+                run_temperature_steps(
+                    self.temp_steps, self.temp_state, self.plan.data_root, self.plan,
+                    self.temp_build_plan, self.temp_engine or (lambda _plan: self.program),
+                    self._stop_event, on_plan=self._set_plan, **callbacks)
+            else:
+                self.program.run_plan(self.plan, self._stop_event, **callbacks)
             final = self.ABORTED_STATUS if self._stop_event.is_set() and not self.STOP_IS_NORMAL_END \
                 else self.DONE_STATUS
         except Exception as exc:
@@ -353,6 +407,11 @@ class MeasurementRunScreen(Screen):
             final = f"ERROR: {exc}"
         finally:
             self.app.call_from_thread(self._on_finished, final)
+
+    def _set_plan(self, plan) -> None:
+        """A temperature step's plan (worker thread): the last one is what the
+        post-run status/comment header and the per-run PNG describe."""
+        self.plan = plan
 
     def _start_live_plot(self) -> None:
         args = self.live_plot_args()
@@ -401,8 +460,8 @@ class MeasurementRunScreen(Screen):
         table.add_row(*self.table_row(record))
         table.move_cursor(row=table.row_count - 1, scroll=True)
         idx = self.progress_index(record)
-        self.query_one("#progress", ProgressBar).advance(progress_step(self.plan.run_cost, idx))
-        self._set_status(self.POINT_STATUS.format(n=idx + 1, total=self.progress_points()))
+        self.query_one("#progress", ProgressBar).advance(progress_step(self.run_cost, idx))
+        self._set_status(self.POINT_STATUS.format(n=idx + 1, total=self._progress_total_points()))
 
     # ── per-run artefacts ─────────────────────────────────────────────
 
@@ -422,6 +481,7 @@ class MeasurementRunScreen(Screen):
         self._set_status(final_status)
         self.query_one("#back_btn", Button).disabled = False
         self.query_one("#abort_btn", Button).disabled = True
+        self.query_one("#skip_btn", Button).disabled = True
         outcome = "aborted" if self._stop_event.is_set() and not self.STOP_IS_NORMAL_END \
             else ("error" if final_status.startswith("ERROR") else "completed")
         self._history_finish(outcome, final_status)
@@ -483,6 +543,13 @@ class MeasurementRunScreen(Screen):
             self._stop_event.set()
             self._set_status(self.ABORT_STATUS)
 
+    def action_skip_wait(self) -> None:
+        """Start the next temperature step now, settled or not (the margin
+        asked for may be unreachable)."""
+        if self._measurement_running and self.temp_steps is not None:
+            self.temp_steps.skip_event.set()
+            self._set_status("Skip requested — starting the measurement at the current temperature …")
+
     def action_back_or_abort(self) -> None:
         if self._measurement_running:
             self.action_abort()
@@ -492,6 +559,8 @@ class MeasurementRunScreen(Screen):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "abort_btn":
             self.action_abort()
+        elif event.button.id == "skip_btn":
+            self.action_skip_wait()
         elif event.button.id == "back_btn":
             self.dismiss()
 
@@ -499,6 +568,10 @@ class MeasurementRunScreen(Screen):
 # ─────────────────────────────────────────────────────────────────────────────
 # Form app
 # ─────────────────────────────────────────────────────────────────────────────
+
+_TEMPERATURE_DEPENDENTS = {"enable_temperature": tuple(TEMPERATURE_FIELD_IDS),
+                           "temperature_control": tuple(TEMPERATURE_CONTROL_FIELD_IDS)}
+
 
 class MeasurementApp(App):
     """The parameter form. Subclass supplies TITLE/SUB_TITLE/CSS, compose(),
@@ -512,6 +585,9 @@ class MeasurementApp(App):
         Binding("q", "quit", "Quit", show=True),
     ]
 
+    # False: "Drive iTC" sends one target and the program handles it itself
+    # (R vs T log) — no setpoint steps / settle waits around run_plan.
+    TEMPERATURE_STEPS = True
     # switch id -> widget ids disabled while that switch is off
     SWITCH_DEPENDENTS: dict[str, tuple[str, ...]] = {
         "enable_temperature": ("temperature_visa_resource", "temperature_sensor_uids"),
@@ -534,7 +610,7 @@ class MeasurementApp(App):
         # RichLog-backed handler for the duration of a measurement.
         logging.getLogger().handlers.clear()
         self._load_settings()
-        for switch_id in self.SWITCH_DEPENDENTS:
+        for switch_id in {**self.SWITCH_DEPENDENTS, **_TEMPERATURE_DEPENDENTS}:
             for switch in self.query(f"#{switch_id}").results(Switch):
                 self._apply_switch_dependents(switch_id, switch.value)
         self.refresh_summary()
@@ -561,7 +637,8 @@ class MeasurementApp(App):
         """The form as a typed state dict: every field Input (_parse_fields),
         every Switch / Select / TextArea by widget id, and the sample — then the
         program module's pure `resolve_state(state)` (the derived lists/sweeps
-        with their parse errors), the same function its web page calls."""
+        with their parse errors), the same function its web page calls. With
+        MercuryiTC setpoints on, the first one is the filename setpoint."""
         state, errors = self._parse_fields()
         for switch in self.query(Switch):
             if switch.id:
@@ -575,7 +652,8 @@ class MeasurementApp(App):
         sample_value = self.query_one("#sample_select", Select).value
         state["sample"] = sample_value if sample_value not in (None, Select.BLANK) else ""
         resolve = getattr(self.program, "resolve_state", None)
-        return (resolve(state) if resolve is not None else state), errors
+        state = resolve(state) if resolve is not None else state
+        return with_first_setpoint(state)[0], errors
 
     def _parse_fields(self) -> tuple[dict, list[str]]:
         """The shared head of every parse_state(): the NUMERIC_FIELDS (cast
@@ -727,9 +805,14 @@ class MeasurementApp(App):
     # ── events ────────────────────────────────────────────────────────
 
     def _apply_switch_dependents(self, switch_id: str, enabled: bool) -> None:
-        for widget_id in self.SWITCH_DEPENDENTS.get(switch_id, ()):
+        for widget_id in {*self.SWITCH_DEPENDENTS.get(switch_id, ()),
+                          *_TEMPERATURE_DEPENDENTS.get(switch_id, ())}:
             for widget in self.query(f"#{widget_id}"):
                 widget.disabled = not enabled
+        if switch_id == "temperature_control":
+            # the setpoints replace the hand-typed filename setpoint
+            for widget in self.query("#temperature_setpoint_K"):
+                widget.disabled = enabled
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "data_dir":
@@ -772,8 +855,18 @@ class MeasurementApp(App):
         self.data_root = Path(state["data_dir"]).expanduser()
         ensure_sample(self.data_root, state["sample"], create=True)
         self._save_settings(self.collect_raw())
+        state, steps = with_first_setpoint(state)
+        if not self.TEMPERATURE_STEPS:
+            steps = None
         plan = self._build_plan(state)
-        self.push_screen(self.run_screen(plan), lambda _result: self.after_run(plan))
+        screen = self.run_screen(plan)
+        if steps is not None:
+            screen.temp_steps, screen.temp_state = steps, state
+            screen.temp_build_plan = lambda st, _root: self._build_plan(st)
+            engine = getattr(self.program, "engine", None)
+            screen.temp_engine = (lambda p: engine(p)) if engine is not None \
+                else (lambda _p: screen.program)
+        self.push_screen(screen, lambda _result: self.after_run(plan))
 
     def run_screen(self, plan):
         """The RunScreen for `plan` — the program module's, by default."""

@@ -31,9 +31,11 @@ from sot.sot_pulsed_switching_tui import (
 from web.directory_picker import validate_directory
 from web.field_diagram import build_field_diagram_figure
 from web.identity_bar import identity_bar
+from instruments.temperature_control import repeat_run_cost, with_first_setpoint
 from web.run_controller import (
     RunController, advanced_section, bool_switch, busy_banner, finished_handler, form_state,
     is_busy, load_settings, measurement_layout, num_field, optional_num_field, param_card,
+    temperature_card, SkipWaitButton,
     param_grid, program_artifacts, program_run_fn, refresh_on_busy_change, render_summary,
     save_settings, stable_card, stable_grid, text_field,
 )
@@ -207,9 +209,7 @@ def page() -> None:
                         opt("field_theta_deg"), opt("field_phi_deg"))).classes("w-full").style("height: 220px")
                     fld("field_settle_tolerance_mT", "Field settle tolerance (mT)")
 
-                with param_card("Temperature logging"):
-                    switches["enable_temperature"] = bool_switch(
-                        "Log temperature (Oxford Instruments MercuryiTC)", d("enable_temperature"))
+                temperature_card(d, inputs, switches, identity)
 
             # ── Tier 2: instrument wiring & safety — collapsed ──────────────
             with advanced_section("Instrument configuration & addresses", icon="settings"):
@@ -313,6 +313,7 @@ def page() -> None:
                 status_label = ui.label("Idle.").classes("text-sm font-bold")
             abort_btn = ui.button("Abort (safe shutdown)", color="negative").props("outline")
             abort_btn.set_visibility(False)
+            skip = SkipWaitButton()
 
             fig = go.Figure()
             fig.update_layout(margin=dict(l=60, r=20, t=30, b=50), showlegend=True)
@@ -428,12 +429,15 @@ def page() -> None:
         state["data_dir"] = prepare_data_root(identity.data_dir_input.value, state["sample"])
         save_settings(_SETTINGS_PATH, collect_raw())
 
+        state, steps = with_first_setpoint(state)
         plan = build_plan(state, Path(state["data_dir"]))
+        plans: list = []
         run_contexts: list[RunContext] = []
         run_extras: list[dict] = []
         rc = RunController(
             suite=SUITE, measurement=PAGE_TITLE,
-            run_fn=program_run_fn(program, plan, run_contexts, run_extras),
+            run_fn=program_run_fn(program, plan, run_contexts, run_extras,
+                                  steps=steps, state=state, plans=plans),
             save_artifacts=lambda records, result, status: program_artifacts(program, plan, run_contexts),
             parameters=state, data_dir=state["data_dir"], planned_output_paths=[],
             on_tick=lambda: (plot.update(), table.update()),
@@ -441,8 +445,8 @@ def page() -> None:
             on_log=lambda text, level: log_area.push(text),
             on_finished=finished_handler(
                 page_client, controller, status_label, abort_btn, start_btn, refresh_summary.refresh,
-                program, plan, run_contexts, run_extras),
-            sample=plan.sample, device=plan.device, run_cost=plan.run_cost, run_contexts=run_contexts,
+                program, plan, run_contexts, run_extras, plans=plans, skip=skip),
+            sample=plan.sample, device=plan.device, run_cost=repeat_run_cost(plan.run_cost, steps), run_contexts=run_contexts,
         )
         if not rc.try_start():
             ui.notify("Another measurement is already running — see the banner above.", type="warning")
@@ -454,6 +458,7 @@ def page() -> None:
         table.update()
         log_area.clear()
         abort_btn.set_visibility(True)
+        skip.arm(steps)
         start_btn.set_enabled(False)
 
     def on_abort() -> None:

@@ -36,6 +36,7 @@ from typing import Any, Callable, Iterator, Optional
 from nicegui import background_tasks, ui
 
 from instruments.run_time import RunCost, eta_s, format_duration
+from instruments.temperature_control import TemperatureSteps, run_temperature_steps, with_first_setpoint
 from instruments.summary_lines import split_info
 from dc.dc_sweep_utils import finite
 from instruments import run_index
@@ -97,6 +98,79 @@ def optional_num_field(label: str, default: Optional[float], *, hint: str = "",
     if hint:
         ui.label(hint).classes("text-xs text-grey-6 -mt-1 mb-1")
     return inp
+
+
+def temperature_card(d: Callable[[str], Any], inputs: dict, switches: dict, identity, *,
+                     single_target: bool = False, sensor_uids: bool = False) -> None:
+    """The TUI's tui_common.temperature_card(): log switch + software max T,
+    then the optional MercuryiTC setpoint control (outer loop, see
+    instruments/temperature_control.py). While control is on, the identity
+    bar's hand-typed setpoint is greyed — the setpoints name the files."""
+    with param_card("Temperature (MercuryiTC)"):
+        switches["enable_temperature"] = bool_switch("Log temperature (MercuryiTC)",
+                                                     d("enable_temperature"))
+        if sensor_uids:         # pages that keep the UID field in this card (R vs T)
+            inputs["temperature_sensor_uids"] = text_field(
+                "Sensor UID(s)", d("temperature_sensor_uids"),
+                hint="1 or 2, e.g. MB1.T1, DB5.T1 — a missing one is dropped.")
+        inputs["temperature_max_K"] = num_field(
+            "Software max T (K)", float(d("temperature_max_K")),
+            hint="Any reading ≥ this: heater off, run stops.")
+        inputs["temperature_max_K"].bind_enabled_from(switches["enable_temperature"], "value")
+        switches["temperature_control"] = bool_switch(
+            "Drive iTC to a target" if single_target else "Drive iTC to setpoint(s)",
+            d("temperature_control"))
+        inputs["temperature_setpoints_K"] = text_field(
+            "Target (K)" if single_target else "Setpoints (K, comma list — outer loop)",
+            str(d("temperature_setpoints_K") or ""),
+            hint="Sent at start, logged while T drifts." if single_target
+            else "Whole run repeated at each, in order.")
+        control = ["temperature_setpoints_K"]
+        if not single_target:
+            inputs["temperature_margin_mK"] = num_field(
+                "Settle margin ± (mK)", float(d("temperature_margin_mK")))
+            inputs["temperature_hold_s"] = num_field(
+                "Settle hold (s)", float(d("temperature_hold_s")),
+                hint="Must stay in margin this long, unbroken.")
+            control += ["temperature_margin_mK", "temperature_hold_s"]
+        for fid in control:
+            inputs[fid].bind_enabled_from(switches["temperature_control"], "value")
+        identity.temperature_input.bind_enabled_from(switches["temperature_control"], "value",
+                                                     backward=lambda on: not on)
+
+
+def step_labels(labels: list, steps: Optional[TemperatureSteps]) -> list:
+    """A page's per-series legend labels, repeated once per temperature step
+    with the step's T in front — the series_index order run_temperature_steps
+    tags records with (step-major)."""
+    if steps is None:
+        return list(labels)
+    return [f"T={T:g}K" + (f" {label}" if label else "")
+            for T in steps.setpoints_K for label in labels]
+
+
+class SkipWaitButton:
+    """"Skip T wait" next to Abort — visible only while a run with MercuryiTC
+    setpoint steps is going: starts the next step at the current temperature
+    when the settle margin turns out unreachable."""
+
+    def __init__(self) -> None:
+        self.steps: Optional[TemperatureSteps] = None
+        self.button = ui.button("Skip T wait (start now)", color="warning",
+                                on_click=self._skip).props("outline")
+        self.button.set_visibility(False)
+
+    def arm(self, steps: Optional[TemperatureSteps]) -> None:
+        self.steps = steps
+        self.button.set_visibility(steps is not None)
+
+    def disarm(self) -> None:
+        self.button.set_visibility(False)
+
+    def _skip(self) -> None:
+        if self.steps is not None:
+            self.steps.skip_event.set()
+            ui.notify("Skipping the temperature wait — starting at the current temperature.")
 
 
 @contextmanager
@@ -525,14 +599,37 @@ def run_png_path(program: ModuleType, plan, ctx: RunContext) -> Path:
                      eng.MEASUREMENT_TYPE, getattr(eng, "PNG_SUFFIX", "plot"))
 
 
-def program_run_fn(program: ModuleType, plan, run_contexts: list, run_extras: list):
+def program_run_fn(program: ModuleType, plan, run_contexts: list, run_extras: list, *,
+                   steps: Optional[TemperatureSteps] = None, state: Optional[dict] = None,
+                   plans: Optional[list] = None):
     """RunController.run_fn for `program.run_plan`: every run is finalized and
     gets its PNG the moment it ends (as in the TUI), and its RunContext +
     header extras land in `run_contexts` / `run_extras` for the post-run
-    status/comment step."""
+    status/comment step.
+
+    With MercuryiTC setpoint `steps` (`plan` built at the first setpoint,
+    `state` the form it came from) the whole run_plan repeats once per
+    setpoint (run_temperature_steps); each step's plan is appended to
+    `plans` — pass the same list to finished_handler so the status/comment
+    lands on the last step's plan."""
     eng = _engine(program, plan)
+    plans = [plan] if plans is None else plans
+    if not plans:
+        plans.append(plan)
+
+    def on_plan(p) -> None:
+        if p is not plans[-1]:
+            plans.append(p)
 
     def run_fn(stop_event: threading.Event, cb: "RunCallbacks"):
+        if steps is not None:
+            return run_temperature_steps(
+                steps, state, plan.data_root, plan, program.build_plan,
+                lambda p: _engine(program, p), stop_event,
+                on_status=cb.on_status, on_run_label=cb.on_run_label, on_point=cb.on_point,
+                on_run_finished=lambda ctx, records: _engine(program, plans[-1]).save_run_png(
+                    plans[-1], records, run_png_path(program, plans[-1], ctx)),
+                run_contexts=run_contexts, run_extras=run_extras, on_plan=on_plan)
         return eng.run_plan(
             plan, stop_event, on_status=cb.on_status, on_run_label=cb.on_run_label,
             on_point=cb.on_point,
@@ -594,15 +691,19 @@ def finished_handler(client, controller: dict, status_label, abort_btn, start_bt
                      run_contexts: list, run_extras: list, *,
                      done_text: str = "Measurement complete.",
                      aborted_text: str = "Measurement aborted.",
-                     on_result: Optional[Callable[[Any], None]] = None):
+                     on_result: Optional[Callable[[Any], None]] = None,
+                     plans: Optional[list] = None, skip: Optional[SkipWaitButton] = None):
     """RunController.on_finished for a page: final status text, Abort hidden,
     Start re-enabled, summary refreshed, `on_result(result)` if given, then the
     post-run status/comment dialog for the last run (prompt_last_run), if any
-    run was recorded."""
+    run was recorded. `plans` (from program_run_fn): the last temperature
+    step's plan is the one the dialog writes with; `skip` is hidden too."""
     def on_finished(final: "FinalStatus", result) -> None:
         status_label.set_text({"completed": done_text, "aborted": aborted_text,
                                "error": f"ERROR: {final.error}"}[final.status])
         abort_btn.set_visibility(False)
+        if skip is not None:
+            skip.disarm()
         start_btn.set_enabled(not is_busy())
         if on_result is not None and result is not None:
             on_result(result)
@@ -611,7 +712,8 @@ def finished_handler(client, controller: dict, status_label, abort_btn, start_bt
         records = list(handle.records) if handle is not None else []
         if run_contexts:        # nothing recorded (a measure-only mode, an early abort): no dialog
             background_tasks.create(
-                prompt_last_run(client, program, plan, run_contexts, run_extras, records),
+                prompt_last_run(client, program, plans[-1] if plans else plan,
+                                run_contexts, run_extras, records),
                 name="status_comment_prompt")
     return on_finished
 
@@ -667,4 +769,5 @@ def form_state(program: ModuleType, identity, *, inputs: dict, switches: dict,
     if "sweep_rows" in widgets:
         state["sweep_rows"] = widgets["sweep_rows"].value or ""
     resolve = getattr(program, "resolve_state", None)
-    return (resolve(state) if resolve is not None else state), errors
+    state = resolve(state) if resolve is not None else state
+    return with_first_setpoint(state)[0], errors       # setpoints name the files

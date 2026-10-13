@@ -33,13 +33,14 @@ from sot.sot_nonlocal_switching_tui import (
 )
 from web.directory_picker import validate_directory
 from web.identity_bar import identity_bar
+from instruments.temperature_control import repeat_run_cost, with_first_setpoint
 from web.run_controller import (
     RunController, advanced_section, bool_switch, busy_banner,
     is_busy, measurement_layout, num_field, optional_num_field, param_card, param_grid,
     render_summary, stable_card, stable_grid, text_field,
     refresh_on_busy_change,
     finished_handler, load_settings, program_artifacts, program_run_fn, save_settings,
-    form_state,
+    form_state, temperature_card, SkipWaitButton, step_labels,
 )
 from web.sample_picker import NEW_SAMPLE_SENTINEL, prepare_data_root
 
@@ -145,9 +146,7 @@ def page() -> None:
                         "R_NL at the AP level (Ω)", _optional_float(d("R_AP_ohm")),
                         hint="Enables state_AP_fraction.")
 
-                with param_card("Temperature logging"):
-                    switches["enable_temperature"] = bool_switch(
-                        "Log temperature (Oxford Instruments MercuryiTC)", d("enable_temperature"))
+                temperature_card(d, inputs, switches, identity)
 
             # ── Tier 2: instrument wiring & safety — collapsed ──────────────
             with advanced_section("Instrument configuration & addresses", icon="settings"):
@@ -194,6 +193,7 @@ def page() -> None:
                 status_label = ui.label("Idle.").classes("text-sm font-bold")
             abort_btn = ui.button("Abort (safe shutdown)", color="negative").props("outline")
             abort_btn.set_visibility(False)
+            skip = SkipWaitButton()
 
             fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08)
             fig.update_yaxes(title_text="R_NL (mΩ)", row=1, col=1)
@@ -323,7 +323,9 @@ def page() -> None:
         save_settings(_SETTINGS_PATH, collect_raw())
 
         data_root = Path(state["data_dir"])
+        state, steps = with_first_setpoint(state)
         plan = build_plan(state, data_root)
+        plans: list = []
         labels = [f"I_init={i:g}A" if i is not None and len(plan.series_values) > 1 else None
                   for i in plan.series_values]
         run_contexts: list[RunContext] = []
@@ -331,27 +333,29 @@ def page() -> None:
 
         rc = RunController(
             suite=SUITE, measurement=PAGE_TITLE,
-            run_fn=program_run_fn(program, plan, run_contexts, run_extras),
+            run_fn=program_run_fn(program, plan, run_contexts, run_extras,
+                                  steps=steps, state=state, plans=plans),
             save_artifacts=lambda records, result, status: program_artifacts(program, plan, run_contexts),
             parameters=state, data_dir=state["data_dir"], planned_output_paths=[],
             on_tick=lambda: (plot.update(), table.update()),
             on_record=on_record, on_status=on_status, on_run_label=on_run_label, on_log=on_log,
             on_finished=finished_handler(
                 page_client, controller, status_label, abort_btn, start_btn, refresh_summary.refresh,
-                program, plan, run_contexts, run_extras),
-            sample=plan.sample, device=plan.device, run_cost=plan.run_cost, run_contexts=run_contexts,
+                program, plan, run_contexts, run_extras, plans=plans, skip=skip),
+            sample=plan.sample, device=plan.device, run_cost=repeat_run_cost(plan.run_cost, steps), run_contexts=run_contexts,
         )
         if not rc.try_start():
             ui.notify("Another measurement is already running — see the banner above.", type="warning")
             return
         controller["c"] = rc
 
-        init_series(labels)
+        init_series(step_labels(labels, steps))
         plot.update()
         table.rows.clear()
         table.update()
         log_area.clear()
         abort_btn.set_visibility(True)
+        skip.arm(steps)
         start_btn.set_enabled(False)
 
     def on_abort() -> None:

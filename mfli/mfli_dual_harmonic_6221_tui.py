@@ -90,6 +90,10 @@ from instruments.run_time import (
     GPIB_TXN_S, MDS_SYNC_S, PER_FILE_S, PER_RUN_S, PHASE_NULL_ITER_TYP, POINT_OVERHEAD_S,
     TEMP_READ_S, RunCost,
 )
+from instruments.temperature_control import (
+    TEMPERATURE_DEFAULTS, TEMPERATURE_NUMERIC_FIELDS, TEMPERATURE_TEXT_FIELDS,
+    temperature_cfg_from_state, temperature_summary,
+)
 from instruments.tui_common import (
     MeasurementRunScreen,
     format_si,
@@ -160,9 +164,7 @@ DEFAULTS: dict = {
     "gaussmeter_visa_resource": "GPIB0::12::INSTR",
     "gaussmeter_n_averages": "10",
     "gaussmeter_read_delay_s": "0.05",
-    "enable_temperature": True,
-    "temperature_visa_resource": "TCPIP0::192.168.1.5::7020::SOCKET",
-    "temperature_sensor_uids": "MB1.T1",
+    **TEMPERATURE_DEFAULTS,
     "hall_bar_length_um": "",
     "hall_bar_width_um": "",
     "hall_bar_thickness_nm": "",
@@ -222,11 +224,11 @@ NUMERIC_FIELDS: dict = {
     "follower_osc_index": int,
     "follower_pll_demod_index": int,
     "extref_lock_timeout_s": float,
+    **TEMPERATURE_NUMERIC_FIELDS,
 }
 TEXT_FIELDS = ["leader_device", "follower_device", "daq_host", "ac_visa_resource", "phi_I_context",
                "amplitude_values", "device", "cooldown",
-               "visa_resource", "gaussmeter_visa_resource", "temperature_visa_resource",
-               "temperature_sensor_uids", "data_dir"]
+               "visa_resource", "gaussmeter_visa_resource", *TEMPERATURE_TEXT_FIELDS, "data_dir"]
 # Free-text, blank-allowed: parsed to Optional[float] by hand in parse_state()
 # rather than going through NUMERIC_FIELDS' "blank is an error" casting.
 OPTIONAL_NUMERIC_FIELDS = [
@@ -240,7 +242,6 @@ MAGNET_FIELD_IDS = [
     "gaussmeter_visa_resource", "gaussmeter_n_averages", "gaussmeter_read_delay_s",
     "field_settle_tolerance_mT",
 ]
-TEMPERATURE_FIELD_IDS = ["temperature_visa_resource", "temperature_sensor_uids"]
 
 
 # ── Reference phase (phi_I) ── shared by both AC sources' forms, plans and
@@ -667,15 +668,7 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         info.append("Field: none — single point, magnet untouched")
         info.extend(run_costs(state).lines())
 
-    if state["enable_temperature"]:
-        uids = parse_sensor_uids(state["temperature_sensor_uids"])
-        if not uids:
-            warnings.append("Temperature logging is on but no sensor UID is set — "
-                             "temperature columns will be empty.")
-        else:
-            info.append(f"Temperature: MercuryiTC {', '.join(uids)} — empty if unreachable")
-    else:
-        info.append("Temperature: off")
+    temperature_summary(state, info, warnings, errors)
 
     geom_fields = {
         "Hall bar length": state["hall_bar_length_um"],
@@ -936,14 +929,7 @@ def build_plan(state: dict, data_root: Path) -> MeasurementPlan:
         )
         currents_A = build_segmented_sweep(state["sweep_rows_parsed"], bidirectional=True)
 
-    temp_cfg = None
-    if state["enable_temperature"] and not measure:
-        uids = parse_sensor_uids(state["temperature_sensor_uids"])
-        if uids:
-            temp_cfg = TemperatureControllerConfig(
-                visa_resource=state["temperature_visa_resource"],
-                sensor_uids=uids,
-            )
+    temp_cfg = None if measure else temperature_cfg_from_state(state)
 
     geometry_cfg = SampleGeometryConfig(
         hall_bar_length_um=state["hall_bar_length_um"],
