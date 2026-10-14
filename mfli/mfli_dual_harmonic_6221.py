@@ -202,13 +202,12 @@ def _check_ac_safety(ac_cfg: ACSourceConfig) -> None:
                                     #       tuned for a different signal from a previous run.
 
 
-def extref_lock_s(lock_timeout_s: float) -> tuple[float, float]:
-    """Modelled (typical, worst-case) wall time of arming BOTH devices' ExtRef
-    PLLs: per device, configure_external_reference() is 12 LabOne transactions
-    and wait_for_reference_lock() returns at the first lock -- run_time.LOCK_TYP_S
-    typically, the full `lock_timeout_s` if the marker never locks."""
-    setup = 2 * 12 * GPIB_TXN_S
-    return setup + 2 * LOCK_TYP_S, setup + 2 * lock_timeout_s
+def extref_lock_s() -> float:
+    """Modelled wall time of arming BOTH devices' ExtRef PLLs: per device,
+    configure_external_reference() is 12 LabOne transactions and
+    wait_for_reference_lock() returns at the first lock -- run_time.LOCK_TYP_S
+    (the form's lock timeout only bounds a marker that never locks)."""
+    return 2 * 12 * GPIB_TXN_S + 2 * LOCK_TYP_S
 
 
 def disable_sigout(daq: "zi.ziDAQServer", device: str, out_ch: int = 0) -> None:

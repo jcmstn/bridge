@@ -48,7 +48,7 @@ from pymeasure.instruments import Instrument, SCPIMixin
 from pymeasure.instruments.validators import strict_range
 
 from instruments.lakeshore475 import field_to_mT
-from instruments.run_time import FIELD_SETTLE_EXTRA_S, GPIB_TXN_S
+from instruments.run_time import FIELD_SETTLE_EXTRA_S, FIELD_SETTLE_S_PER_A, GPIB_TXN_S
 
 log = logging.getLogger(__name__)
 
@@ -646,23 +646,27 @@ def set_magnet_current(
     }
 
 
-def magnet_move_s(delta_A: float, cfg: MagnetConfig, with_field: bool = True) -> tuple[float, float]:
-    """Modelled (typical, worst-case) wall time of ``set_magnet_current()`` for a
-    |delta_A| move -- what the run-time estimate charges per magnet move.
+def magnet_move_s(delta_A: float, cfg: MagnetConfig, with_field: bool = True) -> float:
+    """Modelled wall time of ``set_magnet_current()`` for a |delta_A| move --
+    what the run-time estimate charges per magnet move.
 
     Ramp: 1 query for the start value, then max(1, |ΔI|/step) steps of
     (sleep + CURR write + SYST:ERR? query -- check_set_errors=True); then one
     MEAS:CURR? readback. With a gaussmeter the settle window needs
-    FIELD_SETTLE_WINDOW_N readings FIELD_SETTLE_POLL_S apart at minimum;
-    typical adds run_time.FIELD_SETTLE_EXTRA_S, worst case is the timeout.
+    FIELD_SETTLE_WINDOW_N readings FIELD_SETTLE_POLL_S apart at minimum, plus
+    run_time.FIELD_SETTLE_EXTRA_S and run_time.FIELD_SETTLE_S_PER_A per A of
+    the last ramp step (|ΔI| / n_steps): the drift after the ramp scales with
+    that final jump, so a long many-step ramp settles like a small hop (both
+    knobs fitted to rig data; never more than the settle timeout).
     Note a zero move still costs one step plus the settle floor."""
     # a 0 step (typo in the form) must not crash the live sidebar -- ramp_current() itself would
     n_steps = max(1, int(abs(delta_A) / (abs(cfg.ramp_step_A) or float("inf"))))
     base = GPIB_TXN_S + n_steps * (cfg.ramp_delay_s + 2 * GPIB_TXN_S) + GPIB_TXN_S
     if not with_field:
-        return base, base
+        return base
     floor = (FIELD_SETTLE_WINDOW_N - 1) * FIELD_SETTLE_POLL_S + FIELD_SETTLE_WINDOW_N * GPIB_TXN_S
-    return base + floor + FIELD_SETTLE_EXTRA_S, base + FIELD_SETTLE_TIMEOUT_S
+    drift = FIELD_SETTLE_EXTRA_S + FIELD_SETTLE_S_PER_A * abs(delta_A) / n_steps
+    return base + min(floor + drift, FIELD_SETTLE_TIMEOUT_S)
 
 
 def shutdown_magnet(psu: "KepkoBOPGL", cfg: MagnetConfig) -> None:

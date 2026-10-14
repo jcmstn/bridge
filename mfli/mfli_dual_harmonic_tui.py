@@ -297,10 +297,10 @@ def run_costs(state: dict, currents_A=None) -> RunCost:
         rc.each("field read", read_field_s(GaussmeterConfig(
             n_averages=state["gaussmeter_n_averages"], read_delay_s=state["gaussmeter_read_delay_s"])))
         for i, current in enumerate(currents_A):
-            typ, worst = magnet_move_s(abs(current - i_now), magnet_cfg)
-            rc.at("magnet", typ, i, worst_extra=worst - typ)
+            typ = magnet_move_s(abs(current - i_now), magnet_cfg)
+            rc.at("magnet", typ, i)
             i_now = current
-        rc.tail("ramp-down", magnet_move_s(abs(i_now), magnet_cfg, with_field=False)[0])
+        rc.tail("ramp-down", magnet_move_s(abs(i_now), magnet_cfg, with_field=False))
     return rc
 
 

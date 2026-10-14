@@ -280,14 +280,14 @@ def run_costs(n_sweep_points: int, state: dict) -> RunCost:
             current_A = fields[k // n_sense]
             if current_A is None or current_A == parked:
                 continue
-            typ, worst = magnet_move_s(abs(current_A - (parked or 0.0)), mcfg)
+            typ = magnet_move_s(abs(current_A - (parked or 0.0)), mcfg)
             i = k * n_sweep_points
-            rc.at("magnet", typ, i, worst_extra=worst - typ)
+            rc.at("magnet", typ, i)
             rc.at("field dwell", state["field_settle_s"], i)
             rc.at("field read", read_field_s(gcfg), i)
             parked = current_A
         if parked is not None:
-            teardown += magnet_move_s(parked, mcfg, with_field=False)[0]
+            teardown += magnet_move_s(parked, mcfg, with_field=False)
     rc.tail("ramps", teardown)
     return rc
 

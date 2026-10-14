@@ -41,12 +41,19 @@ POINT_OVERHEAD_S    = 0.10   # per point: full-CSV rewrite + on_point/log hand-o
 TEMP_READ_S         = 0.15   # MercuryiTC read_temperature() (2 queries, LAN)                     [s]
 READ_2182_FACTOR    = 1.0    # 2182 real :READ? time / (NPLC / 50 Hz). Autozero or the digital
                              #   filter (unverified after *RST) would push this to 2 … 10        [-]
-FIELD_SETTLE_EXTRA_S = 1.0   # typical extra wait beyond the minimal settle window per magnet move [s]
+# The two field-settle knobs are FITTED to rig data (ChipL HARM6 runs 68-102, 2026-09: field
+# sweeps, interior hops 0.29-1.4 A, each a single ramp step; settle 0.3 s, n_avg 200, gaussmeter
+# 10 x 0.05 s): measured time per point = 12.4 s + 2.0 s/A x hop, and a 0 -> 42 A multi-step ramp
+# does NOT pay 2 s/A -- so the drift scales with the size of the LAST current step, not the hop.
+FIELD_SETTLE_EXTRA_S = 9.6   # per magnet move beyond the minimal settle window -- lumps the field
+                             #   drift, slow gaussmeter queries and per-point latency the
+                             #   timestamps can't split (fit residual after every modelled term)  [s]
+FIELD_SETTLE_S_PER_A = 2.0   # extra field-settle time per A of the last applied current step     [s/A]
 ACQ_OVERHEAD_S      = 0.20   # MFLI subscribe / sync / unsubscribe / overload read per acquire    [s]
 LOCK_TYP_S          = 3.0    # typical MFLI ExtRef PLL lock time. The loop returns at the first lock,
                              #   the 5 s form default is only a timeout. Unmeasured; deliberately high
                              #   so the 2h / 6221-only estimates do not drop below the old (5 s timeout
-                             #   per point) ones -- the worst-case line still covers the full timeout [s]
+                             #   per point) ones                                                     [s]
 ARM_S               = 0.15   # 6221 waveform ARM / INIT after configuring it                       [s]
 PMU_PULSE_S         = 1.0    # 4200A pulse_once: EX + fetch round trips + route-back               [s]
 PER_FILE_S          = 1.5    # per output file: allocate_run + PNG + index.csv rewrite             [s]
@@ -81,23 +88,20 @@ class RunCost:
     def __init__(self, n_points: int):
         self.points: list[float] = [0.0] * max(0, int(n_points))
         self.parts: dict[str, float] = {}
-        self.worst_extra_s = 0.0          # extra if every bounded wait hits its timeout
         self.tail_s = 0.0                 # end-of-run cost after the last point (see class doc)
 
-    def each(self, label: str, seconds: float, worst_extra: float = 0.0) -> None:
-        """Charge `seconds` (and `worst_extra`) to EVERY point."""
+    def each(self, label: str, seconds: float) -> None:
+        """Charge `seconds` to EVERY point."""
         for i in range(len(self.points)):
             self.points[i] += seconds
         self.parts[label] = self.parts.get(label, 0.0) + seconds * len(self.points)
-        self.worst_extra_s += worst_extra * len(self.points)
 
-    def at(self, label: str, seconds: float, index: int, worst_extra: float = 0.0) -> None:
+    def at(self, label: str, seconds: float, index: int) -> None:
         """Charge `seconds` to one point (negative index counts from the end)."""
         if not self.points:
             return
         self.points[index] += seconds
         self.parts[label] = self.parts.get(label, 0.0) + seconds
-        self.worst_extra_s += worst_extra
 
     def tail(self, label: str, seconds: float) -> None:
         """Charge `seconds` to the shutdown after the last point (not on the bar)."""
@@ -109,14 +113,10 @@ class RunCost:
         return sum(self.points) + self.tail_s
 
     def lines(self) -> list[str]:
-        """Sidebar lines: total + breakdown, and a worst case if any wait is bounded."""
+        """Sidebar line: total + the five biggest parts."""
         parts = sorted(((v, k) for k, v in self.parts.items() if v >= 0.5), reverse=True)
         detail = " · ".join(f"{k} {format_duration(v)}" for v, k in parts[:5])
-        out = [f"Run time: ≈ {format_duration(self.total_s)}" + (f" — {detail}" if detail else "")]
-        if self.worst_extra_s >= 5.0:
-            out.append(f"Worst case: ≈ {format_duration(self.total_s + self.worst_extra_s)} "
-                       "— if settle / lock waits time out")
-        return out
+        return [f"Run time: ≈ {format_duration(self.total_s)}" + (f" — {detail}" if detail else "")]
 
 
 def progress_total(rc: Optional[RunCost], fallback_points: int) -> float:

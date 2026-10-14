@@ -317,7 +317,7 @@ def run_costs(state: dict) -> RunCost:
     rc.each("post-pulse wait", state["delay_after_pulse_s"])
     rc.each("PMU pulse", pulse_once_s(state["n_pulses"], state["pulse_period_s"]))
     rc.each("6221 re-arm", ARM_S)
-    rc.each("PLL lock", lock_typ, worst_extra=max(0.0, state["lock_timeout_s"] - lock_typ))
+    rc.each("PLL lock", lock_typ)
     rc.each("settle", state["settle_after_enable_s"])
     acq = sr830.acquire_s if state.get("lockin") == "sr830" else acquire_s
     rc.each("MFLI reads", acq(state["filter_time_constant_s"], state["n_averages"],
@@ -327,14 +327,14 @@ def run_costs(state: dict) -> RunCost:
     for k, (_I_sense, I_mag) in enumerate(series):
         first = k * len(amps)                        # this file's first point
         rc.at("6221 rebuild", ac_source_restart_s(), first)    # do_run(): shutdown + connect_ac_source every file
-        typ, worst = magnet_move_s(abs(I_mag - prev), magnet)  # set_magnet_current() every file, no parking guard
-        rc.at("magnet", typ, first, worst_extra=worst - typ)
+        typ = magnet_move_s(abs(I_mag - prev), magnet)  # set_magnet_current() every file, no parking guard
+        rc.at("magnet", typ, first)
         prev = I_mag
         rc.at("field read", read_field_s(gauss), first)        # run_measurement() reads the field once
         rc.at("per-file", PER_FILE_S, first)
     rc.at("per-run", PER_RUN_S, 0)
     if series:                                       # shutdown_magnet() ramps back to 0 A
-        rc.tail("ramps", magnet_move_s(abs(series[-1][1]), magnet, with_field=False)[0])
+        rc.tail("ramps", magnet_move_s(abs(series[-1][1]), magnet, with_field=False))
     return rc
 
 

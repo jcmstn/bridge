@@ -319,14 +319,14 @@ def run_costs(state: dict) -> RunCost:
     for k, (I_mag, _I_sense) in enumerate(series):
         first = k * len(amps)                        # this file's first point
         if I_mag != parked:
-            typ, worst = magnet_move_s(abs(I_mag - (parked or 0.0)), magnet)   # magnet starts at 0 A
-            rc.at("magnet", typ, first, worst_extra=worst - typ)
+            typ = magnet_move_s(abs(I_mag - (parked or 0.0)), magnet)   # magnet starts at 0 A
+            rc.at("magnet", typ, first)
             parked = I_mag
         rc.at("field read", read_field_s(gauss), first)      # run_measurement() reads the field once
         rc.at("per-file", PER_FILE_S, first)
     rc.at("per-run", PER_RUN_S, 0)
     if series:                                       # shutdown_magnet() ramps back to 0 A
-        rc.tail("ramps", magnet_move_s(abs(series[-1][0]), magnet, with_field=False)[0])
+        rc.tail("ramps", magnet_move_s(abs(series[-1][0]), magnet, with_field=False))
     return rc
 
 

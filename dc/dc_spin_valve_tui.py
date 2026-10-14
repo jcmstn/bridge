@@ -237,14 +237,14 @@ def run_costs(currents_A, state: dict) -> RunCost:
     rc.each("2182 reads", reads_s)
     rc.each("overhead", POINT_OVERHEAD_S + (TEMP_READ_S if has_temp else 0.0))
     for i, hop in enumerate(field_hops(currents_A, n_series)):
-        typ, worst = magnet_move_s(hop, mcfg)
-        rc.at("magnet", typ, i, worst_extra=worst - typ)
+        typ = magnet_move_s(hop, mcfg)
+        rc.at("magnet", typ, i)
     for k in range(n_series):
         rc.at("per-file", PER_FILE_S, k * n_pts)
     rc.at("per-run", PER_RUN_S, 0)
     if n_pts:   # teardown: 6221 off, gate ramp-down, magnet ramp-down from the last field point
         rc.tail("ramps", 2 * GPIB_TXN_S + (GATE_RAMP_S if state["enable_gate"] else 0.0)
-                + magnet_move_s(currents_A[-1], mcfg, with_field=False)[0])
+                + magnet_move_s(currents_A[-1], mcfg, with_field=False))
     return rc
 
 

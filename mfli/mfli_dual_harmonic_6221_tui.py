@@ -390,7 +390,7 @@ def run_costs(state: dict, currents_A=None) -> RunCost:
     Also drives the run screen's progress bar, so the estimate and the live
     ETA cannot disagree. Every term mirrors a step of run_measurement() /
     RunScreen.do_run() -- see mfli_dual_harmonic_6221.py."""
-    lock_typ, lock_worst = extref_lock_s(state["extref_lock_timeout_s"])
+    lock_typ = extref_lock_s()
     if state.get("measure_phi_I"):
         return measure_phi_I_cost(state, PER_RUN_S + MDS_SYNC_S + ac_source_restart_s() + lock_typ)
     n_pts = len(currents_A) if currents_A is not None else 1
@@ -416,15 +416,15 @@ def run_costs(state: dict, currents_A=None) -> RunCost:
     for a in range(n_amps):
         first = a * n_pts
         # every amplitude re-arms the 6221 (waveform_arm) and re-locks both ExtRef PLLs, then saves its own file
-        rc.at("6221 re-arm + ExtRef", ac_source_restart_s() + lock_typ, first, worst_extra=lock_worst - lock_typ)
+        rc.at("6221 re-arm + ExtRef", ac_source_restart_s() + lock_typ, first)
         rc.at("per-file", PER_FILE_S, first)
         if currents_A is not None:
             for j, current in enumerate(currents_A):
-                typ, worst = magnet_move_s(abs(current - i_now), magnet_cfg)
-                rc.at("magnet", typ, first + j, worst_extra=worst - typ)
+                typ = magnet_move_s(abs(current - i_now), magnet_cfg)
+                rc.at("magnet", typ, first + j)
                 i_now = current
     if currents_A is not None:
-        rc.tail("ramp-down", magnet_move_s(abs(i_now), magnet_cfg, with_field=False)[0])
+        rc.tail("ramp-down", magnet_move_s(abs(i_now), magnet_cfg, with_field=False))
     return rc
 
 

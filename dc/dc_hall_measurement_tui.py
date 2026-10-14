@@ -247,10 +247,10 @@ def run_costs(currents_A, state: dict) -> RunCost:
                                 read_delay_s=state["gaussmeter_read_delay_s"])
         rc.each("field read", read_field_s(gcfg))
         for i, hop in enumerate(field_hops(currents_A, n_series)):
-            typ, worst = magnet_move_s(hop, mcfg)
-            rc.at("magnet", typ, i, worst_extra=worst - typ)
+            typ = magnet_move_s(hop, mcfg)
+            rc.at("magnet", typ, i)
         if n_pts:
-            rc.tail("ramps", magnet_move_s(currents_A[-1], mcfg, with_field=False)[0])
+            rc.tail("ramps", magnet_move_s(currents_A[-1], mcfg, with_field=False))
     for k in range(n_series):
         rc.at("per-file", PER_FILE_S, k * n_pts)
     rc.at("per-run", PER_RUN_S, 0)

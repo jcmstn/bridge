@@ -209,7 +209,6 @@ def repeat_run_cost(rc: Optional[RunCost], steps: Optional[TemperatureSteps]) ->
     out = RunCost(0)
     out.points = list(rc.points) * n
     out.parts = {k: v * n for k, v in rc.parts.items()}
-    out.worst_extra_s = rc.worst_extra_s * n
     out.tail_s = rc.tail_s * n
     for k in range(n):
         out.at("T settle", steps.hold_s, k * len(rc.points))

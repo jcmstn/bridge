@@ -114,13 +114,12 @@ def test_harmonic_field_sweep_counts_the_magnet_and_beats_the_old_estimate() -> 
     old_estimate = 41 * (15.0 + 0.9)                     # settle + window: the sidebar's old number
     assert rc.total_s > 770.0 > old_estimate             # the audit's zero-latency floor
     # an interior 2 A hop: settle + pair window + overhead + gaussmeter + one magnet move
-    hop_typ, _ = magnet_move_s(2.0, _MAGNET)
+    hop_typ = magnet_move_s(2.0, _MAGNET)
     assert rc.points[5] == pytest.approx(
         15.0 + _pair_s(state) + 3 * rt.GPIB_TXN_S + rt.POINT_OVERHEAD_S + read_field_s(_GAUSS) + hop_typ)
     # the first point carries the 0 -> -20 A ramp; the return to 0 A is teardown, not on the bar
     assert rc.points[0] > rc.points[5] + 10.0 and rc.tail_s > 10.0
     assert rt.progress_total(rc, 41) == pytest.approx(rc.total_s - rc.tail_s)
-    assert rc.worst_extra_s > 41 * 25.0                   # every move can run into the 30 s settle timeout
 
 
 def test_harmonic_multi_row_sweep_matches_plan_length(tmp_path, monkeypatch) -> None:
@@ -157,12 +156,11 @@ def test_6221_points_span_every_amplitude_file(tmp_path, monkeypatch) -> None:
 def test_6221_per_amplitude_costs_are_multiplied_in() -> None:
     state = _h6state(amplitude_list=[1e-7, 2e-7, 3e-7])
     rc = t6221.run_costs(state)                            # single point per amplitude
-    lock_typ, lock_worst = extref_lock_s(5.0)
+    lock_typ = extref_lock_s()
     assert len(rc.points) == 3
     assert rc.parts["6221 re-arm + ExtRef"] == pytest.approx(3 * (ac_source_restart_s() + lock_typ))
     assert rc.parts["per-file"] == pytest.approx(3 * rt.PER_FILE_S)
     assert rc.parts["settle"] == pytest.approx(3 * 15.0)
-    assert rc.worst_extra_s == pytest.approx(3 * (lock_worst - lock_typ))   # ExtRef timeout on each
     # every later file re-arms the 6221 and re-locks too: it differs from file 1 only by the one-off connect + MDS
     assert rc.points[1] == pytest.approx(rc.points[0] - rt.PER_RUN_S - rt.MDS_SYNC_S)
     one = t6221.run_costs(_h6state())
@@ -176,9 +174,22 @@ def test_6221_sweep_is_repeated_per_amplitude_with_magnet_terms() -> None:
     assert len(rc.points) == 2 * 41
     assert rc.parts["settle"] == pytest.approx(2 * 41 * 15.0)
     # amplitude 2 starts its sweep from where amplitude 1 ended (-20 A), so its first hop is ~0, not 0 -> -20 A
-    m20, m0 = magnet_move_s(20.0, _MAGNET)[0], magnet_move_s(0.0, _MAGNET)[0]
+    m20, m0 = magnet_move_s(20.0, _MAGNET), magnet_move_s(0.0, _MAGNET)
     assert rc.points[0] - rc.points[41] == pytest.approx(rt.PER_RUN_S + rt.MDS_SYNC_S + m20 - m0)
     assert "magnet" not in t6221.run_costs(_h6state(amplitude_list=[1e-7, 2e-7])).parts
+
+
+def test_6221_field_sweep_matches_a_measured_rig_run() -> None:
+    # ChipL run 101 (HARM6, 2026-09-28): header 11:58:12 -> last point 12:45:42 = 2850 s
+    # for 205 points (0.29 A fine / 1.09 A coarse hops). The field-settle knobs are fitted
+    # to it. The 0 -> -42 A first move took < 11 s, so the rig's ramp step is well above
+    # 0.1 A -- 2 A assumed (every interior hop a single step).
+    rows = [(-42.0, -5.0, 35), (-5.0, 5.0, 35), (5.0, 42.0, 35)]
+    state = _h6state(enable_sweep=True, sweep_rows_parsed=rows, n_averages=200, ramp_step_A=2.0,
+                     time_constant_1f_s=0.0195, time_constant_2f_s=0.0195, settling_time_s=0.3)
+    rc = t6221.run_costs(state, build_segmented_sweep(rows, bidirectional=True))
+    assert len(rc.points) == 205
+    assert sum(rc.points) == pytest.approx(2850.0, rel=0.10)
 
 
 def test_6221_summary_lines(tmp_path) -> None:
@@ -192,9 +203,7 @@ def test_6221_summary_lines(tmp_path) -> None:
 
 
 def test_extref_helpers_arithmetic() -> None:
-    typ, worst = extref_lock_s(5.0)
-    assert typ == pytest.approx(2 * 12 * rt.GPIB_TXN_S + 2 * rt.LOCK_TYP_S)
-    assert worst == pytest.approx(2 * 12 * rt.GPIB_TXN_S + 2 * 5.0)
+    assert extref_lock_s() == pytest.approx(2 * 12 * rt.GPIB_TXN_S + 2 * rt.LOCK_TYP_S)
 
 
 # ── mfli_noise_spectrum ──────────────────────────────────────────────────────
@@ -214,12 +223,11 @@ def test_noise_steps_and_recording_time(tmp_path) -> None:
 def test_noise_per_amplitude_costs_and_tail() -> None:
     state = _nstate(amplitude_list=[1e-4, 2e-4])
     rc = tnoise.run_costs(state)
-    lock_typ, lock_worst = extref_lock_s(5.0)
+    lock_typ = extref_lock_s()
     assert len(rc.points) == 8
     assert rc.parts["6221 + ExtRef"] == pytest.approx(2 * (ac_source_restart_s() + lock_typ))
     assert rc.parts["save"] == pytest.approx(2 * 4 * rt.PER_FILE_S)     # one file set per amplitude
     assert rc.tail_s == pytest.approx(4 * rt.PER_FILE_S)                 # the last save follows the last spectrum
-    assert rc.worst_extra_s == pytest.approx(2 * (lock_worst - lock_typ))
     n_chunks = math.ceil(30.0 / AcquisitionConfig().poll_chunk_s)
     assert rc.parts["overhead"] == pytest.approx(
         8 * (2 * n_chunks * rt.GPIB_TXN_S + rt.ACQ_OVERHEAD_S + rt.POINT_OVERHEAD_S))

@@ -102,8 +102,7 @@ def test_spin_valve_default_covers_the_audit_floor_not_just_settle_plus_reads():
     # the very first point carries the 0 -> -20 A ramp; later points only a 2 A hop
     assert rc.points[0] > rc.points[1] + 10.0
     assert rc.tail_s > 10.0                                  # 20 A magnet ramp-down at shutdown
-    assert rc.worst_extra_s > 30 * 41 * 0.5                  # a settle timeout is ~30 s per point
-    assert any("Worst case" in line for line in rc.lines())
+    assert not any("Worst case" in line for line in rc.lines())
 
 
 def test_spin_valve_unidirectional_series_pay_the_return_ramp():
@@ -212,7 +211,7 @@ def test_gate_sweep_parks_only_when_the_field_changes_and_counts_the_ramp():
     assert rc.parts["per-file"] == pytest.approx(4 * rt.PER_FILE_S)
     first = [rc.points[k * n] for k in range(4)]                # cost of each series' first point
     assert first[1] == pytest.approx(first[3])                  # same field as the previous series: no park
-    park_1A = magnet_move_s(1.0, MagnetConfig())[0] + 1.0 + read_field_s(GaussmeterConfig())
+    park_1A = magnet_move_s(1.0, MagnetConfig()) + 1.0 + read_field_s(GaussmeterConfig())
     assert first[2] - first[1] == pytest.approx(park_1A)        # series 2 parks 0 A -> 1 A (ramp+settle+dwell+read)
     assert first[0] > first[1]                                  # series 0: park + run start
     assert rc.parts["field dwell"] == pytest.approx(2 * 1.0)
@@ -223,7 +222,7 @@ def test_gate_sweep_default_is_more_than_the_old_dwell_only_estimate():
     n = 81
     old = n * 2 * (0.2 + 5 * (5 / 50)) + 2 * 1.0              # old: points x (settle + reads) + dwell per park
     rc = gate_tui.run_costs(n, s)
-    typ, _ = magnet_move_s(0.0, MagnetConfig())
+    typ = magnet_move_s(0.0, MagnetConfig())
     assert rc.total_s > old + typ + read_field_s(GaussmeterConfig())
     assert rc.tail_s >= rt.GATE_RAMP_S                        # gate ramp-down at shutdown
 

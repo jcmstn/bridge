@@ -279,15 +279,14 @@ def run_costs(state: dict) -> RunCost:
     cur = 0.0                                                # magnet starts at 0 A
     for f, init_A in enumerate(inits):
         if init_A is not None:                               # initialize_with_field(): init, read, hold
-            (t1, w1), (t2, w2) = (magnet_move_s(abs(init_A - cur), magnet),
-                                  magnet_move_s(abs(state["sweep_magnet_current_A"] - init_A), magnet))
-            rc.at("magnet", t1 + t2, f * per_file, worst_extra=(w1 - t1) + (w2 - t2))
+            rc.at("magnet", magnet_move_s(abs(init_A - cur), magnet)
+                  + magnet_move_s(abs(state["sweep_magnet_current_A"] - init_A), magnet), f * per_file)
             rc.at("field read", 2 * read_field_s(gauss), f * per_file)   # once between, once in run_measurement
             cur = state["sweep_magnet_current_A"]
         rc.at("per-file", PER_FILE_S, f * per_file)
     rc.at("per-run", PER_RUN_S, 0)
     if any(i is not None for i in inits):                    # shutdown_magnet() ramps back to 0 A
-        rc.tail("ramps", magnet_move_s(abs(cur), magnet, with_field=False)[0])
+        rc.tail("ramps", magnet_move_s(abs(cur), magnet, with_field=False))
     return rc
 
 

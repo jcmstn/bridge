@@ -33,14 +33,6 @@ def test_runcost_each_and_at_and_lines():
     assert line.startswith("Run time: ≈ 28s") and "ramps 20s" in line and "settle 8s" in line
 
 
-def test_runcost_worst_case_line_only_when_material():
-    rc = rt.RunCost(2)
-    rc.each("magnet", 3.0, worst_extra=20.0)
-    lines = rc.lines()
-    assert len(lines) == 2 and "Worst case: ≈ 46s" in lines[1]
-    assert len(rt.RunCost(2).lines()) == 1
-
-
 def test_progress_helpers_cost_weighted_and_fallback():
     rc = rt.RunCost(3)
     rc.each("x", 5.0)
@@ -60,16 +52,23 @@ def test_empty_runcost_does_not_break():
 
 def test_magnet_move_arithmetic():
     cfg = MagnetConfig(ramp_step_A=0.1, ramp_delay_s=0.05)
-    typ, worst = magnet_move_s(2.0, cfg)                       # 20 steps
+    typ = magnet_move_s(2.0, cfg)                              # 20 steps
     base = rt.GPIB_TXN_S + 20 * (0.05 + 2 * rt.GPIB_TXN_S) + rt.GPIB_TXN_S
     floor = (FIELD_SETTLE_WINDOW_N - 1) * FIELD_SETTLE_POLL_S + FIELD_SETTLE_WINDOW_N * rt.GPIB_TXN_S
-    assert typ == pytest.approx(base + floor + rt.FIELD_SETTLE_EXTRA_S)
-    assert worst == pytest.approx(base + FIELD_SETTLE_TIMEOUT_S)
-    assert magnet_move_s(2.0, cfg, with_field=False) == (pytest.approx(base), pytest.approx(base))
+    # settle drift scales with the LAST step (2.0 A / 20 steps = 0.1 A), not the whole hop
+    assert typ == pytest.approx(base + floor + rt.FIELD_SETTLE_EXTRA_S + 0.1 * rt.FIELD_SETTLE_S_PER_A)
+    assert magnet_move_s(2.0, cfg, with_field=False) == pytest.approx(base)
     # a zero move still costs one ramp step plus the settle floor
-    typ0, _ = magnet_move_s(0.0, cfg)
+    typ0 = magnet_move_s(0.0, cfg)
     assert typ0 >= floor
-    assert magnet_move_s(4.0, cfg)[0] > typ                    # bigger hop, longer
+    assert magnet_move_s(4.0, cfg) > typ                       # bigger hop, longer
+    # a single-step hop pays the drift per A: fine vs coarse sweep regions differ
+    one_step = MagnetConfig(ramp_step_A=2.0, ramp_delay_s=0.05)
+    assert magnet_move_s(1.0, one_step) - magnet_move_s(0.25, one_step) == \
+        pytest.approx(0.75 * rt.FIELD_SETTLE_S_PER_A)
+    # never more than the settle timeout, however big the step
+    assert magnet_move_s(40.0, MagnetConfig(ramp_step_A=50.0, ramp_delay_s=0.05)) <= \
+        rt.GPIB_TXN_S * 4 + 0.05 + FIELD_SETTLE_TIMEOUT_S
 
 
 def test_read_field_s_matches_loop_shape():

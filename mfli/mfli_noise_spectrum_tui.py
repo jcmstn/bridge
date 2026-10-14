@@ -227,10 +227,10 @@ def run_costs(state: dict) -> RunCost:
     rc.each("recording", duration)
     rc.each("overhead", 2 * n_chunks * GPIB_TXN_S + ACQ_OVERHEAD_S + POINT_OVERHEAD_S)
     rc.at("connect + MDS", PER_RUN_S + MDS_SYNC_S, 0)
-    lock_typ, lock_worst = extref_lock_s(state["extref_lock_timeout_s"])
+    lock_typ = extref_lock_s()
     for a in range(n_amps):
         # each amplitude arms the 6221 and locks both ExtRef PLLs before its first recording ...
-        rc.at("6221 + ExtRef", ac_source_restart_s() + lock_typ, a * steps, worst_extra=lock_worst - lock_typ)
+        rc.at("6221 + ExtRef", ac_source_restart_s() + lock_typ, a * steps)
         if a:   # ... and the previous amplitude's save_results() (one file per spectrum + PNG) ran just before
             rc.at("save", steps * PER_FILE_S, a * steps)
     rc.tail("save", steps * PER_FILE_S)

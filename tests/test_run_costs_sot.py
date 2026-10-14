@@ -65,21 +65,20 @@ def test_pulsed_point_is_wait_plus_pmu_plus_read_with_delay_and_read_added():
     expect = 1.0 + 0.3 + pulse_once_s(1, 1e-3) + read + 5 * rt.GPIB_TXN_S + rt.POINT_OVERHEAD_S
     assert rc.points[1] == pytest.approx(expect)
     assert read > 5 * 2 * max(0.05, 5.0 / 50)              # the old max() model undercounted the read
-    typ, worst = magnet_move_s(1.5, _MAG)                  # first point: field, per-file, per-run one-offs
+    typ = magnet_move_s(1.5, _MAG)                         # first point: field, per-file, per-run one-offs
     assert rc.points[0] == pytest.approx(expect + typ + read_field_s(_GAUSS) + rt.PER_FILE_S + rt.PER_RUN_S)
-    assert rc.tail_s == pytest.approx(magnet_move_s(1.5, _MAG, with_field=False)[0])
-    assert rc.worst_extra_s == pytest.approx(worst - typ)
+    assert rc.tail_s == pytest.approx(magnet_move_s(1.5, _MAG, with_field=False))
     with_temp = pulsed.run_costs(pulsed_state(enable_temperature=True, temperature_sensor_uids="MB1.T1"))
     assert with_temp.points[1] - rc.points[1] == pytest.approx(rt.TEMP_READ_S)
 
 
 def test_pulsed_magnet_parking_guard_matches_the_loop():
     same = pulsed.run_costs(pulsed_state(sense_current_values="1e-4, 2e-4"))      # 2 files, one field
-    assert same.parts["magnet"] == pytest.approx(magnet_move_s(1.5, _MAG)[0])     # 2nd file: no move
+    assert same.parts["magnet"] == pytest.approx(magnet_move_s(1.5, _MAG))     # 2nd file: no move
     assert same.parts["per-file"] == pytest.approx(2 * rt.PER_FILE_S)
     assert same.parts["field read"] == pytest.approx(2 * read_field_s(_GAUSS))
     flip = pulsed.run_costs(pulsed_state(magnet_current_A="1.5, -1.5"))
-    assert flip.parts["magnet"] == pytest.approx(magnet_move_s(1.5, _MAG)[0] + magnet_move_s(3.0, _MAG)[0])
+    assert flip.parts["magnet"] == pytest.approx(magnet_move_s(1.5, _MAG) + magnet_move_s(3.0, _MAG))
 
 
 def test_summary_line_is_the_run_costs_total(tmp_path):
@@ -100,25 +99,22 @@ def test_2h_uses_typical_lock_one_shared_window_and_rebuilds_the_6221_every_file
               + 8 * rt.GPIB_TXN_S + rt.POINT_OVERHEAD_S)
     assert rc.points[1] == pytest.approx(expect)
     assert rc.parts["PLL lock"] == pytest.approx(n * rt.LOCK_TYP_S)             # not the 5 s timeout
-    typ, worst = magnet_move_s(1.5, _MAG)
-    assert rc.worst_extra_s == pytest.approx(n * (5.0 - rt.LOCK_TYP_S) + (worst - typ))
+    typ = magnet_move_s(1.5, _MAG)
     assert rc.points[0] == pytest.approx(expect + ac_source_restart_s() + typ + read_field_s(_GAUSS)
                                          + rt.PER_FILE_S + rt.PER_RUN_S)
 
 
-def test_2h_lock_timeout_below_typical_bounds_the_wait_and_adds_no_worst_case():
+def test_2h_lock_timeout_below_typical_bounds_the_wait():
     state = h2_state(lock_timeout_s=0.2)
     rc = h2.run_costs(state)
     assert rc.parts["PLL lock"] == pytest.approx(len(state["amplitude_list"]) * 0.2)
-    typ, worst = magnet_move_s(1.5, _MAG)
-    assert rc.worst_extra_s == pytest.approx(worst - typ)
 
 
 def test_2h_sense_outer_magnet_inner_and_no_parking_guard():
     rc = h2.run_costs(h2_state(sense_current_values="1e-4, 2e-4"))              # 2 files, same field
     assert rc.parts["6221 rebuild"] == pytest.approx(2 * ac_source_restart_s())
     # set_magnet_current() runs every file: the 2nd is a zero move (1 ramp step + settle floor)
-    assert rc.parts["magnet"] == pytest.approx(magnet_move_s(1.5, _MAG)[0] + magnet_move_s(0.0, _MAG)[0])
+    assert rc.parts["magnet"] == pytest.approx(magnet_move_s(1.5, _MAG) + magnet_move_s(0.0, _MAG))
 
 
 # ── sot_pulsed_switching_6221 ───────────────────────────────────────────────
@@ -139,7 +135,7 @@ def test_6221_only_file_order_is_sense_outer_magnet_inner():
     rc = p6221.run_costs(p6221_state(magnet_current_A="1.5, -1.5", sense_current_values="1e-4, 2e-4"))
     assert rc.parts["6221 rebuild"] == pytest.approx(4 * ac_source_restart_s())
     # 0 -> 1.5, 1.5 -> -1.5, -1.5 -> 1.5, 1.5 -> -1.5
-    assert rc.parts["magnet"] == pytest.approx(magnet_move_s(1.5, _MAG)[0] + 3 * magnet_move_s(3.0, _MAG)[0])
+    assert rc.parts["magnet"] == pytest.approx(magnet_move_s(1.5, _MAG) + 3 * magnet_move_s(3.0, _MAG))
 
 
 # ── sot_nonlocal_switching ──────────────────────────────────────────────────
@@ -150,19 +146,18 @@ def test_nlsw_two_magnet_moves_per_init_current_and_zero_amp_points_fire_nothing
     rc = nlsw.run_costs(state)
     per_file = 3 + 1
     assert len(rc.points) == 2 * per_file
-    t5 = magnet_move_s(5.0, _MAG)[0]
+    t5 = magnet_move_s(5.0, _MAG)
     assert rc.parts["magnet"] == pytest.approx(4 * t5)                            # init + hold, twice
     assert rc.parts["field read"] == pytest.approx(4 * read_field_s(_GAUSS))
-    assert rc.worst_extra_s == pytest.approx(4 * (magnet_move_s(5.0, _MAG)[1] - t5))
     fired, zero = rc.points[3], rc.points[2]                                      # +2 mA, 0 A (file 0)
     assert fired - zero == pytest.approx(wave_pulse_s(1e-3) + state["delay_after_pulse_s"])
-    assert rc.tail_s == pytest.approx(magnet_move_s(0.0, _MAG, with_field=False)[0])
+    assert rc.tail_s == pytest.approx(magnet_move_s(0.0, _MAG, with_field=False))
 
 
 def test_nlsw_no_init_leaves_the_magnet_out_of_the_estimate(tmp_path):
     state = nlsw_state(tmp_path)
     rc = nlsw.run_costs(state)
-    assert "magnet" not in rc.parts and rc.tail_s == 0.0 and rc.worst_extra_s == 0.0
+    assert "magnet" not in rc.parts and rc.tail_s == 0.0
     assert rc.points[0] == pytest.approx(rc.points[-1] - state["delay_after_pulse_s"]
                                          - wave_pulse_s(1e-3) + rt.PER_FILE_S + rt.PER_RUN_S)
     info, _, _ = nlsw.build_summary(state)

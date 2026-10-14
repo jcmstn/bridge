@@ -243,9 +243,9 @@ def run_costs(state: dict) -> RunCost:
     rc.tail("ramp", max(1, int(abs(state["sense_current_A"]) / 1e-4)) * 0.02)
     if state.get("enable_field"):       # park the magnet before sample 1, ramp it down at the end
         mcfg = _magnet_cfg(state)
-        typ, worst = magnet_move_s(state["magnet_current_A"], mcfg)
-        rc.at("magnet", typ, 0, worst_extra=worst - typ)
-        rc.tail("ramps", magnet_move_s(state["magnet_current_A"], mcfg, with_field=False)[0])
+        typ = magnet_move_s(state["magnet_current_A"], mcfg)
+        rc.at("magnet", typ, 0)
+        rc.tail("ramps", magnet_move_s(state["magnet_current_A"], mcfg, with_field=False))
     return rc
 
 
