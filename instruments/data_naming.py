@@ -495,12 +495,17 @@ def read_raw(raw_path: Path) -> pd.DataFrame:
     the Long Name + Units two-row column header, and return a DataFrame
     keyed by the original `name_unit` column labels (the Units row is
     re-joined onto the name, not kept as a level). Empty/header-only files
-    yield an empty DataFrame.
+    yield an empty DataFrame. Files with no Units row (migrated legacy
+    exports) are detected — a second row that isn't all known units/blank
+    is data — and read with the single header row instead.
     """
+    encoding = text_encoding(raw_path)
     try:
-        df = pd.read_csv(raw_path, comment="#", header=[0, 1], encoding=text_encoding(raw_path))
+        df = pd.read_csv(raw_path, comment="#", header=[0, 1], encoding=encoding)
     except pd.errors.EmptyDataError:
         return pd.DataFrame()
+    if not all(str(u) in _COLUMN_UNITS or str(u).startswith("Unnamed") for _, u in df.columns):
+        return pd.read_csv(raw_path, comment="#", encoding=encoding)
     df.columns = [
         name if not unit or str(unit).startswith("Unnamed") else f"{name}_{unit}"
         for name, unit in df.columns

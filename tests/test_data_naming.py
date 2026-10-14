@@ -227,6 +227,11 @@ def test_raw_and_index_are_utf8_and_legacy_cp1252_still_reads(tmp_path: Path) ->
     legacy = ctx.raw_path.with_name("legacy.csv")
     legacy.write_text("# comment: a–b\nB\nT\n1.0\n", encoding="cp1252")
     assert read_raw(legacy)["B_T"].tolist() == [1.0]
+
+    # Migrated LabVIEW exports have no Units row: the first data row stays data.
+    no_units = ctx.raw_path.with_name("no_units.csv")
+    no_units.write_text("# run: 1\ncurrent_A,voltage_V\n-5e-05,2e-08\n1e-05,3e-08\n")
+    assert read_raw(no_units)["current_A"].tolist() == [-5e-05, 1e-05]
     index_path = tmp_path / "A" / "index.csv"
     index_path.write_text("run,comment\n1,a–b\n", encoding="cp1252")
     rows, _ = _read_index(index_path)
