@@ -22,7 +22,7 @@ reference. This file is the map, not a second copy of them.
 | Command | Opens |
 |---------|-------|
 | `uv run python bridge_tui.py` | The TUI menu — every DC / MFLI / SOT program as a card (description, collapsible wiring schematic, Launch) in three suite columns, plus the shared "Recent runs" table; quitting a program returns to the menu — Textual |
-| `uv run python sot/sot_pulsed_switching_tui.py` | SOT pulsed switching — one form, two toggles: write pulse = 4200A PMU \| 6221 WAVE, read = DC R_xy (6221 ±I + 2182) \| lock-in harmonic (6221 AC + MFLI). The three valid combinations are the former programs `SOTPS` / `SOT2H` / `SOT1I` (see §2 "Merged programs"). `sot_pulsed_switching_2h_tui.py` / `sot_pulsed_switching_6221_tui.py` still run and open this form on their mode — Textual |
+| `uv run python sot/sot_pulsed_switching_tui.py` | SOT pulsed switching — one form, two toggles: write pulse = 4200A PMU \| 6221, read = DC R_xy \| lock-in harmonic (6221 AC + MFLI). The four combinations are `SOTPS` / `SOT2H` / `SOT1I` (the former programs) and `SOTPD` (6221 Pulse Delta write + Delta read, 2182A on the 6221's RS-232) (see §2 "Merged programs"). `sot_pulsed_switching_2h_tui.py` / `sot_pulsed_switching_6221_tui.py` still run and open this form on their mode — Textual |
 | `uv run python sot/sot_nonlocal_switching_tui.py` | Nonlocal spin-current switching, 6221 + 2182A only (optional Kepco field initialization, then a sweep of single-lobe 0 → ±I → 0 WAVE write pulses + DC nonlocal read, current-reversal averaged unless switched off; type `NLSW`) — Textual. `sot/sot_nonlocal_switching.py` also runs standalone (plain CSV) |
 | `uv run python dc/dc_rt_log_tui.py` | R vs T log — fixed ±I reversal (6221 + 2182) sampled back to back while the temperature drifts freely (optionally toward one iTC target sent at start — no wait); MercuryiTC read before and after each sample (`temperature_N_drift_K` per point), one R-vs-T panel per reading sensor; stops on Stop / max duration / a T crossing, Stop saves as `completed` (type `RT`) — Textual |
 | `uv run python tools/curate_sample.py <sample>` | Post-hoc curation TUI: mark runs `paper_include` / `figure_ref` |
@@ -86,7 +86,7 @@ headers, filenames and PNG names are exactly what each program wrote before:
 | Form (module) | Toggle | Mode → engine module (type code) |
 |---|---|---|
 | `mfli/mfli_dual_harmonic_tui.py` | `ac_source` | `mfli` → itself (`HARM`); `6221` → `mfli_dual_harmonic_6221_tui` (`HARM6`) |
-| `sot/sot_pulsed_switching_tui.py` | `pulse_source` × `read_mode` | `pmu`+`dc` → itself (`SOTPS`); `pmu`+`harmonic` → `sot_pulsed_switching_2h_tui` (`SOT2H`); `6221`+`harmonic` → `sot_pulsed_switching_6221_tui` (`SOT1I`); `6221`+`dc` is blocked by the summary |
+| `sot/sot_pulsed_switching_tui.py` | `pulse_source` × `read_mode` | `pmu`+`dc` → itself (`SOTPS`); `pmu`+`harmonic` → `sot_pulsed_switching_2h_tui` (`SOT2H`); `6221`+`harmonic` → `sot_pulsed_switching_6221_tui` (`SOT1I`); `6221`+`dc` → `sot_pulsed_switching_pdelta_tui` (`SOTPD`) |
 
 How it fits together:
 - The form's `DEFAULTS` / `*_FIELDS` are the union of the engines'; the
@@ -190,7 +190,7 @@ itself.
 ### 3a. MercuryiTC setpoints — an outer loop around the whole program
 
 Every series program (Hall, IV, gate sweep, spin valve, DIFFR, HARM/HARM6,
-SOTPS/SOT2H/SOT1I, NLSW) has the shared temperature card
+SOTPS/SOT2H/SOT1I/SOTPD, NLSW) has the shared temperature card
 (`tui_common.temperature_card`):
 log switch, software max T, and optionally "Drive iTC to setpoint(s)" with a
 setpoint list, settle margin (mK) and hold time (s). With setpoints on,
@@ -478,7 +478,7 @@ units sub-header row as data. Use `read_raw()`.
 | Menu card text or schematic | `{NAME}_DESCRIPTION` / `{NAME}_SCHEMATIC` in the TUI module; card title in `bridge_tui.py` `PROGRAMS` |
 | Anything every TUI form / run screen does the same way (settings file, sample picker, identity bar, abort/back, status/comment prompt, run history, run-screen CSS) | `instruments/tui_common.py` only |
 | How a program runs (connect, series loop, teardown, per-run finalize) | its `run_plan()` in `{suite}/{name}_tui.py` — the `RunScreen` calls it; the per-run record/finalize block is `data_naming.record_run()` |
-| A mode of a merged program (HARM/HARM6, SOTPS/SOT2H/SOT1I) | its engine module for the run itself; the toggle, card visibility and settings fallback in the merged form's module |
+| A mode of a merged program (HARM/HARM6, SOTPS/SOT2H/SOT1I/SOTPD) | its engine module for the run itself; the toggle, card visibility and settings fallback in the merged form's module |
 | The SR830 lock-in mode (HARM/HARM6/SOT2H/SOT1I) | form → `sr830_cfgs()` / `_sr830_checks()` in `mfli/mfli_dual_harmonic_tui.py` or `sot/sot_pulsed_switching_tui.py`; connect/teardown in the engine `*_tui.py` `run_plan`; per-point reads at the `lockin` branches in the engine `run_measurement`; instrument side `instruments/sr830.py` (`SR830Read`, `config_from_form`) |
 | MercuryiTC setpoint control (outer loop, settle wait, Skip, max T) | `instruments/temperature_control.py` (fields, summary, step runner) + `instruments/mercury_itc.py` (commands, wait, max-T cutoff); TUI side: `tui_common` (`temperature_card`, `do_run`, Skip button) |
 | The sweep-size cap (a form error instead of a frozen form) | `dc/dc_sweep_utils.py` `MAX_SWEEP_POINTS` / `check_sweep_size` |

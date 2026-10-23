@@ -431,3 +431,142 @@ def acquire_reversal_averaged_voltage(
     result = {ch: _decompose(ch) for ch in channels}
     result["n_reversals"] = n_used
     return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pulse Delta write pulse + Delta read  (6221 + 2182A on the 6221's RS-232)
+# ─────────────────────────────────────────────────────────────────────────────
+# Both modes need the 2182A on a null-modem RS-232 cable to the 6221 plus the
+# Trigger Link (6221 User's Manual 622x-900-01, Section 5, Fig. 5-2/5-4).
+# Selecting RS-232 on the 2182A disables its GPIB, so the PC only ever talks
+# to the 6221 here; the 2182A is reached through SYST:COMM:SER:SEND. pymeasure
+# has no Delta / Pulse Delta support — these are raw SCPI from Table 5-2/5-3.
+
+# ponytail: 50 Hz mains (lab is in Sweden); Pulse Delta cycles are line-synced, 60 Hz → 1/60
+LINE_PERIOD_S = 0.02
+PDEL_WIDTH_RANGE_S = (50e-6, 12e-3)     # SOUR:PDEL:WIDT limits (manual Table 5-3)
+DELTA_NPLC_RANGE = (1, 50)              # 2182A rate must be an integer PLC for Delta, else 1 PLC
+
+
+@dataclass
+class PulseDeltaConfig:
+    """ONE write pulse via Pulse Delta: count 1, I-Lo = 0, so the low "pulses"
+    of the low-high-low cycle are 0 A and the output is a single 0 → I → 0
+    pulse, synchronised to the power line. Pulse Delta has no rise-time
+    setting; the only edge controls are the output response speed
+    (``OUTP:RESP FAST`` ≈ 2-3 µs / ``SLOW`` ≈ 100 µs settling, manual
+    Appendix A) and the analog filter (``CURR:FILT``, 33 pF across the output
+    — only slows a high-impedance load, manual "Analog filter")."""
+    width_s: float          = 1e-3    # 50 µs - 12 ms [s]
+    compliance_V: float     = 5.0     # pulse voltage compliance [V]
+    response: str           = "FAST"  # OUTP:RESP FAST | SLOW
+    analog_filter: bool     = False   # CURR:FILT ON | OFF
+    source_delay_s: float   = 16e-6   # SOUR:PDEL:SDEL — when the (discarded) 2182A read triggers
+    interval_plc: int       = 5       # SOUR:PDEL:INT — cycle length; 5 PLC is the minimum
+
+
+def check_2182a_on_serial(source: Keithley6221) -> None:
+    """Raise unless the 6221 sees a Delta-capable 2182A on its RS-232 port."""
+    if source.ask("SOUR:PDEL:NVPR?").strip() != "1":
+        raise RuntimeError(
+            "6221 does not see a 2182A on its RS-232 port (SOUR:PDEL:NVPR? = 0). Set the "
+            "2182A interface to RS-232, connect it to the 6221 with a null-modem cable + the "
+            "Trigger Link, and make sure the 6221 itself is on GPIB/LAN, not RS-232.")
+
+
+def _wait_buffer(source: Keithley6221, n: int, timeout_s: float,
+                 stop_event: Optional[threading.Event]) -> bool:
+    """Poll TRAC:POIN:ACT? until the 6221 buffer holds `n` readings. True once
+    it does; False on timeout or abort (the caller disarms either way)."""
+    t_end = time.monotonic() + timeout_s
+    while time.monotonic() < t_end:
+        if int(float(source.ask("TRAC:POIN:ACT?"))) >= n:
+            return True
+        if stop_event is not None and stop_event.is_set():
+            return False
+        time.sleep(0.01)
+    return False
+
+
+def _arm(source: Keithley6221, mode: str) -> None:
+    """SOUR:<mode>:ARM, check it took (a settings conflict leaves it unarmed), INIT."""
+    source.write(f"SOUR:{mode}:ARM")
+    if source.ask(f"SOUR:{mode}:ARM?").strip() != "1":
+        source.write("SOUR:SWE:ABOR")
+        raise RuntimeError(f"6221 refused to arm {mode} — check SYST:ERR? (settings conflict?)")
+    source.write("INIT:IMM")
+
+
+def fire_pdelta_pulse(source: Keithley6221, cfg: PulseDeltaConfig, pulse_current_A: float,
+                      stop_event: Optional[threading.Event] = None,
+                      timeout_margin_s: float = 0.5) -> dict:
+    """Fire one Pulse Delta write pulse of `pulse_current_A` (signed, ±105 mA)
+    and wait until the cycle is done. The Pulse Delta reading the 2182A takes
+    is never fetched — this is a write, not a measurement. Leaves the 6221
+    disarmed (SOUR:SWE:ABOR, output off). Returns ``{"pulse_completed": bool}``
+    — False means the buffer never saw the cycle's reading within one cycle +
+    `timeout_margin_s` (or an abort)."""
+    source.write("SOUR:SWE:ABOR")
+    source.write(f"CURR:COMP {cfg.compliance_V:g}")
+    source.write(f"OUTP:RESP {cfg.response}")
+    source.write(f"CURR:FILT {'ON' if cfg.analog_filter else 'OFF'}")
+    for cmd in (f"HIGH {pulse_current_A:g}", "LOW 0", f"WIDT {cfg.width_s:g}",
+                f"SDEL {cfg.source_delay_s:g}", "COUN 1", "RANG BEST",
+                f"INT {cfg.interval_plc:d}", "SWE OFF", "LME 1"):
+        source.write(f"SOUR:PDEL:{cmd}")
+    source.write("TRAC:CLE")
+    source.write("TRAC:POIN 1")
+    _arm(source, "PDEL")
+    done = _wait_buffer(source, 1, cfg.interval_plc * LINE_PERIOD_S + timeout_margin_s, stop_event)
+    source.write("SOUR:SWE:ABOR")
+    if not done:
+        log.warning("Pulse Delta cycle did not complete (I=%.4g A) — the pulse may not have fired.",
+                    pulse_current_A)
+    return {"pulse_completed": done}
+
+
+def acquire_delta_voltage(source: Keithley6221, sense_current_A: float, n_readings: int,
+                          delay_s: float, nplc: int,
+                          stop_event: Optional[threading.Event] = None,
+                          timeout_margin_s: float = 2.0) -> dict:
+    """The R_xy read in Delta mode: the 6221 alternates ±`sense_current_A`, the
+    2182A (rate `nplc`, an integer) is triggered over the Trigger Link after
+    `delay_s` each flip, and the 6221 builds `n_readings` 3-point delta
+    voltages into its buffer — the instrument's own current reversal (cancels
+    thermal EMF / offset). Waits for every reading, then disarms.
+
+    Returns ``{"mean", "sem", "n_readings"}`` (V_odd only — Delta mode has no
+    V_even). Consecutive delta readings share A/D samples (moving average),
+    so ``sem`` is optimistic. Raises if no reading arrived."""
+    source.write("SOUR:SWE:ABOR")
+    # Pulse Delta's arm set its own 2182A integration rate — restore ours.
+    source.write(f'SYST:COMM:SER:SEND "VOLT:NPLC {nplc:d}"')
+    source.write(f"SOUR:DELT:HIGH {sense_current_A:g}")     # I-Lo follows as -HIGH
+    source.write(f"SOUR:DELT:DEL {delay_s:g}")
+    source.write(f"SOUR:DELT:COUN {n_readings:d}")
+    source.write("SOUR:DELT:CAB ON")
+    source.write("TRAC:CLE")
+    source.write(f"TRAC:POIN {n_readings:d}")
+    source.write("FORM:ELEM READ")
+    _arm(source, "DELT")
+    _wait_buffer(source, n_readings, delta_read_s(n_readings, delay_s, nplc) * 2 + timeout_margin_s,
+                 stop_event)
+    raw = source.ask("TRAC:DATA?").strip()
+    source.write("SOUR:SWE:ABOR")
+    v = np.array([float(x) for x in raw.split(",") if x.strip()])
+    if v.size == 0:
+        raise RuntimeError("Delta read returned no readings — check the 2182A link / compliance.")
+    sem = float(np.std(v, ddof=1) / np.sqrt(v.size)) if v.size >= 2 else float("nan")
+    return {"mean": float(np.mean(v)), "sem": sem, "n_readings": int(v.size)}
+
+
+def pdelta_pulse_s(cfg: PulseDeltaConfig) -> float:
+    """Modelled wall time of one ``fire_pdelta_pulse()``: 18 writes/queries + the
+    arm (the 6221 configures the 2182A over RS-232) + one line-synced cycle."""
+    return 18 * GPIB_TXN_S + ARM_S + cfg.interval_plc * LINE_PERIOD_S
+
+
+def delta_read_s(n_readings: int, delay_s: float, nplc: int) -> float:
+    """Modelled wall time of the Delta acquisition itself: n + 2 A/D conversions
+    (the first delta needs 3 points), each after one polarity flip + `delay_s`."""
+    return (n_readings + 2) * (delay_s + nplc * LINE_PERIOD_S)

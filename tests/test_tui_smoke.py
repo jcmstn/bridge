@@ -29,6 +29,8 @@ APPS = [
     ("sot.sot_pulsed_switching_tui", "SOTPulsedSwitchingApp", {"read_mode": "harmonic"}, "SOT2H"),
     ("sot.sot_pulsed_switching_tui", "SOTPulsedSwitchingApp",
      {"pulse_source": "6221", "read_mode": "harmonic"}, "SOT1I"),
+    ("sot.sot_pulsed_switching_tui", "SOTPulsedSwitchingApp",
+     {"pulse_source": "6221", "read_mode": "dc"}, "SOTPD"),
     ("sot.sot_nonlocal_switching_tui", "NonlocalSwitchingApp", {}, "NLSW"),
 ]
 
@@ -81,6 +83,7 @@ HUGE_SWEEP = {
     "SOTPS": ("amplitude_step_V", "1e-12"),
     "SOT2H": ("amplitude_step_V", "1e-12"),
     "SOT1I": ("pulse_current_step_A", "1e-12"),
+    "SOTPD": ("pulse_current_step_A", "1e-12"),
     "NLSW": ("pulse_current_step_A", "1e-12"),
 }
 

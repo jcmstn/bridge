@@ -37,6 +37,7 @@ from textual.widgets import (
 
 import sot.sot_pulsed_switching_2h_tui as h2
 import sot.sot_pulsed_switching_6221_tui as i1
+import sot.sot_pulsed_switching_pdelta_tui as pd
 from sot.sot_pulsed_switching import (
     _READ_COMPLIANCE_CEILING_V,
     _READ_CURRENT_CEILING_A,
@@ -116,9 +117,9 @@ SETTINGS_PATH = _DEFAULT_DATA_DIR / "sot_pulsed_switching_tui_settings.json"
 MEASUREMENT_TYPE = "SOTPS"
 
 SOT_PULSED_DESCRIPTION = (
-    "Write: 4200A PMU (ns, RPM1, KULT bridge_sot_pulse) or 6221 WAVE (µs–ms). Read: "
-    "DC R_xy (6221 ±I + 2182) or lock-in (6221 AC + MFLI or SR830s). Kepco static field, read "
-    "by Lake Shore 475."
+    "Write: 4200A PMU (ns, RPM1, KULT bridge_sot_pulse) or 6221 (µs–ms; WAVE, or Pulse Delta "
+    "with the DC read). Read: DC R_xy (6221 ±I + 2182; 6221 Delta with a 6221 pulse) or lock-in "
+    "(6221 AC + MFLI or SR830s). Kepco static field, read by Lake Shore 475."
 )
 
 # Wiring schematic — shown on this program's card in bridge_tui.py.
@@ -130,6 +131,9 @@ SOT_PULSED_SCHEMATIC = """\
     COMMON BUS ──▶ I- pad   (PMU outer shell + 6221 output LO land here)
   Write pulse = 6221 WAVE   (SOT1I — no 4200A)
     6221 HI ──▶ I+ pad , LO ──▶ I- pad ; ONE square cycle = the write pulse
+  Write pulse = 6221 Pulse Delta + Delta read   (SOTPD — no 4200A)
+    6221 HI ──▶ I+ pad , LO ──▶ I- pad ; 2182A ch1 ──▶ Hall arms
+    2182A ◀─RS-232 null-modem + Trigger Link─▶ 6221 ; 2182A interface = RS-232
 
   KEITHLEY 6221  HI ──▶ I+ pad , LO ──▶ common bus / I- pad — OFF while pulsing
   Read = DC R_xy     KEITHLEY 2182 ──▶ transverse (Hall) arms (V_xy, floating)
@@ -891,8 +895,8 @@ def save_run_png(plan: MeasurementPlan, records: list[dict], png_path: Path, com
     _save_measurement_png(records, png_path, plan=plan, comment=comment)
 
 
-# ── pulse-source × read toggles (one program, three engines) ──────────────
-# One form for the three pulsed-switching programs. "Write pulse" picks the
+# ── pulse-source × read toggles (one program, four engines) ───────────────
+# One form for the four pulsed-switching programs. "Write pulse" picks the
 # 4200A PMU (ns pulses) or the 6221 WAVE (µs–ms pulses); "Read" picks the DC
 # R_xy read (6221 ±I + 2182) or the lock-in harmonic read (6221 AC + MFLI).
 # Each valid combination IS one of the former programs — its engine, type
@@ -900,19 +904,21 @@ def save_run_png(plan: MeasurementPlan, records: list[dict], png_path: Path, com
 #     4200A + DC        -> SOTPS  (this module's functions above)
 #     4200A + harmonic  -> SOT2H  (sot_pulsed_switching_2h_tui)
 #     6221  + harmonic  -> SOT1I  (sot_pulsed_switching_6221_tui)
-# 6221 + DC is not a program here (a 6221 pulse + 2182A read is the nonlocal-
-# switching program's). Two form fields mean different things per engine and
-# get their own ids, renamed back to the engine's key before it sees the state:
-# the 6221 pulse's width (ms, `wave_pulse_width_s`) vs the PMU's (ns,
-# `pulse_width_s`), and the lock-in read's settle-after-PLL-lock
-# (`lock_settle_s`) vs the DC read's settle-after-enable.
+#     6221  + DC        -> SOTPD  (sot_pulsed_switching_pdelta_tui: Pulse Delta
+#                                  write + Delta read, 2182A on the 6221's RS-232)
+# Two form fields mean different things per engine and get their own ids,
+# renamed back to the engine's key before it sees the state: the 6221 pulse's
+# width (ms, `wave_pulse_width_s`) vs the PMU's (ns, `pulse_width_s`), and the
+# lock-in read's settle-after-PLL-lock (`lock_settle_s`) vs the DC read's
+# settle-after-enable.
 
-PULSE_SOURCES = [("Keithley 4200A PMU (ns pulses)", "pmu"), ("Keithley 6221 WAVE (µs–ms pulses)", "6221")]
+PULSE_SOURCES = [("Keithley 4200A PMU (ns pulses)", "pmu"), ("Keithley 6221 (µs–ms pulses)", "6221")]
 READ_MODES = [("DC R_xy — 6221 ±I + 2182", "dc"), ("Lock-in harmonic — 6221 AC + MFLI", "harmonic")]
 _PS = sys.modules[__name__]
-_ENGINES = {("pmu", "dc"): _PS, ("pmu", "harmonic"): h2, ("6221", "harmonic"): i1}
+_ENGINES = {("pmu", "dc"): _PS, ("pmu", "harmonic"): h2, ("6221", "harmonic"): i1, ("6221", "dc"): pd}
 _FORM_IDS = {i1: {"pulse_width_s": "wave_pulse_width_s", "settle_after_enable_s": "lock_settle_s"},
-             h2: {"settle_after_enable_s": "lock_settle_s"}}    # engine key -> form id
+             h2: {"settle_after_enable_s": "lock_settle_s"},
+             pd: {"pulse_width_s": "wave_pulse_width_s"}}    # engine key -> form id
 
 
 def _form_keys(engine, keys) -> list:
@@ -923,7 +929,7 @@ def _as_form(engine, d: dict) -> dict:
     return dict(zip(_form_keys(engine, d), d.values()))
 
 
-_ENGINE_FIELDS = {eng: set(_form_keys(eng, eng.DEFAULTS)) for eng in (h2, i1)} | {_PS: set(DEFAULTS)}
+_ENGINE_FIELDS = {eng: set(_form_keys(eng, eng.DEFAULTS)) for eng in (h2, i1, pd)} | {_PS: set(DEFAULTS)}
 # Lock-in toggle (harmonic read only): the MFLI, or SR830s on GPIB — one per
 # harmonic read (SOT2H: A = 1f, B = 2f; SOT1I: A only), every unit on the
 # 6221 marker into REF IN. Same type codes; the header records lockin: SR830.
@@ -934,14 +940,17 @@ _MFLI_LOCKIN_FIELDS = {"mfli_host", "mfli_port", "mfli_device", "aux_input_ch", 
                        "extref_index", "pll_demod_index", "automode", "input_ch",
                        "input_range_V", "demod1_index", "demod2_index", "demod_index"}
 
-DEFAULTS = {**_as_form(i1, i1.DEFAULTS), **_as_form(h2, h2.DEFAULTS), **DEFAULTS, **SR830_DEFAULTS,
+DEFAULTS = {**_as_form(pd, pd.DEFAULTS), **_as_form(i1, i1.DEFAULTS), **_as_form(h2, h2.DEFAULTS),
+            **DEFAULTS, **SR830_DEFAULTS,
             "pulse_source": "pmu", "read_mode": "dc", "lockin": "mfli"}
-NUMERIC_FIELDS = {**_as_form(i1, i1.NUMERIC_FIELDS), **_as_form(h2, h2.NUMERIC_FIELDS), **NUMERIC_FIELDS,
+NUMERIC_FIELDS = {**_as_form(pd, pd.NUMERIC_FIELDS), **_as_form(i1, i1.NUMERIC_FIELDS),
+                  **_as_form(h2, h2.NUMERIC_FIELDS), **NUMERIC_FIELDS,
                   "sr830_sensitivity_V": float}
-TEXT_FIELDS = list(dict.fromkeys(TEXT_FIELDS + h2.TEXT_FIELDS + i1.TEXT_FIELDS
+TEXT_FIELDS = list(dict.fromkeys(TEXT_FIELDS + h2.TEXT_FIELDS + i1.TEXT_FIELDS + pd.TEXT_FIELDS
                                  + ["sr830_a_visa", "sr830_b_visa"]))
 OPTIONAL_NUMERIC_FIELDS = list(dict.fromkeys(
-    OPTIONAL_NUMERIC_FIELDS + h2.OPTIONAL_NUMERIC_FIELDS + i1.OPTIONAL_NUMERIC_FIELDS))
+    OPTIONAL_NUMERIC_FIELDS + h2.OPTIONAL_NUMERIC_FIELDS + i1.OPTIONAL_NUMERIC_FIELDS
+    + pd.OPTIONAL_NUMERIC_FIELDS))
 
 
 def mode(state: dict) -> tuple[str, str]:
@@ -949,11 +958,8 @@ def mode(state: dict) -> tuple[str, str]:
 
 
 def _engine_state(state: dict):
-    """(engine, the state with that engine's own keys), or (None, state) for
-    a combination that isn't a program."""
-    engine = _ENGINES.get(mode(state))
-    if engine is None:
-        return None, state
+    """(engine, the state with that engine's own keys)."""
+    engine = _ENGINES[mode(state)]
     state = dict(state)
     for key, form_id in _FORM_IDS.get(engine, {}).items():
         if form_id in state:
@@ -967,9 +973,7 @@ def _uses_sr830(engine, state: dict) -> bool:
 
 def mode_errors(state: dict, errors: list[str]) -> list[str]:
     """Parse errors of the active engine's (and lock-in's) fields only."""
-    engine = _ENGINES.get(mode(state))
-    if engine is None:
-        return errors
+    engine = _ENGINES[mode(state)]
     hidden = set(DEFAULTS) - _ENGINE_FIELDS[engine]
     if _uses_sr830(engine, state):
         hidden = (hidden - set(SR830_DEFAULTS)) | _MFLI_LOCKIN_FIELDS
@@ -1017,16 +1021,11 @@ def _sr830_checks(engine, state: dict, info: list[str], errors: list[str]) -> No
 
 def resolve_state(state: dict) -> dict:
     engine, state = _engine_state(state)
-    if engine is None:
-        return state
     return (_resolve_state_ps if engine is _PS else engine.resolve_state)(state)
 
 
 def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     engine, state = _engine_state(state)
-    if engine is None:
-        return [], [], ["A 6221 write pulse with the DC 2182 read is not a program here — use the "
-                        "lock-in read, or the nonlocal-switching program for 6221 pulses + a 2182A read."]
     if not _uses_sr830(engine, state):
         return (_build_summary_ps if engine is _PS else engine.build_summary)(state)
     info, warnings, errors = engine.build_summary(_sr830_state(engine, state))
@@ -1037,16 +1036,12 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
 
 def compute_filename_preview(state: dict) -> Optional[str]:
     engine, state = _engine_state(state)
-    if engine is None:
-        return None
     return (_preview_ps if engine is _PS else engine.compute_filename_preview)(state)
 
 
 def build_plan(state: dict, data_root: Path):
     """The active combination's plan (its engine's own MeasurementPlan type)."""
     engine, state = _engine_state(state)
-    if engine is None:
-        raise ValueError("6221 write pulse + DC read is not a program")
     if not _uses_sr830(engine, state):
         return (_build_plan_ps if engine is _PS else engine.build_plan)(state, data_root)
     state = _sr830_state(engine, state)
@@ -1058,7 +1053,7 @@ def build_plan(state: dict, data_root: Path):
 
 def engine(plan):
     """The module that runs `plan` — its run_plan / header / PNG / type code / RunScreen."""
-    for eng in (h2, i1):
+    for eng in (h2, i1, pd):
         if isinstance(plan, eng.MeasurementPlan):
             return eng
     return _PS
@@ -1101,8 +1096,10 @@ class SOTPulsedSwitchingApp(MeasurementApp):
         "mode_pmu_pulse": lambda p, r, l: p == "pmu",
         "mode_pmu_config": lambda p, r, l: p == "pmu",
         "mode_6221_pulse": lambda p, r, l: p == "6221",
-        "mode_dc_read": lambda p, r, l: r == "dc",
-        "mode_dc_instruments": lambda p, r, l: r == "dc",
+        "mode_dc_read": lambda p, r, l: (p, r) == ("pmu", "dc"),
+        "mode_dc_instruments": lambda p, r, l: (p, r) == ("pmu", "dc"),
+        "mode_delta_read": lambda p, r, l: (p, r) == ("6221", "dc"),
+        "mode_pdelta_settings": lambda p, r, l: (p, r) == ("6221", "dc"),
         "mode_lockin_read": lambda p, r, l: r == "harmonic",
         "mode_lockin_filter": lambda p, r, l: r == "harmonic",
         "mode_mfli": lambda p, r, l: r == "harmonic" and l == "mfli",
@@ -1167,7 +1164,8 @@ class SOTPulsedSwitchingApp(MeasurementApp):
                         "Write pulse × read",
                         select_field("pulse_source", "Write pulse", PULSE_SOURCES, DEFAULTS["pulse_source"]),
                         select_field("read_mode", "Read", READ_MODES, DEFAULTS["read_mode"],
-                                     hint="4200A+DC → SOTPS · 4200A+lock-in → SOT2H · 6221+lock-in → SOT1I"),
+                                     hint="4200A+DC → SOTPS · 4200A+lock-in → SOT2H · 6221+lock-in → SOT1I · "
+                                          "6221+DC → SOTPD (Pulse Delta)"),
                         # ONE switch for both pulse sources — a twin per pulse card
                         # shared the id, and the hidden one won in parse_state()
                         switch_field("amplitude_bidirectional",
@@ -1192,7 +1190,7 @@ class SOTPulsedSwitchingApp(MeasurementApp):
                         id="mode_pmu_pulse",
                     )
                     yield card(
-                        "Write pulse (6221 WAVE, hardware-timed)",
+                        "Write pulse (6221, hardware-timed)",
                         field("pulse_current_start_A", "Pulse current start (A)",
                               DEFAULTS["pulse_current_start_A"]),
                         field("pulse_current_stop_A", "Pulse current stop (A)",
@@ -1203,7 +1201,7 @@ class SOTPulsedSwitchingApp(MeasurementApp):
                               hint="One pulse per step."),
                         field("wave_pulse_width_s", "Requested pulse width (s)",
                               DEFAULTS["wave_pulse_width_s"],
-                              hint="No rise/fall control. Measured width is logged."),
+                              hint="WAVE (lock-in): measured width logged. Pulse Delta (DC): 50 µs – 12 ms."),
                         field("pulse_compliance_V", "Pulse voltage compliance (V)",
                               DEFAULTS["pulse_compliance_V"]),
                         id="mode_6221_pulse",
@@ -1227,6 +1225,19 @@ class SOTPulsedSwitchingApp(MeasurementApp):
                               DEFAULTS["settle_after_enable_s"],
                               validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
                         id="mode_dc_read",
+                    )
+                    yield card(
+                        "DC R_xy read (6221 Delta + 2182A on RS-232)",
+                        field("n_delta_readings", "Delta readings per read",
+                              DEFAULTS["n_delta_readings"], kind="integer",
+                              validators=[Number(minimum=1, failure_description="must be ≥ 1")]),
+                        field("delta_delay_s", "Delta delay after each flip (s)",
+                              DEFAULTS["delta_delay_s"],
+                              validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
+                        field("delta_nplc", "2182A NPLC (integer)", DEFAULTS["delta_nplc"],
+                              kind="integer",
+                              hint="2182A range: set on its front panel."),
+                        id="mode_delta_read",
                     )
                     yield card(
                         "Lock-in read (6221 AC + lock-in)",
@@ -1334,6 +1345,16 @@ class SOTPulsedSwitchingApp(MeasurementApp):
                             field("compliance_V", "6221 compliance (V)", DEFAULTS["compliance_V"],
                                   hint="Keep low (read needs < 1 V) — protects the shared bus."),
                             muted=True,
+                        )
+                        yield card(
+                            "6221 Pulse Delta edge (rise time)",
+                            select_field("pulse_response", "Output response",
+                                         pd.RESPONSE_OPTIONS, DEFAULTS["pulse_response"],
+                                         hint="No programmable rise time in Pulse Delta."),
+                            switch_field("pulse_analog_filter", "Analog filter (slows high-Z loads)",
+                                         DEFAULTS["pulse_analog_filter"]),
+                            muted=True,
+                            id="mode_pdelta_settings",
                         )
                         yield card(
                             "Keithley 2182 + DC read",

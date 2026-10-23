@@ -58,6 +58,7 @@ X_CANDIDATES = {
     "SOTPS": ("pulse_amplitude_V", "assist_field_measured_mT", "magnet_current_A"),
     "SOT2H": ("pulse_amplitude_V", "assist_field_measured_mT", "magnet_current_A"),
     "SOT1I": ("pulse_current_A", "assist_field_measured_mT", "magnet_current_A"),
+    "SOTPD": ("pulse_current_A", "assist_field_measured_mT", "magnet_current_A"),
     "NLSW": ("pulse_current_A", "init_field_measured_mT", "magnet_current_A"),
 }
 _GENERIC_X = tuple(dict.fromkeys(c for cands in X_CANDIDATES.values() for c in cands))

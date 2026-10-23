@@ -86,7 +86,8 @@ Example: `A_0001_HB3_NOISE_T293K_20260811T143022.csv`
 | `RT`    | Resistance vs. temperature — the free-drift ±I log (`dc/dc_rt_log`) and the setpoint template (`examples/custom_program.py`) |
 | `SOTPS` | SOT pulsed switching — 4200A PMU write pulse + delayed 6221/2182 R_xy read (`sot/sot_pulsed_switching`) |
 | `SOT2H` | SOT pulsed switching, 2nd-harmonic read — 4200A PMU write pulse + delayed 6221 AC / MFLI 1f+2f read (`sot/sot_pulsed_switching_2h`) |
-| `SOT1I` | SOT pulsed switching, 6221-only (no 4200A) — software-timed 6221 DC write pulse + delayed 6221 AC / MFLI harmonic read (`sot/sot_pulsed_switching_6221`) |
+| `SOT1I` | SOT pulsed switching, 6221-only (no 4200A) — hardware-timed 6221 WAVE write pulse + delayed 6221 AC / MFLI harmonic read (`sot/sot_pulsed_switching_6221`) |
+| `SOTPD` | SOT pulsed switching, 6221 + 2182A only (no 4200A) — 6221 Pulse Delta write pulse (count 1, I-Lo 0; its 2182A reading discarded) + delayed 6221 Delta-mode R_xy read, 2182A on the 6221's RS-232 (`sot/sot_pulsed_switching_pdelta`) |
 | `NLSW` | Nonlocal spin-current switching, 6221 + 2182A only — field-initialized sweep of single-lobe (0 → ±I → 0) WAVE write pulses + DC nonlocal read (current-reversal averaged unless switched off); key axis = the init magnet current (`current_A`) when the run initializes the state (`sot/sot_nonlocal_switching`) |
 
 `HARM` / `HARM6` demod columns: each MFLI's harmonic is chosen on the
