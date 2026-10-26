@@ -29,6 +29,8 @@ uv run python bridge_tui.py            # TUI menu: DC / MFLI / SOT programs + re
 uv run python sot/sot_pulsed_switching_tui.py   # any single program's TUI, standalone
 ```
 
+On Windows, double-click `bridge.bat` in Explorer to open the TUI menu.
+
 The TUI menu has one column per suite, each
 program a card with its description, a collapsible wiring schematic and a
 Launch button; quitting a program returns to the menu. Every run is listed
