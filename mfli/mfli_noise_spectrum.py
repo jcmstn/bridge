@@ -612,6 +612,7 @@ def plot_results(results: Dict[Tuple[str, str], dict], demod_cfgs: List[NoiseDem
     same reason mfli_dual_harmonic_6221.py's own core module never imports
     matplotlib at all."""
     import matplotlib.pyplot as plt
+    from matplotlib.ticker import LogFormatter
     plt.rcParams.update({
         "figure.facecolor": "#fcfcfb",
         "axes.facecolor":   "#fcfcfb",
@@ -649,6 +650,16 @@ def plot_results(results: Dict[Tuple[str, str], dict], demod_cfgs: List[NoiseDem
             )
             ax.loglog(spec["freq_Hz"][1:], spec["asd_avg_V_rthz"][1:],
                        color=color, linewidth=1.5, label=cond)
+
+        # Plain "1e-08" tick labels: the default log formatter emits mathtext
+        # ($\mathdefault{10^{-8}}$), whose process-wide parser is not
+        # thread-safe and raised "Expected end of text, found '$'" from the
+        # TUI's worker thread. With no "$" left in the figure it never runs.
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        for axis in (ax.xaxis, ax.yaxis):
+            axis.set_major_formatter(LogFormatter())
+            axis.set_minor_formatter(LogFormatter())
 
         if thermal:
             ax.axhline(thermal, color="#898781", linestyle="--", linewidth=1.2)
