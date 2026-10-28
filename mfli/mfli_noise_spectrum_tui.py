@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import List, Optional
 
 
-from textual import work
+from textual import events, work
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -381,7 +381,11 @@ class RunScreen(MeasurementRunScreen):
             yield Button("Back", id="back_btn", disabled=True)
         yield Footer()
 
-    def on_mount(self) -> None:
+    def on_mount(self, event: events.Mount) -> None:
+        # Textual also dispatches Mount to every base class's on_mount; the
+        # base one needs #results_table (not composed here) and would start
+        # history + do_run a second time, so this handler replaces it.
+        event.prevent_default()
         self._log_handler = LogRelay(self)
         logging.getLogger().addHandler(self._log_handler)
         self._history_start()

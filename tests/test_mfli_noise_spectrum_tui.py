@@ -98,3 +98,32 @@ def test_compute_filename_preview(tmp_path: Path) -> None:
     preview_multi_amp = tui.compute_filename_preview(
         {**state, "amplitude_list": [1e-4, 2e-4]})
     assert "×8 files" in preview_multi_amp
+
+
+def test_run_screen_mounts_without_base_results_table(tmp_path: Path, monkeypatch) -> None:
+    """Textual dispatches Mount to every class in the MRO; the base
+    MeasurementRunScreen.on_mount queries #results_table, which this screen
+    doesn't compose -- it must not run (it crashed the app on Start)."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from textual.app import App
+
+    from instruments import run_index
+
+    plan = SimpleNamespace(run_cost=None, total_steps=1, data_root=tmp_path,
+                           sample="A", device="HB3", header_extra={})
+    monkeypatch.setattr(tui.RunScreen, "do_run", lambda self: None)
+    screen = tui.RunScreen(plan)
+
+    class Host(App):
+        def on_mount(self):
+            self.push_screen(screen)
+
+    async def go():
+        async with Host().run_test(size=(120, 40)) as pilot:
+            await pilot.pause(0.05)
+            assert screen.is_mounted
+
+    asyncio.run(go())
+    assert len(run_index.recent_runs()) == 1
