@@ -767,8 +767,9 @@ class MeasurementApp(App):
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             return {}
 
-    def _load_settings(self) -> None:
-        saved = self._read_settings()
+    def _load_settings(self, saved: Optional[dict] = None) -> None:
+        """Apply `saved` (default: this form's own settings file) to the form."""
+        saved = self._read_settings() if saved is None else saved
         if not saved:
             return
         for fid in self._all_field_ids():

@@ -5,9 +5,10 @@ Dual MFLI Voltage-Noise Floor Estimate — 6221-sourced AC current
 Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
 Created: 2026-09-17
 
-A quick nV/√Hz estimate for the mfli_dual_harmonic_6221 program (leader 1f /
-follower 2f, Keithley 6221 WAVE excitation, both MFLIs ExtRef-locked to the
-6221's phase marker) — NOT a full noise-metrology characterization. Plug the
+A quick nV/√Hz estimate for the mfli_dual_harmonic_6221 program (Keithley
+6221 WAVE excitation, both MFLIs ExtRef-locked to the 6221's phase marker,
+each MFLI's demod on whichever harmonic the real run uses — NoiseDemodConfig.
+harmonic) — NOT a full noise-metrology characterization. Plug the
 sample/DUT in exactly as you would for the real measurement, run this, read
 the white-noise floor off the plot/console, and use it to size a lock-in
 filter's time constant/order.
@@ -17,8 +18,8 @@ Wiring — identical to mfli_dual_harmonic_6221.py, nothing extra to cable:
     Keithley 6221 TRIGGER LINK phase marker  ──▶ split (BNC T, equal
       lengths) to AUX IN 1 on BOTH MFLIs (leader locks demod-index-1's
       oscillator to it for 1f, follower likewise for 2f — see ExtRefConfig).
-    Leader MFLI Signal Input 1 (differential)   ──▶ noise-survey demod
-    Follower MFLI Signal Input 1 (differential) ──▶ noise-survey demod
+    Leader MFLI Signal Input 1 (differential)   ──▶ noise-survey demod (h_leader × f)
+    Follower MFLI Signal Input 1 (differential) ──▶ noise-survey demod (h_follower × f)
 
 Method (unchanged from the retired plain-MFLI-output version of this
 script): stream the raw demodulator sample record (daq.subscribe/poll on
@@ -39,7 +40,9 @@ purely as a sanity anchor; the number you actually act on is the measured
 white-noise floor itself.
 
 Results are saved as CSV (one file per condition/channel) plus a summary
-plot. See mfli_noise_spectrum_tui.py for a friendlier front end over this
+plot. Each file's header / index.csv row carries the operating point
+(excitation frequency/current/offset, harmonic, input range, coupling, TC,
+rate, duration) so a NOISE run can be matched to the HARM6 run it sized. See mfli_noise_spectrum_tui.py for a friendlier front end over this
 same module — every parameter here matches a field there.
 
 Requirements:
@@ -118,6 +121,7 @@ class NoiseDemodConfig:
                                         #   PLL's own dedicated detector demod (see
                                         #   ExtRefConfig.pll_demod_index in mfli_dual_harmonic_6221.py)
     harmonic: int        = 1           # Match whatever harmonic this channel uses in real use
+    osc_index: int      = 0            # Oscillator the ExtRef PLL drives (ExtRefConfig.osc_index)
     input_ch: int       = 0            # Signal Input index (0-based)
     differential: bool  = True         # Enable differential (IN+ / IN−) mode
     ac_coupling: bool   = True         # AC-couple the input
@@ -162,6 +166,7 @@ def configure_noise_demod(daq: zi.ziDAQServer, cfg: NoiseDemodConfig) -> None:
     """Configure a demodulator for wide-bandwidth noise streaming and log the actually-applied values."""
     d, di = cfg.device, cfg.demod_index
 
+    daq.setInt(   f"/{d}/demods/{di}/oscselect",    cfg.osc_index)
     daq.setInt(   f"/{d}/demods/{di}/harmonic",     cfg.harmonic)
     daq.setDouble(f"/{d}/demods/{di}/timeconstant", cfg.time_constant_s)
     daq.setInt(   f"/{d}/demods/{di}/order",        cfg.order)
@@ -183,6 +188,7 @@ def configure_noise_demod(daq: zi.ziDAQServer, cfg: NoiseDemodConfig) -> None:
     actual_tc   = daq.getDouble(f"/{d}/demods/{di}/timeconstant")
     bw_hz = 1.0 / (2 * np.pi * actual_tc) if actual_tc > 0 else float("inf")
     cfg.sample_rate_Hz = actual_rate
+    cfg.time_constant_s = actual_tc
 
     log.info(
         "%s: demod%d  harmonic=%df  rate=%.1f Sa/s (Nyquist=%.1f Hz)  "
@@ -324,7 +330,7 @@ def measure_noise_spectrum(daq: zi.ziDAQServer, cfg: NoiseDemodConfig,
 
     stats = summarize_asd(f, asd_avg)
     band = f > 0
-    rms_V = float(np.sqrt(np.trapz(0.5 * (psd_x + psd_y)[band], f[band])))
+    rms_V = float(np.sqrt(np.trapezoid(0.5 * (psd_x + psd_y)[band], f[band])))
 
     return {
         "freq_Hz": f,
@@ -336,6 +342,15 @@ def measure_noise_spectrum(daq: zi.ziDAQServer, cfg: NoiseDemodConfig,
         "label": cfg.label,
         "overload_detected": ts["overload_detected"],
         "mds_synced": ts["mds_synced"],
+        # operating point -> raw header / index.csv (see build_header_fields())
+        "demod_device": cfg.device,
+        "harmonic": cfg.harmonic,
+        "input_range_V": cfg.input_range_V,
+        "differential": cfg.differential,
+        "ac_coupling": cfg.ac_coupling,
+        "time_constant_s": cfg.time_constant_s,
+        "sample_rate_Hz": ts["fs"],
+        "duration_s": acq_cfg.duration_s,
         **stats,
     }
 
@@ -404,6 +419,10 @@ def measure_noise_floor(
     disable_sigout(daq, follower_extref_cfg.device)
 
     results: Dict[Tuple[str, str], dict] = {}
+    # The set operating point, on every spec -- the OFF pass too (its
+    # `condition` says the source was off).
+    excitation = {"frequency_Hz": ac_cfg.frequency_Hz, "current_A": ac_cfg.amplitude_A,
+                  "offset_A": ac_cfg.offset_A}
     source = None
     try:
         if on_status:
@@ -430,7 +449,7 @@ def measure_noise_floor(
         for cfg in demod_cfgs:
             if on_status:
                 on_status(f"Recording noise floor: Excitation ON — {cfg.label} …")
-            spec = measure_noise_spectrum(daq, cfg, acq_cfg, mds=mds)
+            spec = {**measure_noise_spectrum(daq, cfg, acq_cfg, mds=mds), **excitation}
             spec["leader_reference_locked"] = leader_locked
             spec["follower_reference_locked"] = follower_locked
             results[("Excitation ON", cfg.label)] = spec
@@ -448,7 +467,7 @@ def measure_noise_floor(
             for cfg in demod_cfgs:
                 if on_status:
                     on_status(f"Recording noise floor: Excitation OFF — {cfg.label} …")
-                spec = measure_noise_spectrum(daq, cfg, acq_cfg, mds=mds)
+                spec = {**measure_noise_spectrum(daq, cfg, acq_cfg, mds=mds), **excitation}
                 spec["leader_reference_locked"] = None
                 spec["follower_reference_locked"] = None
                 results[("Excitation OFF", cfg.label)] = spec
@@ -482,8 +501,16 @@ def _spec_records(spec: dict) -> list[dict]:
     }).to_dict("records")
 
 
+# Written to every run's header / index.csv row so it can be matched later to
+# the HARM6 run whose wiring/filter it was taken for.
+_OPERATING_POINT_KEYS = ("frequency_Hz", "current_A", "offset_A", "demod_device", "harmonic",
+                         "input_range_V", "differential", "ac_coupling", "time_constant_s",
+                         "sample_rate_Hz", "duration_s")
+
+
 def build_header_fields(ctx: RunContext, cond: str, label: str, spec: dict, *,
-                         cooldown: str, series: str, status: str, comment: str = "") -> dict:
+                         cooldown: str, series: str, status: str, comment: str = "",
+                         thermal_R_ohm: Optional[float] = None) -> dict:
     """Universal + measurement-specific header/index fields for one
     (condition, channel) pair's run. Used by save_results() for the initial
     write, and reusable afterward (same shape, `status`/`comment` updated)
@@ -510,6 +537,8 @@ def build_header_fields(ctx: RunContext, cond: str, label: str, spec: dict, *,
         "mds_synced": spec["mds_synced"],
         "leader_reference_locked": spec.get("leader_reference_locked"),
         "follower_reference_locked": spec.get("follower_reference_locked"),
+        **{k: spec.get(k, "") for k in _OPERATING_POINT_KEYS},
+        "thermal_R_ohm": "" if thermal_R_ohm is None else thermal_R_ohm,
     }
 
 
@@ -517,6 +546,7 @@ def save_results(
     results: Dict[Tuple[str, str], dict], *,
     sample: str, device: str, cooldown: str, series: str, status: str = "completed",
     data_root: Optional[Path] = None, key_axis: Optional[Tuple[str, float]] = None,
+    thermal_R_ohm: Optional[float] = None,
 ) -> List[RunContext]:
     """
     Write one raw file per (condition, channel) pair via allocate_run() +
@@ -548,7 +578,8 @@ def save_results(
     for (cond, label), spec in results.items():
         ctx = allocate_run(root, sample, device, MEASUREMENT_TYPE, series=series, key_axis=key_axis)
         header_fields = build_header_fields(ctx, cond, label, spec,
-                                             cooldown=cooldown, series=series, status=status)
+                                             cooldown=cooldown, series=series, status=status,
+                                             thermal_R_ohm=thermal_R_ohm)
         write_record(ctx.raw_path, _spec_records(spec), header_fields)
         finalize_index_row(root, ctx.sample, ctx.run_number, header_fields)
         contexts.append(ctx)
@@ -558,13 +589,15 @@ def save_results(
 
 def finalize_comment(ctx: RunContext, cond: str, label: str, spec: dict, *,
                       cooldown: str, series: str, status: str, comment: str,
-                      data_root: Optional[Path] = None) -> None:
+                      data_root: Optional[Path] = None,
+                      thermal_R_ohm: Optional[float] = None) -> None:
     """Re-finalize one already-saved run's index.csv row with the
     operator's real status/comment -- the full row, not just the comment
     field, since finalize_index_row() rewrites the row wholesale."""
     root = _DATA_DIR if data_root is None else data_root
     header_fields = build_header_fields(ctx, cond, label, spec, cooldown=cooldown,
-                                         series=series, status=status, comment=comment)
+                                         series=series, status=status, comment=comment,
+                                         thermal_R_ohm=thermal_R_ohm)
     finalize_index_row(root, ctx.sample, ctx.run_number, header_fields)
 
 
@@ -684,8 +717,8 @@ def main() -> None:
 
     # ── Demodulator channels to characterize ──────────────────────────────────
     demod_cfgs = [
-        NoiseDemodConfig(device=LEADER,   label="MFLI-1 (1f channel)", harmonic=1),
-        NoiseDemodConfig(device=FOLLOWER, label="MFLI-2 (2f channel)", harmonic=2),
+        NoiseDemodConfig(device=LEADER,   label="Leader (1f)",   harmonic=1),
+        NoiseDemodConfig(device=FOLLOWER, label="Follower (2f)", harmonic=2),
     ]
     for cfg in demod_cfgs:
         configure_noise_demod(daq, cfg)
@@ -714,7 +747,7 @@ def main() -> None:
     series = f"{SAMPLE}_{DEVICE}_{MEASUREMENT_TYPE}_{datetime.now():%Y%m%dT%H%M%S}"
     run_contexts = save_results(
         results, sample=SAMPLE, device=DEVICE, cooldown=COOLDOWN, series=series,
-        status="completed" if error is None else "error",
+        status="completed" if error is None else "error", thermal_R_ohm=ref_cfg.thermal_R_ohm,
     )
     report_mains_peaks(results, ref_cfg)
 

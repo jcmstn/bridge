@@ -129,3 +129,25 @@ def test_acquire_time_series_concatenates_every_chunk() -> None:
     assert out["x"].tolist() == [1.0] * 4 + [2.0] * 4 + [3.0] * 4
     assert out["y"].tolist() == [-1.0] * 4 + [-2.0] * 4 + [-3.0] * 4
     assert out["fs"] == 100.0 and out["overload_detected"] is False
+
+
+def test_measure_noise_spectrum_integrates_rms_and_records_operating_point() -> None:
+    """np.trapz is gone in numpy 2 -- the RMS integral crashed every run."""
+    cfg = noise.NoiseDemodConfig(device="dev1234", label="Leader 2f", harmonic=2,
+                                 input_range_V=0.1, differential=False)
+    acq = noise.AcquisitionConfig(duration_s=3.0, poll_chunk_s=1.0, welch_seg_s=0.5)
+    spec = noise.measure_noise_spectrum(_FakeStreamDAQ(samples_per_chunk=100), cfg, acq)
+    assert np.isfinite(spec["rms_V"])
+    assert spec["harmonic"] == 2 and spec["input_range_V"] == 0.1
+    assert spec["differential"] is False and spec["sample_rate_Hz"] == 100.0
+
+
+def test_header_carries_operating_point(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(noise, "_DATA_DIR", tmp_path)
+    ensure_sample(tmp_path, "A", create=True)
+    spec = {**_fake_spec("Leader 2f"), "harmonic": 2, "frequency_Hz": 317.3, "current_A": 1e-4}
+    [ctx] = noise.save_results({("Excitation ON", "Leader 2f"): spec}, sample="A", device="HB3",
+                               cooldown="", series="s", thermal_R_ohm=1e4)
+    row = pd.read_csv(tmp_path / "A" / "index.csv").iloc[0]
+    assert row["harmonic"] == 2 and row["frequency_Hz"] == 317.3
+    assert row["current_A"] == 1e-4 and row["thermal_R_ohm"] == 1e4

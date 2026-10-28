@@ -22,7 +22,9 @@ def _state(data_dir: Path, **overrides) -> dict:
         daq_host="localhost", daq_port=8004,
         ac_visa_resource="GPIB0::20::INSTR", frequency_Hz=317.3,
         amplitude_values="1e-4", amplitude_list=[1e-4], amplitude_parse_error=None,
-        ac_compliance_V=2.0, phasemarker_line=1, extref_lock_timeout_s=5.0,
+        ac_compliance_V=2.0, ac_offset_A=0.0, phasemarker_line=1, extref_lock_timeout_s=5.0,
+        leader_harmonic=1, leader_measure_rxx=False, follower_harmonic=2, measure_rxx=False,
+        differential=True, ac_coupling=True,
         leader_extref_index=0, leader_aux_input_ch=0, leader_osc_index=0,
         leader_pll_demod_index=1, leader_automode=4,
         follower_extref_index=0, follower_aux_input_ch=0, follower_osc_index=0,
@@ -53,6 +55,45 @@ def test_build_plan_shapes_configs(tmp_path: Path) -> None:
 
     plan_on_only = app._build_plan(_state(tmp_path, also_measure_off=False))
     assert plan_on_only.total_steps == 2
+
+
+def test_build_plan_follows_chosen_harmonics(tmp_path: Path) -> None:
+    ensure_sample(tmp_path, "A", create=True)
+    app = tui.MFLINoiseSpectrumApp()
+    app.data_root = tmp_path
+
+    plan = app._build_plan(_state(tmp_path, leader_harmonic=2, follower_harmonic=1,
+                                    measure_rxx=True, differential=False, ac_offset_A=1e-5))
+    lead, fol = plan.demod_cfgs
+    assert (lead.harmonic, fol.harmonic) == (2, 1)
+    assert (lead.label, fol.label) == ("Leader 2f", "Follower R_xx (1f)")
+    assert lead.differential is False and fol.differential is False
+    assert plan.ac_cfg.offset_A == 1e-5
+
+
+def test_mains_warning_uses_chosen_harmonic(tmp_path: Path) -> None:
+    # 25 Hz: 2f lands on 50 Hz mains, 1f doesn't
+    _, warnings, _ = tui.build_summary(_state(tmp_path, frequency_Hz=25.0,
+                                              leader_harmonic=1, follower_harmonic=1))
+    assert not any("mains" in w.lower() for w in warnings)
+    _, warnings, _ = tui.build_summary(_state(tmp_path, frequency_Hz=25.0, leader_harmonic=2))
+    assert any("Leader 2f" in w for w in warnings)
+
+
+def test_build_summary_flags_offset_past_ceiling(tmp_path: Path) -> None:
+    _, _, errors = tui.build_summary(_state(tmp_path, ac_offset_A=0.02))
+    assert any("DC offset" in e for e in errors)
+
+
+def test_harm6_copy_takes_wiring_not_noise_settings() -> None:
+    saved = {"leader_harmonic": 2, "follower_harmonic": 3, "input_range_1f_V": "0.1",
+             "frequency_Hz": "123.4", "time_constant_1f_s": "0.3", "duration_s": "999",
+             "sample_rate_Hz": "857.0", "ac_source": "6221"}
+    copied = tui.harm6_copy(saved)
+    assert copied == {"leader_harmonic": 2, "follower_harmonic": 3,
+                      "input_range_1f_V": "0.1", "frequency_Hz": "123.4"}
+    # legacy R_xx form (no harmonic selects) meant follower at 1f
+    assert tui.harm6_copy({"measure_rxx": True})["follower_harmonic"] == 1
 
 
 def test_build_plan_multiple_amplitudes_scales_total_steps(tmp_path: Path) -> None:

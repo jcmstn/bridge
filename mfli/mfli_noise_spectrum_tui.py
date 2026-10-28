@@ -7,7 +7,9 @@ Created: 2026-09-17
 
 Runs the 2-pass (Excitation ON / Excitation OFF) noise-floor estimate for
 the mfli_dual_harmonic_6221 program without touching the dataclasses in the
-script itself. Deliberately smaller than the other suite TUIs — this is a
+script itself. Each MFLI's harmonic, input range and coupling are set to
+match the real run's wiring — "Copy from Dual-Harmonic" pulls them (plus
+frequency, current, offset, devices, ExtRef) from that form's saved state. Deliberately smaller than the other suite TUIs — this is a
 quick nV/√Hz check, not a sweep: no live plot process, no per-point table,
 no abort (each pass is a single ~30 s recording).
 
@@ -20,6 +22,7 @@ Requirements:
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 from dataclasses import dataclass
@@ -51,8 +54,10 @@ from mfli.mfli_dual_harmonic_6221 import _AC_CURRENT_CEILING_A, _AC_COMPLIANCE_C
 from instruments.summary_lines import summary_markup
 from instruments.tui_common import (
     LogRelay, MeasurementApp, MeasurementRunScreen, card, field, format_si, identity_bar,
-    switch_field,
+    select_field, switch_field,
 )
+import mfli.mfli_dual_harmonic_6221_tui as six
+from mfli.mfli_dual_harmonic_tui import SETTINGS_PATH as HARM_SETTINGS_PATH
 from mfli.mfli_noise_spectrum import (
     ACSourceConfig,
     AcquisitionConfig,
@@ -92,8 +97,8 @@ MEASUREMENT_TYPE = "NOISE"
 # One-paragraph blurb + wiring schematic — shown on this program's card in
 # bridge_tui.py.
 MFLI_NOISE_SPECTRUM_DESCRIPTION = (
-    "2 MFLI + 6221, wired as for the 6221 dual-harmonic run. Excitation-ON floor + "
-    "optional OFF baseline, no rewiring."
+    "2 MFLI + 6221, wired as for the 6221 dual-harmonic run (harmonics/ranges copyable from "
+    "it). Excitation-ON floor + optional OFF baseline, no rewiring."
 )
 
 MFLI_NOISE_SPECTRUM_SCHEMATIC = """\
@@ -104,8 +109,9 @@ MFLI_NOISE_SPECTRUM_SCHEMATIC = """\
     HI/LO ──▶ sample/DUT ── common ground
     Trigger Link phase marker ──▶ Aux In 1 on BOTH the leader AND follower
 
-  LEADER MFLI  (ExtRef-locked, noise-survey demod on 1f)
-  FOLLOWER MFLI  (ExtRef-locked, noise-survey demod on 2f)
+  LEADER MFLI    (ExtRef-locked, noise-survey demod at its harmonic)
+  FOLLOWER MFLI  (ExtRef-locked, noise-survey demod at its harmonic)
+    Harmonic / input / coupling = whatever the real run uses.
 """
 
 
@@ -122,8 +128,15 @@ DEFAULTS: dict = {
     "frequency_Hz": "317.3",
     "amplitude_values": "1e-4",
     "ac_compliance_V": "2.0",
+    "ac_offset_A": "0",
     "phasemarker_line": "1",
     "extref_lock_timeout_s": "5.0",
+    "leader_harmonic": "1",
+    "leader_measure_rxx": False,
+    "follower_harmonic": "2",
+    "measure_rxx": False,
+    "differential": True,
+    "ac_coupling": True,
     "duration_s": "30",
     "also_measure_off": True,
     "thermal_R_ohm": "10000",
@@ -152,6 +165,7 @@ NUMERIC_FIELDS: dict = {
     "daq_port": int,
     "frequency_Hz": float,
     "ac_compliance_V": float,
+    "ac_offset_A": float,
     "phasemarker_line": int,
     "extref_lock_timeout_s": float,
     "duration_s": float,
@@ -173,6 +187,34 @@ TEXT_FIELDS = ["leader_device", "follower_device", "daq_host", "ac_visa_resource
                "amplitude_values", "device", "cooldown", "data_dir"]
 # Free-text, blank-allowed: parsed to Optional[float] by hand in parse_state()
 OPTIONAL_NUMERIC_FIELDS = ["thermal_R_ohm"]
+
+# The Dual-Harmonic (6221) form's keys this form shares (same ids, same
+# meaning): the wiring and operating point. The noise-only filter / rate /
+# duration / Johnson settings are never copied.
+HARM6_COPY_KEYS = (
+    "leader_device", "follower_device", "daq_host", "daq_port",
+    "ac_visa_resource", "frequency_Hz", "amplitude_values", "ac_compliance_V", "ac_offset_A",
+    "phasemarker_line", "extref_lock_timeout_s",
+    "leader_harmonic", "leader_measure_rxx", "follower_harmonic", "measure_rxx",
+    "differential", "ac_coupling", "input_range_1f_V", "input_range_2f_V",
+    "leader_extref_index", "leader_aux_input_ch", "leader_osc_index",
+    "leader_pll_demod_index", "leader_automode",
+    "follower_extref_index", "follower_aux_input_ch", "follower_osc_index",
+    "follower_pll_demod_index", "follower_automode",
+    "device", "cooldown", "sample", "data_dir",
+)
+
+
+def harm6_copy(saved: dict) -> dict:
+    """The subset of a saved Dual-Harmonic form this form takes over."""
+    saved = six.migrate_settings(dict(saved))
+    return {k: saved[k] for k in HARM6_COPY_KEYS if k in saved}
+
+
+def channel_label(role: str, harmonic: int, rxx: bool) -> str:
+    """e.g. "Leader 2f", "Follower R_xx (1f)" -- the plot title and the
+    index.csv channel_label, named like the HARM6 columns it sizes."""
+    return f"{role} {six.demod_naming(harmonic, rxx)[1]}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -273,6 +315,9 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
                 f"Excitation current(s) {over_limit} must be in "
                 f"(0, {format_si(_AC_CURRENT_CEILING_A, 'A')}] — check for a mistyped exponent."
             )
+        elif amp_list and max(amp_list) + abs(state["ac_offset_A"]) > _AC_CURRENT_CEILING_A:
+            errors.append(f"Excitation current + |DC offset| exceeds "
+                          f"{format_si(_AC_CURRENT_CEILING_A, 'A')}.")
         elif len(amp_list) > 1:
             info.append(f"Excitation currents: {', '.join(format_si(i, 'A') for i in amp_list)} "
                         f"peak — {len(amp_list)} sessions, one file set each")
@@ -285,14 +330,23 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
             f"got {state['ac_compliance_V']:g} V."
         )
 
+    if state["ac_offset_A"]:
+        warnings.append(f"6221 DC offset {format_si(state['ac_offset_A'], 'A')} on — "
+                        "only if the real run uses it too.")
+
     f = state["frequency_Hz"]
-    for label, check_f in (("1f", f), ("2f", 2 * f)):
+    channels = (("Leader", state["leader_device"], state["leader_harmonic"], state["leader_measure_rxx"]),
+                ("Follower", state["follower_device"], state["follower_harmonic"], state["measure_rxx"]))
+    info.append("Channels: " + ", ".join(f"{channel_label(role, h, rxx)} ({dev})"
+                                         for role, dev, h, rxx in channels))
+    for role, _, h, rxx in channels:
+        check_f = h * f
         for mains in (50, 60):
             nearest = round(check_f / mains) * mains
             if nearest > 0 and abs(check_f - nearest) < 0.5:
                 warnings.append(
-                    f"{label} ({check_f:g} Hz) is within 0.5 Hz of a {mains} Hz "
-                    f"harmonic ({nearest} Hz) — mains pickup risk."
+                    f"{channel_label(role, h, rxx)} ({check_f:g} Hz) is within 0.5 Hz of a "
+                    f"{mains} Hz harmonic ({nearest} Hz) — mains pickup risk."
                 )
 
     if state["leader_pll_demod_index"] == 0:
@@ -415,7 +469,7 @@ class RunScreen(MeasurementRunScreen):
         contexts = save_results(
             iter_results, sample=plan.sample, device=plan.device,
             cooldown=plan.cooldown, series=plan.series, status=iter_status,
-            data_root=plan.data_root, key_axis=key_axis,
+            data_root=plan.data_root, key_axis=key_axis, thermal_R_ohm=plan.ref_cfg.thermal_R_ohm,
         )
         # Zip in save_results()'s own iteration order (see its docstring) so
         # a later status/comment update can rebuild each run's full header
@@ -459,7 +513,7 @@ class RunScreen(MeasurementRunScreen):
             try:
                 finalize_comment(ctx, cond, label, spec, cooldown=plan.cooldown,
                                   series=plan.series, status=status, comment=comment,
-                                  data_root=plan.data_root)
+                                  data_root=plan.data_root, thermal_R_ohm=plan.ref_cfg.thermal_R_ohm)
             except Exception:
                 log.exception("Could not save status/comment for run %s", ctx.run_str)
 
@@ -587,6 +641,28 @@ class MFLINoiseSpectrumApp(MeasurementApp):
                         field("amplitude_values", "Excitation current (A, peak)",
                               DEFAULTS["amplitude_values"], kind="text",
                               hint="Comma-separate for one session + file set per value."),
+                        field("ac_offset_A", "DC offset (A)", DEFAULTS["ac_offset_A"],
+                              hint="0 unless the real run uses one."),
+                        Button("Copy from Dual-Harmonic", id="copy_harm6"),
+                        Static("Takes wiring + operating point from the Dual-Harmonic (6221) "
+                               "form's last start; leaves filter/duration alone.", classes="hint"),
+                    )
+                    for role, harmonic_id, rxx_id, range_id in (
+                            ("Leader", "leader_harmonic", "leader_measure_rxx", "input_range_1f_V"),
+                            ("Follower", "follower_harmonic", "measure_rxx", "input_range_2f_V")):
+                        yield card(
+                            f"{role} lock-in — as wired for the real run",
+                            select_field(harmonic_id, "Harmonic", six.HARMONIC_OPTIONS,
+                                         int(DEFAULTS[harmonic_id])),
+                            switch_field(rxx_id, "R_xx leads (label only)", DEFAULTS[rxx_id]),
+                            field(range_id, "Input range (V)", DEFAULTS[range_id],
+                                  validators=[Number(minimum=1e-6, failure_description="must be > 0")]),
+                        )
+                    yield card(
+                        "Signal input (both MFLIs)",
+                        switch_field("differential", "Differential input (IN+/IN-)",
+                                     DEFAULTS["differential"]),
+                        switch_field("ac_coupling", "AC coupling", DEFAULTS["ac_coupling"]),
                     )
                     yield card(
                         "Reference & duration",
@@ -615,23 +691,14 @@ class MFLINoiseSpectrumApp(MeasurementApp):
                                   DEFAULTS["sample_rate_Hz"],
                                   validators=[Number(minimum=1e-3, failure_description="must be > 0")]),
                         )
-                        yield card(
-                            "Input range",
-                            field("input_range_1f_V", "1f channel input range (V)",
-                                  DEFAULTS["input_range_1f_V"],
-                                  validators=[Number(minimum=1e-6, failure_description="must be > 0")]),
-                            field("input_range_2f_V", "2f channel input range (V)",
-                                  DEFAULTS["input_range_2f_V"],
-                                  validators=[Number(minimum=1e-6, failure_description="must be > 0")]),
-                        )
 
                 with Collapsible(title="Instrument configuration & addresses", collapsed=True):
                     with Vertical(classes="stable-grid"):
                         yield card(
                             "Devices & connection",
-                            field("leader_device", "Leader MFLI (1f)",
+                            field("leader_device", "Leader MFLI",
                                   DEFAULTS["leader_device"], kind="text"),
-                            field("follower_device", "Follower MFLI (2f)",
+                            field("follower_device", "Follower MFLI",
                                   DEFAULTS["follower_device"], kind="text"),
                             field("daq_host", "LabOne data server host",
                                   DEFAULTS["daq_host"], kind="text"),
@@ -697,6 +764,27 @@ class MFLINoiseSpectrumApp(MeasurementApp):
     def on_switch_changed(self, event: Switch.Changed) -> None:
         self.refresh_summary()
 
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "copy_harm6":
+            self._copy_from_harm6()
+        else:
+            super().on_button_pressed(event)
+
+    def _copy_from_harm6(self) -> None:
+        try:
+            saved = json.loads(HARM_SETTINGS_PATH.read_text())
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            self.notify("No saved Dual-Harmonic form — start that program once first.",
+                        severity="warning")
+            return
+        self._load_settings(harm6_copy(saved))
+        self.refresh_summary()
+        if saved.get("ac_source", "6221") != "6221":
+            self.notify("Dual-Harmonic form was last in MFLI-source mode — this tool uses the "
+                        "6221; check current/frequency.", severity="warning")
+        else:
+            self.notify("Copied wiring + operating point from the Dual-Harmonic form.")
+
     def update_summary(self) -> None:
         state, parse_errors = self.parse_state()
         if parse_errors:
@@ -722,6 +810,7 @@ class MFLINoiseSpectrumApp(MeasurementApp):
             frequency_Hz=state["frequency_Hz"],
             compliance_V=state["ac_compliance_V"],
             phasemarker_line=state["phasemarker_line"],
+            offset_A=state["ac_offset_A"],
         )
         leader_extref_cfg = ExtRefConfig(
             device=state["leader_device"], extref_index=state["leader_extref_index"],
@@ -735,15 +824,14 @@ class MFLINoiseSpectrumApp(MeasurementApp):
         )
         demod_cfgs = [
             NoiseDemodConfig(
-                device=state["leader_device"], label="MFLI-1 (1f channel)", harmonic=1,
-                input_range_V=state["input_range_1f_V"], sample_rate_Hz=state["sample_rate_Hz"],
+                device=state[f"{p}_device"], label=channel_label(role, state[f"{p}_harmonic"], state[rxx]),
+                harmonic=state[f"{p}_harmonic"], osc_index=state[f"{p}_osc_index"],
+                differential=state["differential"], ac_coupling=state["ac_coupling"],
+                input_range_V=state[range_id], sample_rate_Hz=state["sample_rate_Hz"],
                 time_constant_s=state["time_constant_s"],
-            ),
-            NoiseDemodConfig(
-                device=state["follower_device"], label="MFLI-2 (2f channel)", harmonic=2,
-                input_range_V=state["input_range_2f_V"], sample_rate_Hz=state["sample_rate_Hz"],
-                time_constant_s=state["time_constant_s"],
-            ),
+            )
+            for role, p, rxx, range_id in (("Leader", "leader", "leader_measure_rxx", "input_range_1f_V"),
+                                           ("Follower", "follower", "measure_rxx", "input_range_2f_V"))
         ]
         acq_cfg = AcquisitionConfig(duration_s=state["duration_s"])
         ref_cfg = ReferenceConfig(thermal_R_ohm=state["thermal_R_ohm"], thermal_T_K=state["thermal_T_K"])
