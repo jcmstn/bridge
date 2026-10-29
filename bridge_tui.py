@@ -68,7 +68,7 @@ PROGRAMS: dict[str, list[Program]] = {
                 DC_GATE_SWEEP_DESCRIPTION, DC_GATE_SWEEP_SCHEMATIC, DCGateSweepApp),
         Program("spin_valve", "Spin-Valve / Field Sweep (fixed gate, field sweep)",
                 DC_SPIN_VALVE_DESCRIPTION, DC_SPIN_VALVE_SCHEMATIC, DCSpinValveApp),
-        Program("rt_log", "R vs T log (fixed ±I, temperature read only)",
+        Program("rt_log", "R vs T log (±I DC or 6221 AC + MFLI pair; T read only)",
                 DC_RT_LOG_DESCRIPTION, DC_RT_LOG_SCHEMATIC, DCRTLogApp),
     ],
     "MFLI Suite": [

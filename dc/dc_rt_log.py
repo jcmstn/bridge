@@ -163,6 +163,102 @@ def _drift(before: Optional[float], after: Optional[float]) -> Optional[float]:
 # Main measurement loop
 # ─────────────────────────────────────────────────────────────────────────────
 
+def run_log(
+    acquire:    Callable[[], dict],
+    acq_cfg:    AcquisitionConfig,
+    stop_event: Optional[threading.Event] = None,
+    on_point:   Optional[Callable[[dict], None]] = None,
+    temp_ctrl:  Optional[MercuryITC] = None,
+    temp_cfg:   Optional[TemperatureControllerConfig] = None,
+    write_csv:  Optional[Callable[[List[dict]], None]] = None,
+    gaussmeter: Optional[LakeShore475] = None,
+    gauss_cfg:  Optional[GaussmeterConfig] = None,
+    magnet_current_A: Optional[float] = None,
+    field_theta_deg:  Optional[float] = None,
+    field_phi_deg:    Optional[float] = None,
+) -> pd.DataFrame:
+    """
+    The free-drift log loop, whatever one sample reads: `acquire()` takes one
+    sample and returns its own columns (the ±I reversal here, the MFLI pair in
+    mfli/mfli_rt_log.py). Around it: T before/after (mean + drift), timing,
+    the field read after the window, the field direction, the save throttle,
+    and the three stop conditions — see run_measurement() for the details.
+    """
+    records: List[dict] = []
+    t0 = time.monotonic()
+    last_save = -math.inf
+    start_above: Optional[bool] = None   # sensor 1 above T_stop_K at the first sample?
+
+    def _save() -> None:
+        if write_csv is not None:
+            write_csv(records)
+        else:
+            Path(acq_cfg.output_file).parent.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame(records).to_csv(acq_cfg.output_file, index=False)
+
+    def _read_T():
+        return read_temperature(temp_ctrl, temp_cfg) if temp_cfg is not None else (None, None)
+
+    while not (stop_event is not None and stop_event.is_set()):
+        if time.monotonic() - t0 >= acq_cfg.max_duration_s:
+            log.info("Maximum duration (%.0f s) reached — stopping.", acq_cfg.max_duration_s)
+            break
+
+        t_start = time.monotonic()
+        t1_before, t2_before = _read_T()
+        columns = acquire()
+        t1_after, t2_after = _read_T()
+        t_end = time.monotonic()
+        field_mT = read_field_mT(gaussmeter, gauss_cfg) \
+            if gaussmeter is not None and gauss_cfg is not None else None
+
+        T1 = _mean(t1_before, t1_after)
+        record = {
+            "point_index":           len(records),
+            "timestamp":             time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "elapsed_s":             (t_start + t_end) / 2 - t0,
+            "sample_duration_s":     t_end - t_start,
+            "temperature_1_K":       T1,
+            "temperature_2_K":       _mean(t2_before, t2_after),
+            "temperature_1_drift_K": _drift(t1_before, t1_after),
+            "temperature_2_drift_K": _drift(t2_before, t2_after),
+            **columns,
+            "magnet_current_A":      magnet_current_A,
+            "magnet_field_mT":       field_mT,
+            "field_theta_deg":       field_theta_deg,
+            "field_phi_deg":         field_phi_deg,
+            "field_frame":           "RH",  # right-handed (z=normal, x=current, y=z×x); see docs/data_convention.md
+        }
+        records.append(record)
+        log.info("#%d  T1=%s K  (%.2f s)", record["point_index"] + 1,
+                 f"{T1:.3f}" if T1 is not None else "—", record["sample_duration_s"])
+        if on_point is not None:
+            on_point(record)
+
+        # ponytail: whole-file rewrite every save_every_s (the shared writer has
+        # no append mode); an append-mode writer if multi-day logs get slow.
+        if t_end - last_save >= acq_cfg.save_every_s:
+            _save()
+            last_save = t_end
+
+        if acq_cfg.T_stop_K is not None and T1 is not None:
+            above = T1 > acq_cfg.T_stop_K
+            if start_above is None:
+                start_above = above
+            elif above != start_above:
+                log.info("Sensor 1 crossed %.3f K (now %.3f K) — stopping.", acq_cfg.T_stop_K, T1)
+                break
+
+        remaining = acq_cfg.interval_s - (time.monotonic() - t_start)
+        if remaining > 0:
+            _interruptible_sleep(remaining, stop_event)
+
+    if write_csv is None and records:
+        _save()
+    log.info("Log finished: %d samples over %.0f s.", len(records), time.monotonic() - t0)
+    return pd.DataFrame(records)
+
+
 def run_measurement(
     source:     Keithley6221,
     voltmeter:  Keithley2182,
@@ -199,89 +295,24 @@ def run_measurement(
     only written to every row (blank when None).
     """
     I = src_cfg.sense_current_A
-    records: List[dict] = []
-    t0 = time.monotonic()
-    last_save = -math.inf
-    start_above: Optional[bool] = None   # sensor 1 above T_stop_K at the first sample?
 
-    def _save() -> None:
-        if write_csv is not None:
-            write_csv(records)
-        else:
-            Path(acq_cfg.output_file).parent.mkdir(parents=True, exist_ok=True)
-            pd.DataFrame(records).to_csv(acq_cfg.output_file, index=False)
-
-    def _read_T():
-        return read_temperature(temp_ctrl, temp_cfg) if temp_cfg is not None else (None, None)
-
-    while not (stop_event is not None and stop_event.is_set()):
-        if time.monotonic() - t0 >= acq_cfg.max_duration_s:
-            log.info("Maximum duration (%.0f s) reached — stopping.", acq_cfg.max_duration_s)
-            break
-
-        t_start = time.monotonic()
-        t1_before, t2_before = _read_T()
+    def acquire() -> dict:
         v = acquire_reversal_averaged_voltage(
             source, voltmeter, I, acq_cfg.n_reversals, stop_event,
             source_delay_s=src_cfg.source_delay_s)
-        t1_after, t2_after = _read_T()
-        t_end = time.monotonic()
-        field_mT = read_field_mT(gaussmeter, gauss_cfg) \
-            if gaussmeter is not None and gauss_cfg is not None else None
-
-        T1 = _mean(t1_before, t1_after)
-        record = {
-            "point_index":           len(records),
-            "timestamp":             time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "elapsed_s":             (t_start + t_end) / 2 - t0,
-            "sample_duration_s":     t_end - t_start,
-            "temperature_1_K":       T1,
-            "temperature_2_K":       _mean(t2_before, t2_after),
-            "temperature_1_drift_K": _drift(t1_before, t1_after),
-            "temperature_2_drift_K": _drift(t2_before, t2_after),
-            "current_A":             I,
-            "voltage_V":             v["mean"],
-            "voltage_sem_V":         v["sem"],
-            "voltage_even_V":        v["even_mean"],
-            "voltage_even_sem_V":    v["even_sem"],
-            "resistance_ohm":        v["mean"] / I,
-            "resistance_sem_ohm":    v["sem"] / abs(I),
-            "n_reversals":           v["n_reversals"],
-            "magnet_current_A":      magnet_current_A,
-            "magnet_field_mT":       field_mT,
-            "field_theta_deg":       field_theta_deg,
-            "field_phi_deg":         field_phi_deg,
-            "field_frame":           "RH",  # right-handed (z=normal, x=current, y=z×x); see docs/data_convention.md
+        return {
+            "current_A":          I,
+            "voltage_V":          v["mean"],
+            "voltage_sem_V":      v["sem"],
+            "voltage_even_V":     v["even_mean"],
+            "voltage_even_sem_V": v["even_sem"],
+            "resistance_ohm":     v["mean"] / I,
+            "resistance_sem_ohm": v["sem"] / abs(I),
+            "n_reversals":        v["n_reversals"],
         }
-        records.append(record)
-        log.info("#%d  T1=%s K  R=%.6g Ω  (%.2f s)", record["point_index"] + 1,
-                 f"{T1:.3f}" if T1 is not None else "—", record["resistance_ohm"],
-                 record["sample_duration_s"])
-        if on_point is not None:
-            on_point(record)
 
-        # ponytail: whole-file rewrite every save_every_s (the shared writer has
-        # no append mode); an append-mode writer if multi-day logs get slow.
-        if t_end - last_save >= acq_cfg.save_every_s:
-            _save()
-            last_save = t_end
-
-        if acq_cfg.T_stop_K is not None and T1 is not None:
-            above = T1 > acq_cfg.T_stop_K
-            if start_above is None:
-                start_above = above
-            elif above != start_above:
-                log.info("Sensor 1 crossed %.3f K (now %.3f K) — stopping.", acq_cfg.T_stop_K, T1)
-                break
-
-        remaining = acq_cfg.interval_s - (time.monotonic() - t_start)
-        if remaining > 0:
-            _interruptible_sleep(remaining, stop_event)
-
-    if write_csv is None and records:
-        _save()
-    log.info("Log finished: %d samples over %.0f s.", len(records), time.monotonic() - t0)
-    return pd.DataFrame(records)
+    return run_log(acquire, acq_cfg, stop_event, on_point, temp_ctrl, temp_cfg, write_csv,
+                   gaussmeter, gauss_cfg, magnet_current_A, field_theta_deg, field_phi_deg)
 
 
 # Plot styling shared by the PNG and both live views: filled, outlined
@@ -302,30 +333,37 @@ def sensors_in(records) -> list[int]:
             if any(r.get(c) is not None for r in records)]
 
 
-def plot_results(df: pd.DataFrame, out_path: Path, note: str = "") -> None:
-    """One R-vs-temperature panel per sensor that recorded data (two
-    sensors -> two panels, one -> one), then R vs time. With no temperature
-    at all, only R vs time. `note` is printed small at the bottom (the
-    operator comment)."""
+# What each log plots on y: (column, axis label). The DC log has one quantity;
+# the lock-in log (mfli/mfli_rt_log_tui.py) one per MFLI, side by side.
+DC_Y_COLS = (("resistance_ohm", "R = V_odd / I (Ω)"),)
+
+
+def plot_results(df: pd.DataFrame, out_path: Path, note: str = "",
+                 y_cols=DC_Y_COLS) -> None:
+    """One row per sensor that recorded data (Y vs that sensor's
+    temperature), then a Y-vs-time row; one column per entry of `y_cols`.
+    With no temperature at all, only the time row. `note` is printed small at
+    the bottom (the operator comment)."""
     import matplotlib.pyplot as plt     # only the plot needs it — keeps imports light
     sensors = sensors_in(df)
-    n = len(sensors) + 1
-    fig, axes = plt.subplots(n, 1, figsize=(7, 3.6 * n + 0.8), squeeze=False)
-    axes = axes[:, 0]
-    for ax, k in zip(axes, sensors):
-        ax.plot(df[SENSOR_COLUMNS[k - 1]].astype(float), df["resistance_ohm"],
-                color=SENSOR_COLORS[k - 1], **MARKER)
-        ax.set_xlabel(f"Temperature, sensor {k} (K)")
-        ax.set_ylabel("R = V_odd / I (Ω)")
-        ax.set_title(f"Resistance vs. temperature (sensor {k})")
-        ax.grid(alpha=0.4)
+    n, m = len(sensors) + 1, len(y_cols)
+    fig, axes = plt.subplots(n, m, figsize=(7 * m, 3.6 * n + 0.8), squeeze=False)
+    for j, (col, label) in enumerate(y_cols):
+        for i, k in enumerate(sensors):
+            ax = axes[i, j]
+            ax.plot(df[SENSOR_COLUMNS[k - 1]].astype(float), df[col],
+                    color=SENSOR_COLORS[k - 1], **MARKER)
+            ax.set_xlabel(f"Temperature, sensor {k} (K)")
+            ax.set_ylabel(label)
+            ax.set_title(f"{label.split(' =')[0]} vs. temperature (sensor {k})")
+            ax.grid(alpha=0.4)
 
-    ax = axes[-1]
-    ax.plot(df["elapsed_s"] / 60.0, df["resistance_ohm"], color=TIME_COLOR, **MARKER)
-    ax.set_xlabel("Time (min)" if sensors else "Time (min) — no temperature recorded")
-    ax.set_ylabel("R = V_odd / I (Ω)")
-    ax.set_title("Resistance vs. time")
-    ax.grid(alpha=0.4)
+        ax = axes[-1, j]
+        ax.plot(df["elapsed_s"] / 60.0, df[col], color=TIME_COLOR, **MARKER)
+        ax.set_xlabel("Time (min)" if sensors else "Time (min) — no temperature recorded")
+        ax.set_ylabel(label)
+        ax.set_title(f"{label.split(' =')[0]} vs. time")
+        ax.grid(alpha=0.4)
     fig.tight_layout()
     if note:
         fig.text(0.01, 0.01, note, fontsize=7, color="0.4", va="bottom")
@@ -333,6 +371,64 @@ def plot_results(df: pd.DataFrame, out_path: Path, note: str = "") -> None:
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
     log.info("Saved plot: %s", out_path)
+
+
+def live_plot_worker(queue, y_cols=DC_Y_COLS) -> None:
+    """The TUI's live view (own OS process — see dc_iv_curve_tui.py for
+    why), same layout as plot_results(). The panels are built on the first
+    record, since which sensors answered is only known after connect."""
+    import matplotlib.pyplot as plt
+    from matplotlib.animation import FuncAnimation
+
+    fig = plt.figure(figsize=(7 * len(y_cols), 6))
+    try:
+        fig.canvas.manager.set_window_title("R vs T live log")
+    except Exception:
+        pass
+    fig.text(0.5, 0.5, "Waiting for the first sample …", ha="center", va="center", color="0.5")
+    panels: list = []          # (axes, line, x column, y column, xs, ys)
+
+    def _build(record: dict) -> None:
+        fig.clear()
+        sensors = sensors_in([record])
+        axes = fig.subplots(len(sensors) + 1, len(y_cols), squeeze=False)
+        for j, (ycol, label) in enumerate(y_cols):
+            for i, k in enumerate(sensors):
+                (line,) = axes[i, j].plot([], [], color=SENSOR_COLORS[k - 1], **MARKER)
+                axes[i, j].set_xlabel(f"Temperature, sensor {k} (K)")
+                panels.append((axes[i, j], line, SENSOR_COLUMNS[k - 1], ycol, [], []))
+            (line,) = axes[-1, j].plot([], [], color=TIME_COLOR, **MARKER)
+            axes[-1, j].set_xlabel("Time (min)")
+            panels.append((axes[-1, j], line, "elapsed_min", ycol, [], []))
+            for ax in axes[:, j]:
+                ax.set_ylabel(label)
+                ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+
+    def _drain(_frame=None):
+        got = False
+        while True:
+            try:
+                record = queue.get_nowait()
+            except Exception:
+                break
+            if not panels:
+                _build(record)
+            record = {**record, "elapsed_min": record["elapsed_s"] / 60.0}
+            for _ax, _line, col, ycol, xs, ys in panels:
+                if record.get(col) is not None and record.get(ycol) is not None:
+                    xs.append(record[col])
+                    ys.append(record[ycol])
+            got = True
+        if got:
+            for ax, line, _col, _ycol, xs, ys in panels:
+                line.set_data(xs, ys)
+                ax.relim()
+                ax.autoscale_view()
+        return tuple(p[1] for p in panels)
+
+    _ani = FuncAnimation(fig, _drain, interval=500, cache_frame_data=False)
+    plt.show()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

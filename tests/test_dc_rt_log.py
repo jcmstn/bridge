@@ -293,3 +293,41 @@ def test_run_plan_parks_the_magnet_and_always_ramps_it_down(tmp_path, monkeypatc
     with pytest.raises(RuntimeError):
         tui.run_plan(plan, threading.Event())
     assert calls == [("set", 3.0), ("shutdown",)]
+
+
+# ── Lock-in read mode (mfli/mfli_rt_log.py, type RTAC) ──────────────────────
+
+def test_lockin_log_records_both_demods_field_and_tags_a_dropped_lock(monkeypatch):
+    """Both MFLIs per sample (X / I_rms as <prefix>_X_ohm), T drift and B in
+    every row; a PLL that drops lock tags the row instead of stopping the log."""
+    import math
+    import mfli.mfli_rt_log as li
+    from instruments.keithley6221 import ACSourceConfig
+
+    def demod(x):
+        return {"x_mean": x, "y_mean": 0.0, "r_mean": abs(x), "theta_mean": 0.0,
+                "r_sem": 0.0, "n_samples": 10, "overload": False}
+
+    locks = iter([True, False, True, True] + [True] * 10)   # (leader, follower) per sample
+    monkeypatch.setattr(li, "check_reference_locked", lambda daq, cfg: next(locks))
+    monkeypatch.setattr(li, "check_mds_status", lambda mds: True)
+    monkeypatch.setattr(li, "acquire_averaged_pair", lambda daq, a, b, n: (demod(2e-6), demod(-7e-5)))
+    stop, got = threading.Event(), []
+    I_peak = 1e-5
+    df = li.run_measurement(
+        None, ACSourceConfig(amplitude_A=I_peak), None, None, None, None,
+        rt.AcquisitionConfig(max_duration_s=1e9), n_averages=10, settle_s=0.0,
+        stop_event=stop, on_point=lambda r: (got.append(r), len(got) >= 2 and stop.set()),
+        temp_ctrl=FakeITC(), temp_cfg=TemperatureControllerConfig(sensor_uids=("MB1.T1",)),
+        write_csv=lambda recs: None, gaussmeter=FakeGaussmeter(B_T=0.05),
+        gauss_cfg=rt.GaussmeterConfig(unit="T"), magnet_current_A=1.5,
+        field_theta_deg=0.0, field_phi_deg=0.0, mds=object(),
+        demod1_label="1f", demod2_label="rxx_1f")
+    assert len(df) == 2                                       # Stop ends it; no abort on the lost lock
+    I_rms = I_peak / math.sqrt(2)
+    assert df["1f_X_ohm"].tolist() == pytest.approx([2e-6 / I_rms] * 2)
+    assert df["rxx_1f_X_ohm"].tolist() == pytest.approx([-7e-5 / I_rms] * 2)
+    assert df["follower_reference_locked"].tolist() == [False, True]
+    assert df["temperature_1_drift_K"][0] == pytest.approx(-0.1)
+    assert df["magnet_field_mT"].tolist() == pytest.approx([50.0, 50.0])
+    assert (df["field_theta_deg"] == 0.0).all() and (df["magnet_current_A"] == 1.5).all()

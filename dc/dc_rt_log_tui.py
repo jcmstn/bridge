@@ -24,6 +24,14 @@ whole log, and ramped to zero on shutdown (Stop, error, or normal end). The
 Lake Shore 475 is read once per sample, after the R/T window, into
 magnet_field_mT; the hand-entered field direction θ/φ goes into every row.
 
+"Read" toggle (a merged form, docs/architecture.md §2): "6221 + 2182" is the
+DC ±I log above (type RT, this module is its engine); "6221 AC + MFLI pair"
+logs two voltage pairs at once — e.g. R_xy on the leader and R_xx on the
+follower — with the 6221 sine ExtRef-locking both MFLIs as in HARM6 (type
+RTAC, engine mfli/mfli_rt_log_tui.py). The time / stop / temperature / fixed
+field part of the form is shared; each mode's own cards are hidden in the
+other.
+
 Run with:
     python dc_rt_log_tui.py
 """
@@ -32,7 +40,7 @@ from __future__ import annotations
 
 import logging
 import math
-import multiprocessing as mp
+import sys
 import textwrap
 import threading
 from dataclasses import dataclass
@@ -44,13 +52,11 @@ import pandas as pd
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.validation import Number
-from textual.widgets import Button, Collapsible, Footer, Header, Static
+from textual.widgets import Button, Collapsible, Footer, Header, Select, Static
 
+import mfli.mfli_dual_harmonic_6221_tui as six
+import mfli.mfli_rt_log_tui as lockin_engine
 from dc.dc_rt_log import (
-    MARKER,
-    SENSOR_COLORS,
-    SENSOR_COLUMNS,
-    TIME_COLOR,
     AcquisitionConfig,
     GaussmeterConfig,
     MagnetConfig,
@@ -62,6 +68,7 @@ from dc.dc_rt_log import (
     connect_source,
     connect_temperature_controller,
     connect_voltmeter,
+    live_plot_worker,
     plot_results,
     ramp_current_to_zero,
     run_measurement,
@@ -69,7 +76,6 @@ from dc.dc_rt_log import (
     shutdown_gaussmeter,
     shutdown_magnet,
     shutdown_source,
-    sensors_in,
     shutdown_temperature_controller,
 )
 from dc.dc_sweep_utils import check_sweep_size, safe_shutdown
@@ -77,10 +83,13 @@ from instruments.data_dir import validate_directory
 from instruments.field_geometry import field_direction_summary_line, render_ascii_field_diagram
 from instruments.data_naming import RunContext, allocate_run, preview_raw_filename, record_run
 from instruments.keithley2182 import read_time_s
-from instruments.keithley6221 import reversal_avg_s
+from instruments.keithley6221 import ACSourceConfig, ac_source_restart_s, reversal_avg_s
 from instruments.kepco_magnet import magnet_move_s
 from instruments.lakeshore475 import read_field_s
-from instruments.run_time import PER_RUN_S, POINT_OVERHEAD_S, TEMP_READ_S, RunCost, format_duration
+from instruments.mfli_daq import ExtRefConfig, acquire_s
+from instruments.run_time import (
+    GPIB_TXN_S, MDS_SYNC_S, PER_RUN_S, POINT_OVERHEAD_S, TEMP_READ_S, RunCost, format_duration,
+)
 from instruments.summary_lines import summary_markup
 from instruments.mercury_itc import normalize_uid, set_temperature
 from instruments.temperature_control import (
@@ -95,9 +104,12 @@ from instruments.tui_common import (
     format_si,
     identity_bar,
     parse_sensor_uids,
+    select_field,
     temperature_card,
     switch_field,
 )
+from mfli.mfli_dual_harmonic import DemodConfig, FilterConfig
+from mfli.mfli_dual_harmonic_6221 import _AC_COMPLIANCE_CEILING_V, _AC_CURRENT_CEILING_A, extref_lock_s
 from instruments.tui_sample_picker import NEW_SAMPLE_SENTINEL
 
 log = logging.getLogger("dc_rt_log_tui")
@@ -110,17 +122,23 @@ MEASUREMENT_TYPE = "RT"
 PNG_SUFFIX = "R_vs_T"
 
 DC_RT_LOG_DESCRIPTION = (
-    "Continuous ±I reversal resistance log (6221 + 2182) while the temperature drifts "
-    "freely; MercuryiTC read only, before and after every sample (drift saved per point). "
-    "Optionally holds a fixed magnet current for the whole log."
+    "Continuous resistance log while the temperature drifts freely: ±I reversal (6221 + "
+    "2182, RT) or 6221 AC + MFLI pair for two probe pairs at once, e.g. R_xx + R_xy (RTAC). "
+    "MercuryiTC read before and after every sample (drift saved per point). Optionally "
+    "holds a fixed magnet current, B read every sample."
 )
 
 DC_RT_LOG_SCHEMATIC = """\
-  KEITHLEY 6221  (DC current source, fixed ±I)
+  KEITHLEY 6221  (current source: fixed ±I, or a continuous AC sine)
     Output ──▶ current path through the sample ── common ground
 
-  KEITHLEY 2182  (nanovoltmeter)
+  KEITHLEY 2182  (nanovoltmeter)                              [Read: 6221 + 2182]
     Channel 1 (differential) ──▶ the voltage probe pair of interest
+
+  6221 AC sine + MFLI pair                                    [Read: 6221 AC + MFLIs]
+    6221 phase marker ──▶ Aux In 1 on BOTH MFLIs (equal cables)
+    Leader   Signal Input 1 ──▶ e.g. R_xy pair  ·  Follower Signal Input 1 ──▶ R_xx pair
+    MDS: Clock 10 MHz Out ──▶ follower Clock In; Trigger Out 1 ──▶ Trigger In 1 (both)
 
   MercuryiTC  (optional, read only — no temperature control)
     LAN ──▶ 1 or 2 temperature sensors
@@ -161,6 +179,33 @@ DEFAULTS: dict = {
     "gaussmeter_read_delay_s": "0.05",
 }
 
+# ── Read toggle ── "dc": the ±I log (this module, RT). "lockin": 6221 AC +
+# MFLI pair (mfli/mfli_rt_log_tui.py, RTAC) — its fields are HARM6's, minus
+# the field sweep / geometry / multi-amplitude ones; one excitation current.
+READ_MODES = [("6221 + 2182 (DC ±I) → RT", "dc"),
+              ("6221 AC + MFLI pair (lock-in, 2 probe pairs) → RTAC", "lockin")]
+LOCKIN_KEYS = (
+    "leader_device", "follower_device", "daq_host", "daq_port",
+    "frequency_Hz", "ac_compliance_V", "phasemarker_line",
+    "leader_harmonic", "leader_measure_rxx", "follower_harmonic", "measure_rxx",
+    "leader_phi_I_deg", "follower_phi_I_deg",
+    "time_constant_1f_s", "order_1f", "sinc_filter_1f",
+    "time_constant_2f_s", "order_2f", "sinc_filter_2f",
+    "differential", "ac_coupling", "input_range_1f_V", "input_range_2f_V", "sample_rate_Hz",
+    "settling_time_s", "n_averages",
+    *(f"{role}_{k}" for role in ("leader", "follower")
+      for k in ("extref_index", "aux_input_ch", "osc_index", "pll_demod_index", "automode")),
+    "extref_lock_timeout_s",
+)
+LOCKIN_DEFAULTS = {
+    **{k: six.DEFAULTS[k] for k in LOCKIN_KEYS},
+    "ac_amplitude_A": "1e-5",
+    "follower_harmonic": "1", "measure_rxx": True,     # leader 1f_* (R_xy), follower rxx_1f_*
+}
+DC_ONLY_FIELDS = ("voltmeter_visa_resource", "sense_current_A", "compliance_V",
+                  "source_delay_s", "nplc", "auto_range", "n_reversals")
+DEFAULTS.update(LOCKIN_DEFAULTS, read_mode="dc")
+
 NUMERIC_FIELDS: dict = {
     "sense_current_A": float,
     "compliance_V": float,
@@ -178,8 +223,11 @@ NUMERIC_FIELDS: dict = {
     "gaussmeter_n_averages": int,
     "gaussmeter_read_delay_s": float,
     "temperature_max_K": float,         # single target: no margin / hold fields
+    "ac_amplitude_A": float,
+    **{k: six.NUMERIC_FIELDS[k] for k in LOCKIN_KEYS if k in six.NUMERIC_FIELDS},
 }
 TEXT_FIELDS = ["source_visa_resource", "voltmeter_visa_resource", "device", "cooldown",
+               "leader_device", "follower_device", "daq_host",
                *TEMPERATURE_TEXT_FIELDS,
                "magnet_visa_resource", "gaussmeter_visa_resource", "data_dir"]
 OPTIONAL_NUMERIC_FIELDS = ["temperature_setpoint_K", "T_stop_K", "field_theta_deg", "field_phi_deg"]
@@ -213,9 +261,27 @@ def _has_temperature(state: dict) -> bool:
     return bool(state.get("enable_temperature")) and bool(parse_sensor_uids(state["temperature_sensor_uids"]))
 
 
+def _is_lockin(state: dict) -> bool:
+    return state.get("read_mode") == "lockin"
+
+
+def mode_errors(state: dict, errors: list[str]) -> list[str]:
+    """Parse errors of the ACTIVE read mode only — a hidden field of the
+    other mode never blocks a run."""
+    hidden = DC_ONLY_FIELDS if _is_lockin(state) else tuple(LOCKIN_DEFAULTS)
+    return [e for e in errors if not any(e.startswith(f"'{f}'") for f in hidden)]
+
+
 def sample_time_s(state: dict) -> float:
-    """Modelled wall time of one sample: T read, ±I reversal read, T read."""
-    t = reversal_avg_s(state["n_reversals"], state["source_delay_s"], read_time_s(state["nplc"]))
+    """Modelled wall time of one sample: T read, the read itself, T read.
+    DC: the ±I reversal. Lock-in: MDS + 2 PLL checks, then one shared poll
+    window for both MFLIs (the longer of the two)."""
+    if _is_lockin(state):
+        rate, n = state["sample_rate_Hz"], state["n_averages"]
+        t = 3 * GPIB_TXN_S + (max(acquire_s(state["time_constant_1f_s"], n, rate),
+                                  acquire_s(state["time_constant_2f_s"], n, rate)) if rate > 0 else 0.0)
+    else:
+        t = reversal_avg_s(state["n_reversals"], state["source_delay_s"], read_time_s(state["nplc"]))
     return t + (2 * TEMP_READ_S if _has_temperature(state) else 0.0)
 
 
@@ -240,7 +306,11 @@ def run_costs(state: dict) -> RunCost:
     rc = RunCost(n)
     rc.each("samples", sample_period_s(state))
     rc.at("per-run", PER_RUN_S, 0)
-    rc.tail("ramp", max(1, int(abs(state["sense_current_A"]) / 1e-4)) * 0.02)
+    if _is_lockin(state):       # MDS, 6221 on, both PLLs locked, filters settled once
+        rc.at("MDS + 6221 + ExtRef + settle", MDS_SYNC_S + ac_source_restart_s() + extref_lock_s()
+              + state["settling_time_s"], 0)
+    else:
+        rc.tail("ramp", max(1, int(abs(state["sense_current_A"]) / 1e-4)) * 0.02)
     if state.get("enable_field"):       # park the magnet before sample 1, ramp it down at the end
         mcfg = _magnet_cfg(state)
         typ = magnet_move_s(state["magnet_current_A"], mcfg)
@@ -324,17 +394,22 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     if not state.get("device"):
         errors.append("Device is required (e.g. HB3, SV2).")
 
-    if state["source_visa_resource"] == state["voltmeter_visa_resource"]:
+    if not _is_lockin(state) and state["source_visa_resource"] == state["voltmeter_visa_resource"]:
         errors.append("Source (6221) and voltmeter (2182) VISA resources must be different.")
     n_identity_errors = len(errors)
-    if state["sense_current_A"] == 0:
-        errors.append("Sense current must be non-zero (R = V_odd / I).")
-    if state["compliance_V"] <= 0:
-        errors.append("Compliance voltage must be > 0 V.")
-    if state["n_reversals"] < 1:
-        errors.append("±I pairs per sample must be ≥ 1.")
-    elif state["n_reversals"] == 1:
-        warnings.append("One ±I pair per sample gives no error bar (voltage_sem_V is nan).")
+    if _is_lockin(state):
+        _lockin_checks(state, info, warnings, errors)
+    else:
+        if state["sense_current_A"] == 0:
+            errors.append("Sense current must be non-zero (R = V_odd / I).")
+        if state["compliance_V"] <= 0:
+            errors.append("Compliance voltage must be > 0 V.")
+        if state["n_reversals"] < 1:
+            errors.append("±I pairs per sample must be ≥ 1.")
+        elif state["n_reversals"] == 1:
+            warnings.append("One ±I pair per sample gives no error bar (voltage_sem_V is nan).")
+        info.append(f"Sense current: ±{format_si(abs(state['sense_current_A']), 'A')}, "
+                    f"{state['n_reversals']} ±I pairs per sample")
     if state["interval_s"] < 0:
         errors.append("Sample interval must be ≥ 0 s.")
     if state["max_duration_min"] <= 0:
@@ -348,8 +423,6 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
             errors.append(f"Magnet current ({state['magnet_current_A']:g} A) exceeds the "
                           f"current limit ({state['current_limit_A']:g} A).")
 
-    info.append(f"Sense current: ±{format_si(abs(state['sense_current_A']), 'A')}, "
-                f"{state['n_reversals']} ±I pairs per sample")
     if len(errors) == n_identity_errors:        # timing parameters valid -> model the run
         per = sample_time_s(state)
         info.append(f"Per sample: ≈ {per:.2f} s — the temperature drift inside each point "
@@ -388,73 +461,52 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     return info, warnings, errors
 
 
+def _lockin_checks(state: dict, info: list[str], warnings: list[str], errors: list[str]) -> None:
+    """The lock-in mode's own summary lines — the 6221 limits and the MFLI
+    pair, with HARM6's harmonic/naming and φ_I checks."""
+    (_, lead), (_, fol) = six.state_naming(state)
+    info.append(f"Lock-in: leader {lead} · follower {fol} (one sample = both, same poll window)")
+    if state["leader_device"] == state["follower_device"]:
+        errors.append("Leader and follower device IDs must be different.")
+    amp = state["ac_amplitude_A"]
+    if not 0 < amp <= _AC_CURRENT_CEILING_A:
+        errors.append(f"Excitation current must be in (0, {format_si(_AC_CURRENT_CEILING_A, 'A')}] "
+                      "— check for a mistyped exponent.")
+    else:
+        info.append(f"Excitation: {format_si(amp, 'A')} peak ({format_si(amp / math.sqrt(2), 'A')} rms) "
+                    f"@ {state['frequency_Hz']:g} Hz; saved <prefix>_X_ohm = X / I_rms")
+    if not 0 < state["ac_compliance_V"] <= _AC_COMPLIANCE_CEILING_V:
+        errors.append(f"6221 compliance must be in (0, {_AC_COMPLIANCE_CEILING_V:g}] V.")
+    six.harmonic_checks(state, warnings, errors)
+    # no Measure-φ_I mode here: φ_I comes from the dual-harmonic form (6221, same frequency)
+    six.phase_summary({**state, "measure_phi_I": False,
+                       "phi_I_context": six.phi_I_context(state, "6221")}, "6221", info, warnings)
+    for role, label in (("leader", lead), ("follower", fol)):
+        if state[f"{role}_pll_demod_index"] == 0:
+            errors.append(f"{role.title()} PLL phase-detector demod index must differ from 0 "
+                          f"(demod 0 reads the real {label} signal).")
+    for label, tc, order in ((lead, state["time_constant_1f_s"], state["order_1f"]),
+                             (fol, state["time_constant_2f_s"], state["order_2f"])):
+        if tc <= 0:
+            errors.append(f"{label} time constant must be > 0 s.")
+            continue
+        k = 10 if order >= 3 else 5
+        if state["settling_time_s"] < k * tc:
+            warnings.append(f"Settle before the first sample {state['settling_time_s']:g} s < "
+                            f"{k}×TC ({k * tc:g} s) for {label} — its first samples may not have settled.")
+        if state["sample_rate_Hz"] <= 0:
+            errors.append("Demodulator sample rate must be > 0.")
+    if state["n_averages"] < 1:
+        errors.append("Samples averaged per point must be ≥ 1.")
+
+
 def compute_filename_preview(state: dict) -> Optional[str]:
     if not state.get("sample") or state["sample"] == NEW_SAMPLE_SENTINEL or not state.get("device"):
         return None
-    preview = preview_raw_filename(state["sample"], state["device"], MEASUREMENT_TYPE,
+    preview = preview_raw_filename(state["sample"], state["device"],
+                                   lockin_engine.MEASUREMENT_TYPE if _is_lockin(state) else MEASUREMENT_TYPE,
                                    temperature_setpoint_K=state.get("temperature_setpoint_K"))
     return f"{preview}_<timestamp>.csv"
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Live plot  ── own OS process (see dc_iv_curve_tui.py for why)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _live_plot_worker(queue: "mp.Queue") -> None:
-    """Same layout as the PNG (dc_rt_log.plot_results): one R-vs-T panel per
-    sensor that is reading, then R vs time. The panels are built on the first
-    record, since which sensors answered is only known after connect."""
-    import matplotlib.pyplot as plt
-    from matplotlib.animation import FuncAnimation
-
-    fig = plt.figure(figsize=(7, 6))
-    try:
-        fig.canvas.manager.set_window_title("R vs T live log")
-    except Exception:
-        pass
-    fig.text(0.5, 0.5, "Waiting for the first sample …", ha="center", va="center", color="0.5")
-    panels: list = []          # (axes, line, x column, xs, ys)
-
-    def _build(record: dict) -> None:
-        fig.clear()
-        sensors = sensors_in([record])
-        axes = fig.subplots(len(sensors) + 1, 1, squeeze=False)[:, 0]
-        for ax, k in zip(axes, sensors):
-            (line,) = ax.plot([], [], color=SENSOR_COLORS[k - 1], **MARKER)
-            ax.set_xlabel(f"Temperature, sensor {k} (K)")
-            panels.append((ax, line, SENSOR_COLUMNS[k - 1], [], []))
-        (line,) = axes[-1].plot([], [], color=TIME_COLOR, **MARKER)
-        axes[-1].set_xlabel("Time (min)")
-        panels.append((axes[-1], line, "elapsed_min", [], []))
-        for ax in axes:
-            ax.set_ylabel("R (Ω)")
-            ax.grid(True, alpha=0.3)
-        fig.tight_layout()
-
-    def _drain(_frame=None):
-        got = False
-        while True:
-            try:
-                record = queue.get_nowait()
-            except Exception:
-                break
-            if not panels:
-                _build(record)
-            record = {**record, "elapsed_min": record["elapsed_s"] / 60.0}
-            for _ax, _line, col, xs, ys in panels:
-                if record.get(col) is not None:
-                    xs.append(record[col])
-                    ys.append(record["resistance_ohm"])
-            got = True
-        if got:
-            for ax, line, _col, xs, ys in panels:
-                line.set_data(xs, ys)
-                ax.relim()
-                ax.autoscale_view()
-        return tuple(p[1] for p in panels)
-
-    _ani = FuncAnimation(fig, _drain, interval=500, cache_frame_data=False)
-    plt.show()
 
 
 def save_run_png(plan: MeasurementPlan, records: list[dict], png_path: Path, comment: str = "") -> None:
@@ -471,36 +523,20 @@ def save_run_png(plan: MeasurementPlan, records: list[dict], png_path: Path, com
 # Plan + run  ── pure, used by the TUI RunScreen
 # ─────────────────────────────────────────────────────────────────────────────
 
-def build_plan(state: dict, data_root: Path) -> MeasurementPlan:
-    src_cfg = SourceConfig(
-        visa_resource=state["source_visa_resource"],
-        sense_current_A=state["sense_current_A"],
-        compliance_V=state["compliance_V"],
-        source_delay_s=state["source_delay_s"],
-    )
-    volt_cfg = VoltmeterConfig(
-        visa_resource=state["voltmeter_visa_resource"],
-        nplc=state["nplc"],
-        auto_range=state["auto_range"],
-    )
+def _common_plan_kw(state: dict, data_root: Path) -> dict:
+    """The plan fields both read modes share: when to sample / stop, the
+    iTC, the optional target, the fixed field, identity, run cost."""
     acq_cfg = AcquisitionConfig(
-        n_reversals=state["n_reversals"],
+        n_reversals=state.get("n_reversals", 1),
         interval_s=state["interval_s"],
         max_duration_s=state["max_duration_min"] * 60.0,
         T_stop_K=state.get("T_stop_K"),
         output_file="",
     )
-    temp_cfg = temperature_cfg_from_state(state)
     # "Drive iTC to a target": parse_state/form_state already made the target
     # the filename setpoint (with_first_setpoint); run_plan sends it, no wait.
     target_K = state.get("temperature_setpoint_K") if steps_from_state(state) else None
-
     header_extra = {
-        "sense_current_A": state["sense_current_A"],
-        "compliance_V": state["compliance_V"],
-        "n_reversals": state["n_reversals"],
-        "nplc": state["nplc"],
-        "source_delay_s": state["source_delay_s"],
         "interval_s": state["interval_s"],
         "max_duration_min": state["max_duration_min"],
         "T_stop_K": state.get("T_stop_K"),
@@ -517,15 +553,102 @@ def build_plan(state: dict, data_root: Path) -> MeasurementPlan:
                             field_theta_deg=state.get("field_theta_deg"),
                             field_phi_deg=state.get("field_phi_deg"))
     run_cost = run_costs(state)
-    return MeasurementPlan(
-        src_cfg=src_cfg, volt_cfg=volt_cfg, acq_cfg=acq_cfg,
-        sample=state["sample"], device=state["device"],
+    return dict(
+        acq_cfg=acq_cfg, sample=state["sample"], device=state["device"],
         temperature_setpoint_K=state.get("temperature_setpoint_K"),
         cooldown=state["cooldown"], header_extra=header_extra,
-        temp_cfg=temp_cfg, data_root=data_root, temperature_target_K=target_K,
+        temp_cfg=temperature_cfg_from_state(state), data_root=data_root,
+        temperature_target_K=target_K,
         run_cost=run_cost, total_points=len(run_cost.points),
         **field_kw,
     )
+
+
+def _build_dc_plan(state: dict, data_root: Path) -> MeasurementPlan:
+    kw = _common_plan_kw(state, data_root)
+    kw["header_extra"] = {
+        "sense_current_A": state["sense_current_A"],
+        "compliance_V": state["compliance_V"],
+        "n_reversals": state["n_reversals"],
+        "nplc": state["nplc"],
+        "source_delay_s": state["source_delay_s"],
+        **kw["header_extra"],
+    }
+    return MeasurementPlan(
+        src_cfg=SourceConfig(
+            visa_resource=state["source_visa_resource"],
+            sense_current_A=state["sense_current_A"],
+            compliance_V=state["compliance_V"],
+            source_delay_s=state["source_delay_s"],
+        ),
+        volt_cfg=VoltmeterConfig(
+            visa_resource=state["voltmeter_visa_resource"],
+            nplc=state["nplc"],
+            auto_range=state["auto_range"],
+        ),
+        **kw,
+    )
+
+
+def _build_lockin_plan(state: dict, data_root: Path) -> "lockin_engine.MeasurementPlan":
+    """The lock-in mode's plan — HARM6's 6221 / ExtRef / demod configs, one
+    excitation current, demod 0 on each MFLI, phase = harmonic × φ_I."""
+    kw = _common_plan_kw(state, data_root)
+    extref = {role: ExtRefConfig(
+        device=state[f"{role}_device"], extref_index=state[f"{role}_extref_index"],
+        aux_input_ch=state[f"{role}_aux_input_ch"], osc_index=state[f"{role}_osc_index"],
+        pll_demod_index=state[f"{role}_pll_demod_index"], automode=state[f"{role}_automode"],
+    ) for role in ("leader", "follower")}
+    phases = six.demod_phases(state)
+    demods = [DemodConfig(
+        device=state[f"{role}_device"], demod_index=0, harmonic=state[f"{role}_harmonic"],
+        osc_index=state[f"{role}_osc_index"],
+        differential=state["differential"], ac_coupling=state["ac_coupling"],
+        input_range_V=state[f"input_range_{tag}_V"], sample_rate_Hz=state["sample_rate_Hz"],
+        filter=FilterConfig(time_constant_s=state[f"time_constant_{tag}_s"],
+                            order=state[f"order_{tag}"], sinc_filter=state[f"sinc_filter_{tag}"]),
+        phase_deg=phase,
+    ) for role, tag, phase in (("leader", "1f", phases[0]), ("follower", "2f", phases[1]))]
+    kw["header_extra"] = {
+        "excitation_frequency_Hz": state["frequency_Hz"],
+        "excitation_amplitude_A": state["ac_amplitude_A"],
+        "measure_rxx": state["measure_rxx"],
+        **six.phase_header(state),
+        "demod1_time_constant_s": state["time_constant_1f_s"],
+        "demod1_order": state["order_1f"],
+        "demod2_time_constant_s": state["time_constant_2f_s"],
+        "demod2_order": state["order_2f"],
+        "n_averages": state["n_averages"],
+        "settling_time_s": state["settling_time_s"],
+        **kw["header_extra"],
+    }
+    return lockin_engine.MeasurementPlan(
+        daq_host=state["daq_host"], daq_port=state["daq_port"],
+        leader=state["leader_device"], follower=state["follower_device"],
+        ac_cfg=ACSourceConfig(
+            visa_resource=state["source_visa_resource"],
+            amplitude_A=state["ac_amplitude_A"],
+            frequency_Hz=state["frequency_Hz"],
+            compliance_V=state["ac_compliance_V"],
+            phasemarker_line=state["phasemarker_line"],
+        ),
+        leader_extref_cfg=extref["leader"], follower_extref_cfg=extref["follower"],
+        extref_lock_timeout_s=state["extref_lock_timeout_s"],
+        demod1_cfg=demods[0], demod2_cfg=demods[1],
+        leader_measure_rxx=state["leader_measure_rxx"], measure_rxx=state["measure_rxx"],
+        n_averages=state["n_averages"], settling_time_s=state["settling_time_s"],
+        **kw,
+    )
+
+
+def build_plan(state: dict, data_root: Path):
+    """The active read mode's plan (its own MeasurementPlan type)."""
+    return (_build_lockin_plan if _is_lockin(state) else _build_dc_plan)(state, data_root)
+
+
+def engine(plan):
+    """The module that runs `plan` — its run_plan / header / PNG / type code."""
+    return lockin_engine if isinstance(plan, lockin_engine.MeasurementPlan) else sys.modules[__name__]
 
 
 def _ignore(*_args) -> None:
@@ -627,7 +750,7 @@ class RunScreen(MeasurementRunScreen):
     PNG_SUFFIX = PNG_SUFFIX
 
     def live_plot_args(self):
-        return (_live_plot_worker,)
+        return (live_plot_worker,)
 
     def table_row(self, record: dict) -> tuple:
         drift = record.get("temperature_1_drift_K")
@@ -648,11 +771,25 @@ class RunScreen(MeasurementRunScreen):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class DCRTLogApp(MeasurementApp):
-    TITLE = "DC R vs T log"
-    SUB_TITLE = "Keithley 6221 + 2182 · fixed ±I · temperature read only"
+    TITLE = "R vs T log"
+    SUB_TITLE = "6221 + 2182 (±I) or 6221 AC + MFLI pair · temperature read only"
 
     data_root: Path = _DEFAULT_DATA_DIR
     TEMPERATURE_STEPS = False       # one target, sent by run_plan, no settle wait
+
+    # widget id -> the read mode it is shown for (see compose)
+    MODE_WIDGETS = {
+        "mode_dc_sense": "dc", "mode_dc_acq": "dc", "mode_dc_addr": "dc", "mode_dc_timing": "dc",
+        "mode_lockin_excitation": "lockin", "mode_lockin_leader": "lockin",
+        "mode_lockin_follower": "lockin", "mode_lockin_phase": "lockin",
+        "mode_lockin_filter_leader": "lockin", "mode_lockin_filter_follower": "lockin",
+        "mode_lockin_input": "lockin", "mode_lockin_timing": "lockin",
+        "mode_lockin_devices": "lockin", "mode_lockin_marker": "lockin", "mode_lockin_extref": "lockin",
+    }
+
+    def __init__(self, read_mode: Optional[str] = None) -> None:
+        super().__init__()
+        self._forced_mode = read_mode        # "lockin" from mfli/mfli_rt_log_tui.py
 
     SWITCH_DEPENDENTS = {
         "enable_temperature": tuple(TEMPERATURE_FIELD_IDS),
@@ -706,6 +843,11 @@ class DCRTLogApp(MeasurementApp):
 
                 with Vertical(classes="param-grid"):
                     yield card(
+                        "Read",
+                        select_field("read_mode", "What reads the sample", READ_MODES, DEFAULTS["read_mode"],
+                                     hint="Lock-in: two probe pairs at once (e.g. R_xx + R_xy)."),
+                    )
+                    yield card(
                         "Sense current (Keithley 6221)",
                         field("sense_current_A", "Sense current (A)", DEFAULTS["sense_current_A"],
                               hint="Reversed ±I every pair. Keep it small enough to avoid self-heating."),
@@ -713,6 +855,40 @@ class DCRTLogApp(MeasurementApp):
                               kind="integer",
                               validators=[Number(minimum=1, failure_description="must be ≥ 1")],
                               hint="More = quieter, but a longer sample (more drift inside it)."),
+                        id="mode_dc_sense",
+                    )
+                    yield card(
+                        "Keithley 6221 AC current",
+                        field("ac_amplitude_A", "Excitation current (A, peak)", DEFAULTS["ac_amplitude_A"],
+                              hint="Continuous sine for the whole log. Mind self-heating."),
+                        field("frequency_Hz", "Excitation frequency (Hz)", DEFAULTS["frequency_Hz"],
+                              hint="~300-1000 Hz; avoid multiples of 50/60 Hz.",
+                              validators=[Number(minimum=1e-3, failure_description="must be > 0")]),
+                        field("ac_compliance_V", "6221 voltage compliance (V)", DEFAULTS["ac_compliance_V"],
+                              validators=[Number(minimum=0.1, failure_description="must be > 0")]),
+                        id="mode_lockin_excitation",
+                    )
+                    for role, harmonic_id, rxx_id in (("Leader", "leader_harmonic", "leader_measure_rxx"),
+                                                      ("Follower", "follower_harmonic", "measure_rxx")):
+                        yield card(
+                            f"{role} MFLI",
+                            select_field(harmonic_id, "Harmonic", six.HARMONIC_OPTIONS,
+                                         int(DEFAULTS[harmonic_id]), hint="Saved as <h>f_* columns."),
+                            switch_field(rxx_id, "R_xx — save as rxx_<h>f_*", DEFAULTS[rxx_id]),
+                            Static("R_xx only renames the columns — wire this MFLI's Signal Input "
+                                   "to the matching probe pair.", classes="hint"),
+                            id=f"mode_lockin_{role.lower()}",
+                        )
+                    yield card(
+                        "Reference phase (φ_I)",
+                        field("leader_phi_I_deg", "Leader φ_I — current phase at its input, 1f (°)",
+                              DEFAULTS["leader_phi_I_deg"]),
+                        field("follower_phi_I_deg", "Follower φ_I — current phase at its input, 1f (°)",
+                              DEFAULTS["follower_phi_I_deg"]),
+                        Static("Measure once with the dual-harmonic form's Measure φ_I (6221 source, "
+                               "same frequency) and copy the values here. Demod phase = harmonic × φ_I; "
+                               "the sign of X / I depends on it.", classes="hint"),
+                        id="mode_lockin_phase",
                     )
                     yield card(
                         "When to sample / stop",
@@ -765,16 +941,93 @@ class DCRTLogApp(MeasurementApp):
                                   hint="Bigger = quieter but slower.",
                                   validators=[Number(minimum=0.01, failure_description="must be > 0")]),
                             switch_field("auto_range", "Auto-range", DEFAULTS["auto_range"]),
+                            id="mode_dc_acq",
+                        )
+                        for role, tag in (("Leader", "1f"), ("Follower", "2f")):
+                            yield card(
+                                f"{role} MFLI filter",
+                                field(f"time_constant_{tag}_s", "Filter time constant (s)",
+                                      DEFAULTS[f"time_constant_{tag}_s"], hint="Bigger = quieter but slower.",
+                                      validators=[Number(minimum=1e-6, failure_description="must be > 0")]),
+                                select_field(f"order_{tag}", "Filter order", list(range(1, 9)),
+                                             int(DEFAULTS[f"order_{tag}"])),
+                                switch_field(f"sinc_filter_{tag}", "Sinc filter (extra harmonic rejection)",
+                                             DEFAULTS[f"sinc_filter_{tag}"]),
+                                id=f"mode_lockin_filter_{role.lower()}",
+                            )
+                        yield card(
+                            "MFLI inputs",
+                            switch_field("differential", "Differential input (IN+/IN-)", DEFAULTS["differential"]),
+                            switch_field("ac_coupling", "AC-couple the input", DEFAULTS["ac_coupling"]),
+                            field("input_range_1f_V", "Leader input range (V)", DEFAULTS["input_range_1f_V"],
+                                  validators=[Number(minimum=1e-6, failure_description="must be > 0")]),
+                            field("input_range_2f_V", "Follower input range (V)", DEFAULTS["input_range_2f_V"],
+                                  validators=[Number(minimum=1e-6, failure_description="must be > 0")]),
+                            field("sample_rate_Hz", "Demodulator sample rate (Sa/s)", DEFAULTS["sample_rate_Hz"],
+                                  validators=[Number(minimum=1e-3, failure_description="must be > 0")]),
+                            id="mode_lockin_input",
+                        )
+                        yield card(
+                            "Lock-in timing",
+                            field("settling_time_s", "Settle before the first sample (s)",
+                                  DEFAULTS["settling_time_s"],
+                                  hint="Once, after the PLLs lock. ≥ 5×TC (order 1), ≥ 10×TC (order 3-4).",
+                                  validators=[Number(minimum=0.0, failure_description="must be ≥ 0")]),
+                            field("n_averages", "Samples averaged per sample", DEFAULTS["n_averages"],
+                                  kind="integer",
+                                  validators=[Number(minimum=1, failure_description="must be ≥ 1")],
+                                  hint="More = quieter, but a longer sample (more drift inside it)."),
+                            id="mode_lockin_timing",
                         )
 
                 with Collapsible(title="Instrument configuration & addresses", collapsed=True):
                     with Vertical(classes="stable-grid"):
                         yield card(
-                            "Instrument addresses",
-                            field("source_visa_resource", "6221 (current source)",
-                                  DEFAULTS["source_visa_resource"], kind="text"),
+                            "2182 address",
                             field("voltmeter_visa_resource", "2182 (voltage)",
                                   DEFAULTS["voltmeter_visa_resource"], kind="text"),
+                            muted=True, id="mode_dc_addr",
+                        )
+                        yield card(
+                            "MFLI devices & connection",
+                            field("leader_device", "Leader MFLI", DEFAULTS["leader_device"], kind="text"),
+                            field("follower_device", "Follower MFLI", DEFAULTS["follower_device"], kind="text"),
+                            field("daq_host", "LabOne data server host", DEFAULTS["daq_host"], kind="text"),
+                            field("daq_port", "LabOne data server port", DEFAULTS["daq_port"], kind="integer"),
+                            muted=True, id="mode_lockin_devices",
+                        )
+                        yield card(
+                            "6221 phase marker → both MFLIs",
+                            field("phasemarker_line", "6221 Trigger Link phase-marker pin",
+                                  DEFAULTS["phasemarker_line"], kind="integer",
+                                  validators=[Number(minimum=1, maximum=6, failure_description="must be 1-6")]),
+                            field("extref_lock_timeout_s", "Reference lock timeout (s)",
+                                  DEFAULTS["extref_lock_timeout_s"]),
+                            muted=True, id="mode_lockin_marker",
+                        )
+                        yield card(
+                            "MFLI ExtRef (phase marker → both MFLIs' Aux In)",
+                            *(group for role in ("leader", "follower") for group in (
+                                field(f"{role}_extref_index", f"{role.title()} ExtRef module index",
+                                      DEFAULTS[f"{role}_extref_index"], kind="integer"),
+                                field(f"{role}_aux_input_ch", f"{role.title()} Aux In channel (0 = Aux In 1)",
+                                      DEFAULTS[f"{role}_aux_input_ch"], kind="integer"),
+                                field(f"{role}_osc_index", f"{role.title()} oscillator index",
+                                      DEFAULTS[f"{role}_osc_index"], kind="integer"),
+                                field(f"{role}_pll_demod_index", f"{role.title()} PLL phase-detector demod index",
+                                      DEFAULTS[f"{role}_pll_demod_index"], kind="integer",
+                                      hint="Not 0 (demod 0 reads the signal).",
+                                      validators=[Number(minimum=0, failure_description="must be ≥ 0")]),
+                                select_field(f"{role}_automode", f"{role.title()} PLL bandwidth adaptation",
+                                             six.AUTOMODE_OPTIONS, int(DEFAULTS[f"{role}_automode"]),
+                                             hint=six.AUTOMODE_HINT),
+                            )),
+                            muted=True, id="mode_lockin_extref",
+                        )
+                        yield card(
+                            "Instrument addresses",
+                            field("source_visa_resource", "6221 (current source, both modes)",
+                                  DEFAULTS["source_visa_resource"], kind="text"),
                             field("temperature_visa_resource", "MercuryiTC",
                                   DEFAULTS["temperature_visa_resource"], kind="text"),
                             field("magnet_visa_resource", "Magnet (Kepco)",
@@ -806,7 +1059,7 @@ class DCRTLogApp(MeasurementApp):
                             "Source timing",
                             field("source_delay_s", "6221 source delay (s)", DEFAULTS["source_delay_s"],
                                   hint="Settle after each polarity flip."),
-                            muted=True,
+                            muted=True, id="mode_dc_timing",
                         )
 
             with Vertical(id="sidebar"):
@@ -836,8 +1089,33 @@ class DCRTLogApp(MeasurementApp):
         phi = None if parse_errors else state.get("field_phi_deg")
         self.query_one("#field_diagram", Static).update(render_ascii_field_diagram(theta, phi))
 
-    def _build_plan(self, state: dict) -> MeasurementPlan:
+    def _build_plan(self, state: dict):
         return build_plan(state, self.data_root)
+
+    # ── Read toggle ──────────────────────────────────────────────────────────
+
+    def on_mount(self) -> None:
+        super().on_mount()
+        if self._forced_mode:
+            self.query_one("#read_mode", Select).value = self._forced_mode
+        self._show_modes()
+
+    def _show_modes(self) -> None:
+        mode = self.query_one("#read_mode", Select).value
+        for widget_id, shown_for in self.MODE_WIDGETS.items():
+            self.query_one(f"#{widget_id}").display = mode == shown_for
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id == "read_mode":
+            self._show_modes()
+        super().on_select_changed(event)
+
+    def parse_state(self) -> tuple[dict, list[str]]:
+        state, errors = super().parse_state()
+        return state, mode_errors(state, errors)
+
+    def run_screen(self, plan):
+        return engine(plan).RunScreen(plan)
 
 
 def main() -> None:

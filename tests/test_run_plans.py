@@ -38,6 +38,8 @@ MULTI_RUN = [
 SINGLE_RUN = [
     ("dc.dc_rt_log_tui", "DCRTLogApp", {}),
     ("dc.dc_rt_log_tui", "DCRTLogApp", {"enable_field": True, "magnet_current_A": "1"}),
+    ("dc.dc_rt_log_tui", "DCRTLogApp", {"read_mode": "lockin"}),
+    ("dc.dc_rt_log_tui", "DCRTLogApp", {"read_mode": "lockin", "enable_field": True, "magnet_current_A": "1"}),
     ("mfli.mfli_dual_harmonic_tui", "MFLIDualHarmonicApp", {}),
     ("mfli.mfli_diff_resistance_tui", "MFLIDiffResistanceApp", {}),
 ]

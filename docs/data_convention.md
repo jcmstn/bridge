@@ -84,6 +84,7 @@ Example: `A_0001_HB3_NOISE_T293K_20260811T143022.csv`
 | `PHCAL` | Phase calibration (`mfli_phase_calibration`, retired 2026-10 — superseded by the dual-harmonic form's Measure φ_I; kept so old files resolve) |
 | `NOISE` | Noise-floor estimate, 6221-sourced AC current (`mfli_noise_spectrum`) |
 | `RT`    | Resistance vs. temperature — the free-drift ±I log (`dc/dc_rt_log`) and the setpoint template (`examples/custom_program.py`) |
+| `RTAC`  | Resistance vs. temperature, lock-in read — the same free-drift log read by the 6221 AC + MFLI pair (two probe pairs at once, e.g. R_xy + R_xx) (`mfli/mfli_rt_log`) |
 | `SOTPS` | SOT pulsed switching — 4200A PMU write pulse + delayed 6221/2182 R_xy read (`sot/sot_pulsed_switching`) |
 | `SOT2H` | SOT pulsed switching, 2nd-harmonic read — 4200A PMU write pulse + delayed 6221 AC / MFLI 1f+2f read (`sot/sot_pulsed_switching_2h`) |
 | `SOT1I` | SOT pulsed switching, 6221-only (no 4200A) — hardware-timed 6221 WAVE write pulse + delayed 6221 AC / MFLI harmonic read (`sot/sot_pulsed_switching_6221`) |
@@ -98,6 +99,12 @@ exactly the classic `1f_*` / `2f_*` file. Follower 1f with R_xx on saves the
 former R_xx mode's `1f_*` / `rxx_1f_*` file. `HARM6`'s `measure_rxx` column
 is the follower's R_xx switch. A form whose two prefixes would clash will
 not start.
+
+`RTAC` rows carry `RT`'s time / temperature / drift / field columns and,
+per MFLI, `HARM6`'s demod columns with the same `<h>f_` / `rxx_<h>f_`
+prefixes, plus `<prefix>_X_ohm` = X / I_rms (in-phase; I_rms = 6221 peak /
+√2) and `excitation_current_A_peak`. The PLL-tracked frequency, demod phases
+and filters are in the header (read once at start), not per row.
 
 `HARM` / `HARM6` / `SOT2H` / `SOT1I` can be read with SRS SR830s instead
 of the MFLI(s). Same type code and columns; the header gets `lockin: SR830`
