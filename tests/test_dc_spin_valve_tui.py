@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 import dc.dc_spin_valve_tui as tui
 from instruments.data_naming import allocate_run, ensure_sample
 
@@ -120,3 +122,75 @@ def test_multi_file_session_cross_product_of_current_and_gate(tmp_path: Path, mo
         for _, gv in plan.series_values
     ]
     assert [c.run_number for c in contexts] == [1, 2, 3, 4]
+
+
+class _FakeSMU:
+    """2450 stand-in: sample of R_2w = 150 Ohm with a +0.2 mV offset on its
+    own reading; the 2182 sees R = 100 Ohm with a +1 mV thermal offset."""
+    def __init__(self, voltage_mode: bool) -> None:
+        self.voltage_mode = voltage_mode
+        self.source_current = self.source_voltage = 0.0
+
+    @property
+    def i(self) -> float:
+        return self.source_voltage / 150.0 if self.voltage_mode else self.source_current
+
+    @property
+    def voltage(self) -> float:
+        return 150.0 * self.i + 2e-4
+
+    @property
+    def current(self) -> float:
+        return self.i + 1e-7
+
+
+class _FakeVoltmeter:
+    def __init__(self, smu: _FakeSMU) -> None:
+        self.smu = smu
+
+    @property
+    def voltage(self) -> float:
+        return 100.0 * self.smu.i + 1e-3
+
+
+def test_acquire_smu_reversal_current_and_voltage_mode() -> None:
+    from dc.dc_spin_valve import acquire_smu_reversal, SMUConfig
+
+    for voltage_mode, level in [(False, 1e-3), (True, 0.15)]:
+        smu = _FakeSMU(voltage_mode)
+        cfg = SMUConfig(source_function="voltage" if voltage_mode else "current",
+                        source_limit_A=1e-3)
+        vm = _FakeVoltmeter(smu)
+
+        on = acquire_smu_reversal(smu, cfg, vm, level, n=3, reversal=True)
+        assert on["mean"] == pytest.approx(0.1)          # odd: 100 Ohm x 1 mA, offset cancelled
+        assert on["even_mean"] == pytest.approx(1e-3)    # even: the thermal offset
+        assert on["smu_mean"] == pytest.approx(0.15 if not voltage_mode else 1e-3)
+        assert on["n_reversals"] == 3
+        assert (smu.source_voltage if voltage_mode else smu.source_current) == level
+
+        off = acquire_smu_reversal(smu, cfg, vm, level, n=2, reversal=False)
+        assert off["mean"] == pytest.approx(0.101) and off["even_mean"] is None
+
+
+def test_build_plan_2450_modes(tmp_path: Path) -> None:
+    app = tui.DCSpinValveApp()
+    app.data_root = tmp_path
+    smu = dict(use_2450=True, smu_visa_resource="GPIB0::18::INSTR", plot_2wire=False,
+               smu_compliance_current_A=1e-3, smu_voltage_limit_V=21.0, enable_gate=False,
+               gate_voltage_list=[])
+
+    assert app._build_plan(_state()).smu_cfg is None
+    assert app._build_plan(_state()).header_extra["source_instrument"] == "6221"
+
+    cur = app._build_plan(_state(**smu, smu_source_voltage=False))
+    assert cur.smu_cfg.source_function == "current"
+    assert cur.smu_cfg.source_limit_A == pytest.approx(1e-3)
+    assert cur.show_2wire is False
+
+    volt = app._build_plan(_state(**smu, smu_source_voltage=True,
+                                  source_voltage_list=[0.1, 0.2]))
+    assert volt.smu_cfg.source_function == "voltage"
+    assert volt.sense_currents_A == [0.1, 0.2]
+    assert volt.header_extra["source_instrument"] == "2450"
+    assert volt.series != ""

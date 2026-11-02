@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-DC Spin-Valve / Field Sweep — Keithley 6221/2182 + Kepco magnet + gate
+DC Spin-Valve / Field Sweep — Keithley 6221 (or 2450)/2182 + Kepco magnet + gate
 ==========================================================================
 Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
 Created: 2026-08-04
@@ -12,6 +12,13 @@ Wiring
 ------
     Keithley 6221 (current source)
       Output (current) ──▶ sample ── common ground
+
+      — or —
+
+    Keithley 2450 (SMU, sources current OR voltage, 2-wire)
+      Force HI/LO ──▶ sample current leads
+      Also logs its own 2-wire reading (V when sourcing I, I when
+      sourcing V) → smu_voltage_V / smu_current_A / resistance_2w_ohm
 
     Keithley 2182 (nanovoltmeter)
       Channel 1 (differential) ──▶ across the sample (longitudinal
@@ -25,7 +32,8 @@ Wiring
 
 Method
 ------
-Sources a fixed DC sense current with the 6221 and reads the longitudinal
+Sources a fixed DC sense current with the 6221 (or a fixed current or
+voltage with the 2450 — see acquire_smu_reversal()) and reads the longitudinal
 voltage with the 2182, reversing the current (+I / -I) at each field point
 and decomposing the voltage into odd (the reported voltage/R) and even
 parts. See docs/current-reversal.md for why both are recorded (columns
@@ -44,6 +52,7 @@ Requirements:
 import time
 import logging
 import threading
+import numpy as np
 import pandas as pd
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -62,6 +71,14 @@ from instruments.keithley2182 import (
     VoltmeterConfig,
     connect_voltmeter,
     acquire_averaged_voltage,
+)
+from instruments.keithley2450 import (
+    Keithley2450,
+    SMUConfig,
+    connect_smu,
+    read_measurement,
+    set_source_level,
+    shutdown_smu,
 )
 from instruments.keithley2400 import (
     GateConfig,
@@ -146,6 +163,61 @@ class FieldPoint:
     set_action: Optional[Callable[[], None]] = field(default=None, repr=False)
 
 
+def acquire_smu_reversal(
+    smu: Keithley2450,
+    smu_cfg: SMUConfig,
+    voltmeter: Keithley2182,
+    level: float,
+    n: int,
+    reversal: bool = True,
+    stop_event: Optional[threading.Event] = None,
+    source_delay_s: float = 0.0,
+) -> dict:
+    """
+    The 2450 counterpart of keithley6221.acquire_reversal_averaged_voltage():
+    source `level` (A or V, per smu_cfg.source_function), and at each
+    polarity read both the 2182 and the 2450's own (2-wire) sense quantity.
+
+    `reversal=True`: n +level/-level pairs, decomposed into odd/even parts
+    exactly like the 6221 path. `reversal=False`: n plain samples at +level,
+    `even_mean`/`even_sem` are None. `smu_mean`/`smu_sem` are the odd part
+    (or plain mean) of the 2450 reading. Leaves the source at +level.
+    """
+    v_odd, v_even, s_odd = np.empty(n), np.empty(n), np.empty(n)
+    n_used = 0
+
+    def _read(lvl: float) -> tuple[float, float]:
+        set_source_level(smu, smu_cfg, lvl)
+        if source_delay_s > 0:
+            time.sleep(source_delay_s)
+        return voltmeter.voltage, read_measurement(smu, smu_cfg)
+
+    for i in range(n):
+        v_plus, s_plus = _read(level)
+        if reversal:
+            v_minus, s_minus = _read(-level)
+            v_odd[i], v_even[i] = (v_plus - v_minus) / 2.0, (v_plus + v_minus) / 2.0
+            s_odd[i] = (s_plus - s_minus) / 2.0
+        else:
+            v_odd[i], s_odd[i] = v_plus, s_plus
+        n_used = i + 1
+        if stop_event is not None and stop_event.is_set():
+            break
+    if reversal:
+        set_source_level(smu, smu_cfg, level)
+
+    def _stats(a: np.ndarray) -> tuple[float, float]:
+        a = a[:n_used]
+        sem = float(np.std(a, ddof=1) / np.sqrt(n_used)) if n_used >= 2 else float("nan")
+        return float(np.mean(a)), sem
+
+    mean, sem = _stats(v_odd)
+    even_mean, even_sem = _stats(v_even) if reversal else (None, None)
+    smu_mean, smu_sem = _stats(s_odd)
+    return {"mean": mean, "sem": sem, "even_mean": even_mean, "even_sem": even_sem,
+            "smu_mean": smu_mean, "smu_sem": smu_sem, "n_reversals": n_used}
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Main measurement loop
 # ─────────────────────────────────────────────────────────────────────────────
@@ -164,6 +236,9 @@ def run_measurement(
     temp_ctrl: Optional[MercuryITC] = None,
     temp_cfg:  Optional[TemperatureControllerConfig] = None,
     write_csv: Optional[Callable[[List[dict]], None]] = None,
+    smu: Optional[Keithley2450] = None,
+    smu_cfg: Optional[SMUConfig] = None,
+    smu_level: Optional[float] = None,
 ) -> pd.DataFrame:
     """
     Iterate over `points`, acquire the reversal-averaged voltage at each,
@@ -192,6 +267,13 @@ def run_measurement(
     MercuryiTC controller (see mercury_itc.py). Passing `temp_ctrl=None`
     (e.g. because the MercuryiTC isn't connected) simply leaves those
     columns empty — it's never a reason to stop the measurement.
+
+    `smu`/`smu_cfg`/`smu_level`, if given, replace the 6221 (pass
+    `source=None`): the 2450 sources `smu_level` (A or V per
+    smu_cfg.source_function) and its own 2-wire reading is logged too
+    (smu_voltage_V, smu_current_A, resistance_2w_ohm). `src_cfg` then only
+    supplies source_delay_s. In voltage mode sense_current_A is the
+    MEASURED current, so resistance_ohm stays V_2182 / I.
     """
     records: List[dict] = []
 
@@ -230,7 +312,30 @@ def run_measurement(
         # the current there destroys the signal rather than cleaning it up
         # — so acq_cfg.reversal_enabled lets the sense current be held fixed
         # and just averaged plainly instead.
-        if acq_cfg.reversal_enabled:
+        smu_cols: dict = {}
+        if smu is not None:
+            rv = acquire_smu_reversal(
+                smu, smu_cfg, voltmeter, smu_level, acq_cfg.n_averages,
+                acq_cfg.reversal_enabled, stop_event, src_cfg.source_delay_s)
+            v_mean, v_sem = rv["mean"], rv["sem"]
+            v_even_mean, v_even_sem = rv["even_mean"], rv["even_sem"]
+            n_used = rv["n_reversals"]
+            if smu_cfg.source_function == "voltage":
+                i_sense = rv["smu_mean"]
+                smu_cols = {"smu_voltage_V": smu_level, "smu_current_A": i_sense,
+                            "smu_current_sem_A": rv["smu_sem"],
+                            "resistance_2w_ohm": smu_level / i_sense}
+            else:
+                i_sense = smu_level
+                smu_cols = {"smu_voltage_V": rv["smu_mean"], "smu_voltage_sem_V": rv["smu_sem"],
+                            "smu_current_A": smu_level,
+                            "resistance_2w_ohm": rv["smu_mean"] / smu_level}
+            r = v_mean / i_sense
+            log.info("   V=%.4e V  SEM=%.2e V  R=%.5g Ω  R_2w=%.5g Ω  (n=%d, 2450 %s source)",
+                      v_mean, v_sem, r, smu_cols["resistance_2w_ohm"], n_used,
+                      smu_cfg.source_function)
+        elif acq_cfg.reversal_enabled:
+            i_sense = src_cfg.sense_current_A
             rv = acquire_reversal_averaged_voltage(
                 source, voltmeter, src_cfg.sense_current_A, acq_cfg.n_averages,
                 stop_event, source_delay_s=src_cfg.source_delay_s)
@@ -241,6 +346,7 @@ def run_measurement(
             log.info("   V=%.4e V  SEM=%.2e V  R=%.5g Ω  V_even=%.4e V  (n=%d reversals)",
                       v_mean, v_sem, r, v_even_mean, n_used)
         else:
+            i_sense = src_cfg.sense_current_A
             av = acquire_averaged_voltage(voltmeter, acq_cfg.n_averages, stop_event)
             v_mean, v_sem = av["mean"], av["sem"]
             v_even_mean, v_even_sem = None, None
@@ -261,7 +367,7 @@ def run_measurement(
             "magnet_field_mT":  field_mT,
             "temperature_1_K":  temp_1_K,
             "temperature_2_K":  temp_2_K,
-            "sense_current_A":  src_cfg.sense_current_A,
+            "sense_current_A":  i_sense,
             "reversal_enabled": acq_cfg.reversal_enabled,
             "voltage_V":        v_mean,
             "voltage_sem_V":    v_sem,
@@ -270,6 +376,7 @@ def run_measurement(
             "resistance_ohm":   r,
             "n_averages":       n_used,
             "gate_voltage_V":   gate_voltage_V,
+            **smu_cols,
         }
         if isinstance(settle_info, dict):
             record.update({

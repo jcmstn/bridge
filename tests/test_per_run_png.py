@@ -112,7 +112,8 @@ def test_every_run_gets_its_own_png_and_no_combined(tmp_path, mod, suffix, make)
     # and the program's own PNG hook.
     screen = mod.RunScreen.__new__(mod.RunScreen)
     screen.plan = SimpleNamespace(data_root=tmp_path, field_theta_deg=None, field_phi_deg=None,
-                                  header_extra={}, read_cfg=SimpleNamespace(harmonic=2))
+                                  header_extra={}, read_cfg=SimpleNamespace(harmonic=2),
+                                  smu_cfg=None, show_2wire=False)
     screen._png_path = None
     run_strs = []
     for idx in range(3):
@@ -172,7 +173,7 @@ def test_spin_valve_png_annotates_the_runs_own_sense_current_and_gate(tmp_path) 
     # meaningless once each run of a series is plotted alone.
     for mod in (sv_tui,):
         figs = _capture_figs(lambda: mod._save_measurement_png(
-            _records(_spin_valve, 1), tmp_path / "sv.png", plan=SimpleNamespace()))
+            _records(_spin_valve, 1), tmp_path / "sv.png", plan=SimpleNamespace(smu_cfg=None, show_2wire=False)))
         text = "\n".join(t.get_text() for t in figs[0].texts)
         assert "Sense current: 2 mA" in text
         assert "Gate voltage: 4 V" in text
