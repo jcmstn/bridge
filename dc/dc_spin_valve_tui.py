@@ -87,7 +87,7 @@ from instruments.data_naming import (
 )
 from instruments.keithley2182 import read_time_s
 from instruments.keithley6221 import reversal_avg_s
-from instruments.kepco_magnet import magnet_move_s
+from instruments.kepco_magnet import MAGNET_MODELS, magnet_move_s
 from instruments.lakeshore475 import read_field_s
 from instruments.run_time import (
     GATE_RAMP_S, GPIB_TXN_S, PER_FILE_S, PER_RUN_S, POINT_OVERHEAD_S, TEMP_READ_S,
@@ -106,6 +106,7 @@ from instruments.tui_common import (
     format_si,
     identity_bar,
     parse_sensor_uids,
+    select_field,
     temperature_card,
     switch_field,
     sweep_rows_field,
@@ -128,7 +129,8 @@ MEASUREMENT_TYPE = "BSWP"
 DC_SPIN_VALVE_DESCRIPTION = (
     "6221 fixed current — or 2450 fixed I/V, 2-wire logged too — (±reversal, can be "
     "off) · 2182 voltage. Kepco field "
-    "sweep, read by Lake Shore 475. Optional 2400 gate: fixed, or a list → one "
+    "sweep, read by Lake Shore 475 (can be off → vs magnet current). Optional 2400 "
+    "gate: fixed, or a list → one "
     "sweep per value."
 )
 
@@ -152,8 +154,10 @@ DC_SPIN_VALVE_SCHEMATIC = """\
     Fixed per sweep, single value or list
 
   Magnet field sweep  (the swept axis)
-    Kepco BOP-GL      ──GPIB──▶ electromagnet coil
+    Kepco BOP 20-50GL ──GPIB──▶ electromagnet coil
+      (or BOP 36-28MG — "Advanced": instrument configuration)
     Lake Shore 475    ──GPIB──▶ Gaussmeter probe at the sample
+      (optional — off: no field read, plotted vs magnet current)
 """
 
 
@@ -189,6 +193,8 @@ DEFAULTS: dict = {
     "gate_compliance_current_A": "0.000001",
     "gate_voltage_values": "0.0",
     "magnet_visa_resource": "GPIB0::6::INSTR",
+    "magnet_model": "BOP 20-50GL",
+    "enable_gaussmeter": True,
     "current_limit_A": "35",
     "voltage_compliance_V": "15.0",
     "ramp_step_A": "0.1",
@@ -228,6 +234,8 @@ TEXT_FIELDS = ["source_visa_resource", "voltmeter_visa_resource", "gate_visa_res
 OPTIONAL_NUMERIC_FIELDS = ["temperature_setpoint_K"]
 GATE_FIELD_IDS = ["gate_visa_resource", "gate_voltage_limit_V",
                    "gate_compliance_current_A", "gate_voltage_values"]
+GAUSS_FIELD_IDS = ["gaussmeter_visa_resource", "gaussmeter_n_averages",
+                   "gaussmeter_read_delay_s", "field_settle_tolerance_mT"]
 SMU_V_FIELD_IDS = ["source_voltage_values", "smu_compliance_current_A", "smu_voltage_limit_V"]
 
 
@@ -268,11 +276,13 @@ def run_costs(currents_A, state: dict) -> RunCost:
 
     rc = RunCost(n_pts * n_series)
     rc.each("settle", state["settling_time_s"])
-    rc.each("field read", read_field_s(gcfg))
+    has_gauss = state.get("enable_gaussmeter", True)
+    if has_gauss:
+        rc.each("field read", read_field_s(gcfg))
     rc.each("2182 + 2450 reads" if state.get("use_2450") else "2182 reads", reads_s)
     rc.each("overhead", POINT_OVERHEAD_S + (TEMP_READ_S if has_temp else 0.0))
     for i, hop in enumerate(field_hops(currents_A, n_series)):
-        typ = magnet_move_s(hop, mcfg)
+        typ = magnet_move_s(hop, mcfg, with_field=has_gauss)
         rc.at("magnet", typ, i)
     for k in range(n_series):
         rc.at("per-file", PER_FILE_S, k * n_pts)
@@ -292,7 +302,7 @@ class MeasurementPlan:
     src_cfg: SourceConfig
     volt_cfg: VoltmeterConfig
     magnet_cfg: MagnetConfig
-    gauss_cfg: GaussmeterConfig
+    gauss_cfg: Optional[GaussmeterConfig]   # None -> gaussmeter off, no field read
     acq_cfg: AcquisitionConfig
     currents_A: np.ndarray
     sense_currents_A: List[float]
@@ -488,6 +498,13 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
     else:
         rows = state.get("sweep_rows_parsed", [])
         max_abs_I = max((max(abs(s), abs(e)) for s, e, _ in rows), default=0.0)
+        model_cls = MAGNET_MODELS[state.get("magnet_model", "BOP 20-50GL")]
+        if state["current_limit_A"] > model_cls.MAX_CURRENT:
+            errors.append(f"Magnet current limit {state['current_limit_A']:g} A exceeds the "
+                          f"{state.get('magnet_model')} rating ({model_cls.MAX_CURRENT:g} A).")
+        if state["voltage_compliance_V"] > model_cls.MAX_VOLTAGE:
+            errors.append(f"Magnet voltage compliance {state['voltage_compliance_V']:g} V exceeds the "
+                          f"{state.get('magnet_model')} rating ({model_cls.MAX_VOLTAGE:g} V).")
         if max_abs_I > state["current_limit_A"]:
             errors.append(
                 f"Sweep range (±{max_abs_I:g} A) exceeds the current limit "
@@ -504,14 +521,19 @@ def build_summary(state: dict) -> tuple[list[str], list[str], list[str]]:
         info.append(f"Field sweep: {n_sweep_points} points — {len(rows)} row(s)"
                      f"{', bidirectional' if state['bidirectional_sweep'] else ''}"
                      f"{merged_note}")
-    info.append(f"Field read: Lake Shore 475 — {state['gaussmeter_visa_resource']}")
+    if state.get("magnet_model", "BOP 20-50GL") != "BOP 20-50GL":
+        info.append(f"Magnet supply: Kepco {state['magnet_model']}")
     tol_mT = state["field_settle_tolerance_mT"]
-    if tol_mT <= 0:
-        warnings.append("Field-settle tolerance is 0 — every magnet step will wait the "
-                         "full settle timeout before acquiring.")
-    elif tol_mT < 0.01:
-        warnings.append(f"Field-settle tolerance {tol_mT:g} mT is below the 475's typical "
-                         "reading noise — points may stall until the settle timeout.")
+    if not state.get("enable_gaussmeter", True):
+        info.append("Field read: off — field column empty, plotted vs magnet current")
+    else:
+        info.append(f"Field read: Lake Shore 475 — {state['gaussmeter_visa_resource']}")
+        if tol_mT <= 0:
+            warnings.append("Field-settle tolerance is 0 — every magnet step will wait the "
+                             "full settle timeout before acquiring.")
+        elif tol_mT < 0.01:
+            warnings.append(f"Field-settle tolerance {tol_mT:g} mT is below the 475's typical "
+                             "reading noise — points may stall until the settle timeout.")
 
     info.extend(run_costs(resolved, state).lines())
 
@@ -542,7 +564,7 @@ def compute_filename_preview(state: dict) -> Optional[str]:
 # Live plot  ── runs in its own OS process, well away from the TUI
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _live_plot_worker(queue: "mp.Queue", show_2wire: bool = False) -> None:
+def _live_plot_worker(queue: "mp.Queue", show_2wire: bool = False, has_field: bool = True) -> None:
     import matplotlib.pyplot as plt
     from matplotlib.animation import FuncAnimation
 
@@ -559,7 +581,7 @@ def _live_plot_worker(queue: "mp.Queue", show_2wire: bool = False) -> None:
         fig.canvas.manager.set_window_title("DC Spin-Valve live measurement")
     except Exception:
         pass
-    bottom.set_xlabel("Magnetic field (mT)")
+    bottom.set_xlabel("Magnetic field (mT)" if has_field else "Magnet current (A)")
     ax.set_ylabel("Voltage (V)")
     ax.set_title("Live measurement — field sweep")
     ax.grid(True, alpha=0.3)
@@ -588,7 +610,7 @@ def _live_plot_worker(queue: "mp.Queue", show_2wire: bool = False) -> None:
                 series_data[idx] = ([], [], [])
                 new_series = True
             xs, ys, r2s = series_data[idx]
-            x = record.get("magnet_field_mT")
+            x = record.get("magnet_field_mT" if has_field else "magnet_current_A")
             xs.append(x if x is not None else record["point_index"])
             ys.append(record["voltage_V"])
             r2s.append(record.get("resistance_2w_ohm", float("nan")))
@@ -636,15 +658,19 @@ def _save_measurement_png(records: list[dict], png_path: Path,
     else:
         fig, ax = plt.subplots(figsize=(7, 5))
 
+    # No gaussmeter -> the field column is empty; plot vs the magnet current instead.
     has_field = any(r.get("magnet_field_mT") is not None for r in records)
-    xs = [r["magnet_field_mT"] if has_field else r["point_index"] for r in records]
+    has_current = any(r.get("magnet_current_A") is not None for r in records)
+    x_key = "magnet_field_mT" if has_field else "magnet_current_A" if has_current else "point_index"
+    xs = [r[x_key] for r in records]
     ax.plot(xs, [r["voltage_V"] for r in records], ".-", color="tab:blue")
     if show_2wire:
         ax2.plot(xs, [r.get("resistance_2w_ohm", float("nan")) for r in records], ".-", color="tab:orange")
         ax2.set_ylabel("2-wire R (Ω, 2450)")
         ax2.grid(alpha=0.3)
 
-    (ax2 if show_2wire else ax).set_xlabel("Magnetic field (mT)" if has_field else "Point #")
+    (ax2 if show_2wire else ax).set_xlabel({"magnet_field_mT": "Magnetic field (mT)",
+                                            "magnet_current_A": "Magnet current (A)"}.get(x_key, "Point #"))
     ax.set_ylabel("Voltage (V)")
     ax.set_title("Measurement result")
     ax.grid(alpha=0.3)
@@ -719,12 +745,13 @@ def build_plan(state: dict, data_root: Path) -> MeasurementPlan:
         voltage_compliance_V=state["voltage_compliance_V"],
         ramp_step_A=state["ramp_step_A"],
         ramp_delay_s=state["ramp_delay_s"],
+        model=state.get("magnet_model", "BOP 20-50GL"),
     )
     gauss_cfg = GaussmeterConfig(
         visa_resource=state["gaussmeter_visa_resource"],
         n_averages=state["gaussmeter_n_averages"],
         read_delay_s=state["gaussmeter_read_delay_s"],
-    )
+    ) if state.get("enable_gaussmeter", True) else None
     acq_cfg = AcquisitionConfig(
         settling_time_s=state["settling_time_s"],
         field_settle_tolerance_mT=state["field_settle_tolerance_mT"],
@@ -759,6 +786,8 @@ def build_plan(state: dict, data_root: Path) -> MeasurementPlan:
         "n_averages": state["n_averages"],
         "settling_time_s": state["settling_time_s"],
         "field_sweep_rows_A": state["sweep_rows_parsed"],
+        "magnet_model": magnet_cfg.model,
+        "gaussmeter_enabled": gauss_cfg is not None,
     }
     # A "series" tag only means something for an actual family of runs
     # (>1 sense current and/or >1 gate voltage) -- a single-run session
@@ -820,8 +849,9 @@ def run_plan(plan: MeasurementPlan, stop_event: threading.Event, *,
 
         on_status("Connecting magnet power supply …")
         magnet = connect_magnet(plan.magnet_cfg)
-        on_status("Connecting gaussmeter …")
-        gaussmeter = connect_gaussmeter(plan.gauss_cfg)
+        if plan.gauss_cfg is not None:
+            on_status("Connecting gaussmeter …")
+            gaussmeter = connect_gaussmeter(plan.gauss_cfg)
 
         n_currents = len(plan.sense_currents_A)
         n_gates = len(plan.gate_series_values)
@@ -919,7 +949,7 @@ class RunScreen(MeasurementRunScreen):
     MEASUREMENT_TYPE = MEASUREMENT_TYPE
 
     def live_plot_args(self):
-        return (_live_plot_worker, self.plan.show_2wire)
+        return (_live_plot_worker, self.plan.show_2wire, self.plan.gauss_cfg is not None)
 
     def table_row(self, record: dict) -> tuple:
         Isense = record.get("sense_current_A")
@@ -958,6 +988,7 @@ class DCSpinValveApp(MeasurementApp):
 
     SWITCH_DEPENDENTS = {
         "enable_gate": tuple(GATE_FIELD_IDS),
+        "enable_gaussmeter": tuple(GAUSS_FIELD_IDS),
         "use_2450": ("smu_source_voltage", "plot_2wire", "smu_visa_resource"),
         "smu_source_voltage": tuple(SMU_V_FIELD_IDS),
         "enable_temperature": tuple(TEMPERATURE_FIELD_IDS),
@@ -1016,6 +1047,9 @@ class DCSpinValveApp(MeasurementApp):
                         sweep_rows_field("sweep_rows", DEFAULTS["sweep_rows"]),
                         switch_field("bidirectional_sweep", "Bidirectional (retrace the merged rows)",
                                      DEFAULTS["bidirectional_sweep"]),
+                        switch_field("enable_gaussmeter", "Read field (Lake Shore 475)",
+                                     DEFAULTS["enable_gaussmeter"]),
+                        Label("Off: field column empty, plotted vs magnet current.", classes="hint"),
                     )
                     yield card(
                         "Sense source (Keithley 6221 / 2450)",
@@ -1112,6 +1146,9 @@ class DCSpinValveApp(MeasurementApp):
                         )
                         yield card(
                             "Magnet ramp safety",
+                            *select_field("magnet_model", "Kepco model",
+                                          [(m, m) for m in MAGNET_MODELS], DEFAULTS["magnet_model"],
+                                          hint="Same commands; the ratings differ."),
                             field("current_limit_A", "Software current limit (A)",
                                   DEFAULTS["current_limit_A"],
                                   hint="Hard safety ceiling."),

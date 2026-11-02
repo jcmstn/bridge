@@ -30,7 +30,8 @@ in a spintronics lab (Textual TUI front end).
 - **`finalize_index_row()` unconditionally** with the outcome status the
   instant a run ends, before any optional user status/comment prompt.
 - MercuryiTC is optional by design — `temp_ctrl=None` is never an error.
-  Kepco magnet + Lake Shore 475 are load-bearing in a field sweep.
+  Kepco magnet + Lake Shore 475 are load-bearing in a field sweep (exception:
+  the spin valve's "Read field" switch — off means no 475, plotted vs magnet current).
 - A run's data root comes from the identity bar "Data root" field
   (`MeasurementPlan.data_root`); `_DEFAULT_DATA_DIR` (`<repo>/../data`) is
   only the fallback.

@@ -1,5 +1,5 @@
 """
-Kepco BOP 20-50GL Bipolar Power Supply Driver
+Kepco BOP 20-50GL (and BOP 36-28MG) Bipolar Power Supply Driver
 Built on pymeasure's Instrument architecture (SCPIMixin — this is a
 genuinely SCPI/IEEE-488.2 instrument, unlike the LakeShore 475 or
 MercuryiTC drivers in this package which use proprietary command sets).
@@ -8,7 +8,17 @@ Author: Joacim Stenlund <joacim.stenlund@physics.uu.se>
 Created: 2026-07-29
 
 Interface: GPIB or RS-232C (9600 baud, 8N1)
-Firmware: 3.05+
+Firmware: 3.05+ (BOP-GL), 4.39+ (BOP-MG)
+
+BOP 36-28MG: the BOP-MG 1KW operator's manual (bop1kw-mg-opr-r20, firmware
+4.39-4.41) has the same SCPI command set as the BOP-GL 1KW manual: Table B-1
+lists the same commands under the same B.x paragraph numbers. Only the
+ratings differ (±36 V / ±28 A), so ``KepcoBOP3628MG`` below is the same
+driver with narrower ranges. Two behaviours differ that this driver handles
+either way: on the MG, ``*RST`` leaves the output on or off as set in the
+front-panel "*RST sets Output" menu (``connect_magnet`` re-sends ``OUTP ON``
+regardless), and the MG has a front-panel STANDBY key (= output off), which
+the operator must clear before a run.
 
 Usage example:
     from instruments.kepco_magnet import KepkoBOPGL
@@ -235,6 +245,7 @@ class KepkoBOPGL(SCPIMixin, Instrument):
         validator=strict_range,
         values=[-MAX_VOLTAGE, MAX_VOLTAGE],
         check_set_errors=True,
+        dynamic=True,   # ranges narrowed per model (KepcoBOP3628MG)
     )
 
     voltage_limit = Instrument.control(
@@ -246,6 +257,7 @@ class KepkoBOPGL(SCPIMixin, Instrument):
         validator=strict_range,
         values=[0, MAX_VOLTAGE],
         check_set_errors=True,
+        dynamic=True,   # ranges narrowed per model (KepcoBOP3628MG)
     )
 
     voltage_setpoint_max = Instrument.control(
@@ -266,6 +278,7 @@ class KepkoBOPGL(SCPIMixin, Instrument):
         validator=strict_range,
         values=[0, MAX_VOLTAGE],
         check_set_errors=True,
+        dynamic=True,   # ranges narrowed per model (KepcoBOP3628MG)
     )
 
     # ------------------------------------------------------------------ #
@@ -280,6 +293,7 @@ class KepkoBOPGL(SCPIMixin, Instrument):
         validator=strict_range,
         values=[-MAX_CURRENT, MAX_CURRENT],
         check_set_errors=True,
+        dynamic=True,   # ranges narrowed per model (KepcoBOP3628MG)
     )
 
     current_limit = Instrument.control(
@@ -291,6 +305,7 @@ class KepkoBOPGL(SCPIMixin, Instrument):
         validator=strict_range,
         values=[0, MAX_CURRENT],
         check_set_errors=True,
+        dynamic=True,   # ranges narrowed per model (KepcoBOP3628MG)
     )
 
     current_setpoint_max = Instrument.control(
@@ -314,6 +329,7 @@ class KepkoBOPGL(SCPIMixin, Instrument):
         validator=strict_range,
         values=[0, MAX_CURRENT],
         check_set_errors=True,
+        dynamic=True,   # ranges narrowed per model (KepcoBOP3628MG)
     )
 
     def raise_range_limits_to_max(self, persist: bool = False) -> None:
@@ -467,6 +483,28 @@ class KepkoBOPGL(SCPIMixin, Instrument):
         self.close()
 
 
+class KepcoBOP3628MG(KepkoBOPGL):
+    """Kepco BOP 36-28MG (BOP-MG 1KW, GPIB). Same SCPI command set as the
+    BOP-GL (see the module docstring); only the ratings differ."""
+
+    MAX_VOLTAGE: float = 36.0   # V
+    MAX_CURRENT: float = 28.0   # A
+
+    voltage_values = [-MAX_VOLTAGE, MAX_VOLTAGE]
+    voltage_limit_values = [0, MAX_VOLTAGE]
+    voltage_setpoint_max_values = [0, MAX_VOLTAGE]
+    current_values = [-MAX_CURRENT, MAX_CURRENT]
+    current_limit_values = [0, MAX_CURRENT]
+    current_setpoint_max_values = [0, MAX_CURRENT]
+
+    def __init__(self, adapter, name="Kepco BOP 36-28MG Bipolar Power Supply", **kwargs):
+        super().__init__(adapter, name, **kwargs)
+
+
+# Model name (MagnetConfig.model) -> driver class.
+MAGNET_MODELS = {"BOP 20-50GL": KepkoBOPGL, "BOP 36-28MG": KepcoBOP3628MG}
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Shared controller  ── used directly by the DC measurement scripts ───────────
 # ─────────────────────────────────────────────────────────────────────────────
@@ -482,6 +520,7 @@ class MagnetConfig:
     voltage_compliance_V: float = 20.0    # CC-mode compliance / OVP limit  [V]
     ramp_step_A:          float = 0.1     # Ramp step size  [A]
     ramp_delay_s:         float = 0.05    # Delay between ramp steps  [s]
+    model:                str   = "BOP 20-50GL"   # key of MAGNET_MODELS
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -519,14 +558,14 @@ def _window_settled(readings: list, tol: float) -> bool:
 
 def connect_magnet(cfg: MagnetConfig) -> "KepkoBOPGL":
     """
-    Open a VISA session to the Kepco BOP-GL and arm it as a current source.
+    Open a VISA session to the Kepco (``cfg.model``) and arm it as a current source.
 
     Clears stale CURR:LIM/VOLT:LIM setpoint ceilings back to the supply's
     full rating (independent of, and not restored by, *RST), then puts it
     in constant-current mode with the configured software compliance
     voltage and current limit.
     """
-    psu = KepkoBOPGL(cfg.visa_resource, timeout=5000)
+    psu = MAGNET_MODELS[cfg.model](cfg.visa_resource, timeout=5000)
 
     psu.reset()
     psu.clear()
@@ -538,8 +577,8 @@ def connect_magnet(cfg: MagnetConfig) -> "KepkoBOPGL":
     psu.enable_output()
 
     log.info(
-        "Magnet connected: %s  mode=CC  compliance=%.2f V  I_limit=±%.2f A",
-        cfg.visa_resource, cfg.voltage_compliance_V, cfg.current_limit_A,
+        "Magnet connected: %s (%s)  mode=CC  compliance=%.2f V  I_limit=±%.2f A",
+        cfg.visa_resource, cfg.model, cfg.voltage_compliance_V, cfg.current_limit_A,
     )
     return psu
 

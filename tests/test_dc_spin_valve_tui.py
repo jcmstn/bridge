@@ -194,3 +194,39 @@ def test_build_plan_2450_modes(tmp_path: Path) -> None:
     assert volt.sense_currents_A == [0.1, 0.2]
     assert volt.header_extra["source_instrument"] == "2450"
     assert volt.series != ""
+
+
+def test_magnet_model_and_gaussmeter_off(tmp_path: Path) -> None:
+    from instruments.kepco_magnet import KepcoBOP3628MG
+
+    app = tui.DCSpinValveApp()
+    app.data_root = tmp_path
+
+    plan = app._build_plan(_state())
+    assert plan.magnet_cfg.model == "BOP 20-50GL" and plan.gauss_cfg is not None
+
+    plan = app._build_plan(_state(magnet_model="BOP 36-28MG", enable_gaussmeter=False))
+    assert plan.magnet_cfg.model == "BOP 36-28MG"
+    assert plan.gauss_cfg is None
+    assert plan.header_extra["gaussmeter_enabled"] is False
+    assert KepcoBOP3628MG.current_values == [-28.0, 28.0]
+
+    # the 20-50GL default limit (35 A) is above the 36-28MG rating -> blocks Start
+    state = _state(magnet_model="BOP 36-28MG", enable_gaussmeter=False, data_dir=str(tmp_path),
+                   sweep_rows="-20, 20, 21", gate_voltage_values="0", sense_current_values="0.001",
+                   source_voltage_values="0.1", temperature_setpoint_K=None)
+    state = tui.resolve_state(state)
+    errors = tui.build_summary(state)[2]
+    assert any("rating (28 A)" in e for e in errors)
+    info = tui.build_summary({**state, "current_limit_A": 25.0})[0]
+    assert any("Field read: off" in line for line in info)
+    assert not any("field read" in line for line in info if line.startswith("Run time"))
+
+
+def test_png_without_gaussmeter_plots_vs_magnet_current(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+    recs = [dict(point_index=i, magnet_current_A=float(i), magnet_field_mT=None,
+                 voltage_V=0.1, sense_current_A=1e-3) for i in range(3)]
+    png = tmp_path / "sv.png"
+    tui._save_measurement_png(recs, png, plan=SimpleNamespace(smu_cfg=None, show_2wire=False))
+    assert png.exists()
