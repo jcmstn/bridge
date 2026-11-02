@@ -16,6 +16,7 @@ magnet is ramped back to 0 A before the script exits.
 """
 
 import csv
+import logging
 import time
 from datetime import datetime
 from pathlib import Path
@@ -98,12 +99,14 @@ def preflight() -> None:
 
 
 def main() -> None:
+    # Show the drivers' connect / settle-timeout messages in the terminal.
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(message)s", datefmt="%H:%M:%S")
     preflight()
     print(f"{MAGNET_MODEL} @ {MAGNET_GPIB}, Lake Shore 475 @ {GAUSSMETER_GPIB}")
     print(f"{len(SWEEP_A)} points, {min(SWEEP_A):g} … {max(SWEEP_A):g} A  (limit ±{CURRENT_LIMIT_A:g} A, "
           f"compliance {VOLTAGE_COMPLIANCE_V:g} V)")
     print(f"Saving to {OUTPUT_CSV}")
-    input("Enter to start, Ctrl-C to abort … ")
+    input("\n>>> Press Enter to start (Ctrl-C to abort): ")
 
     mcfg = MagnetConfig(visa_resource=MAGNET_GPIB, model=MAGNET_MODEL,
                         current_limit_A=CURRENT_LIMIT_A, voltage_compliance_V=VOLTAGE_COMPLIANCE_V,
@@ -112,7 +115,6 @@ def main() -> None:
                             n_averages=N_AVERAGES, read_delay_s=READ_DELAY_S)
 
     OUTPUT_CSV.parent.mkdir(parents=True, exist_ok=True)
-    gm = connect_gaussmeter(gcfg)
     psu = None
     I_done, B_done = [], []
 
@@ -125,8 +127,12 @@ def main() -> None:
     ax.set_title(f"{MAGNET_MODEL} calibration")
     ax.grid(True)
     plt.show()
+    plt.pause(0.1)   # actually draw the window now, not after the first point
 
+    print("Connecting gaussmeter …")
+    gm = connect_gaussmeter(gcfg)
     try:
+        print("Connecting magnet …")
         psu = connect_magnet(mcfg)
         t0 = time.monotonic()
         with open(OUTPUT_CSV, "w", newline="") as f:
@@ -134,6 +140,7 @@ def main() -> None:
             w.writerow(COLUMNS)
             for n, I in enumerate(SWEEP_A):
                 I = float(I)
+                print(f"[{n + 1:>3}/{len(SWEEP_A)}]  ramping to {I:g} A, waiting for field to settle …")
                 st = set_magnet_current(psu, mcfg, I, gaussmeter=gm, gauss_cfg=gcfg,
                                         field_settle_tolerance_mT=SETTLE_TOLERANCE_MT)
                 time.sleep(EXTRA_WAIT_S)
